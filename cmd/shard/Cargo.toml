@@ -1,0 +1,11 @@
+[package]
+name = "shard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shard-core = { path = "../../core" }
+shard-crypto = { path = "../../crypto" }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
