@@ -117,14 +117,8 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 
     // 4. Sign
     // Load keys
-    // For now, we need to load keys. KeyPair needs a load method.
-    // I'll implement a quick load here or assume keys exist.
-    // I need to update KeyPair to support loading.
-    // For now, I'll just skip signing or try to load raw bytes.
-
-    let secret_key_path = shard_dir.join("keys/secret.key");
-    let secret_bytes = fs::read(secret_key_path)?;
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(secret_bytes.as_slice().try_into()?);
+    let keys = KeyPair::load(&shard_dir.join("keys"))?;
+    let signing_key = keys.signing_key;
 
     // Canonical JSON for signing (without signature)
     let json_unsigned = serde_json::to_vec(&commit)?;

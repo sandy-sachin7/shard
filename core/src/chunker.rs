@@ -57,7 +57,7 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn test_chunking() {
+    fn test_chunking_small() {
         let data = vec![0u8; 1024];
         let reader = Cursor::new(&data);
         let mut chunker = Chunker::new(reader);
@@ -65,6 +65,48 @@ mod tests {
         let chunk = chunker.next_chunk().unwrap().unwrap();
         assert_eq!(chunk.data.len(), 1024);
         assert_eq!(chunk.offset, 0);
+
+        let next = chunker.next_chunk().unwrap();
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn test_chunking_exact() {
+        let data = vec![0u8; CHUNK_SIZE];
+        let reader = Cursor::new(&data);
+        let mut chunker = Chunker::new(reader);
+
+        let chunk = chunker.next_chunk().unwrap().unwrap();
+        assert_eq!(chunk.data.len(), CHUNK_SIZE);
+        assert_eq!(chunk.offset, 0);
+
+        let next = chunker.next_chunk().unwrap();
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn test_chunking_large() {
+        let data = vec![0u8; CHUNK_SIZE + 1024];
+        let reader = Cursor::new(&data);
+        let mut chunker = Chunker::new(reader);
+
+        let chunk1 = chunker.next_chunk().unwrap().unwrap();
+        assert_eq!(chunk1.data.len(), CHUNK_SIZE);
+        assert_eq!(chunk1.offset, 0);
+
+        let chunk2 = chunker.next_chunk().unwrap().unwrap();
+        assert_eq!(chunk2.data.len(), 1024);
+        assert_eq!(chunk2.offset, CHUNK_SIZE as u64);
+
+        let next = chunker.next_chunk().unwrap();
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn test_chunking_empty() {
+        let data = vec![];
+        let reader = Cursor::new(&data);
+        let mut chunker = Chunker::new(reader);
 
         let next = chunker.next_chunk().unwrap();
         assert!(next.is_none());

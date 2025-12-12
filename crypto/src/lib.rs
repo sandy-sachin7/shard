@@ -27,4 +27,14 @@ impl KeyPair {
         fs::write(path.join("public.key"), pub_bytes)?;
         Ok(())
     }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let secret_bytes = fs::read(path.join("secret.key"))?;
+        let pub_bytes = fs::read(path.join("public.key"))?;
+
+        let signing_key = SigningKey::from_bytes(secret_bytes.as_slice().try_into()?);
+        let verifying_key = VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?;
+
+        Ok(Self { signing_key, verifying_key })
+    }
 }
