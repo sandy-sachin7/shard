@@ -26,6 +26,10 @@ enum Commands {
         #[arg(long, default_value = "User <user@example.com>")]
         author: String,
     },
+    /// Verify the integrity of a commit
+    Verify {
+        commit_id: String,
+    },
 }
 
 #[tokio::main]
@@ -44,6 +48,10 @@ async fn main() -> Result<()> {
         Commands::Commit { message, author } => {
             let current_dir = env::current_dir()?;
             shard_core::commit(&current_dir, message, author)?;
+        }
+        Commands::Verify { commit_id } => {
+            let current_dir = env::current_dir()?;
+            shard_core::verify(&current_dir, commit_id)?;
         }
     }
 

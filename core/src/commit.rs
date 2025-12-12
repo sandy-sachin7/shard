@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Commit {
     pub commit_id: String, // Self-reference? No, usually computed after.
     // But spec says "Commit node: JSON with commit_id...".

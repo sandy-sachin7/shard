@@ -14,7 +14,7 @@ use crate::manifest::FileManifest;
 use crate::index::Index;
 use crate::commit::Commit;
 use std::time::{SystemTime, UNIX_EPOCH};
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signer, Verifier};
 
 pub fn init(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
@@ -146,5 +146,103 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     fs::write(head_path, &commit_id)?;
 
     println!("Committed {} ({})", commit_id, message);
+    Ok(())
+}
+
+pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let store = Store::new(&shard_dir);
+
+    // 1. Load commit
+    // We need a way to get chunk by hash. Store::get_chunk?
+    // I implemented put_chunk but not get_chunk.
+    // I'll implement get_chunk in Store first or just read file here.
+    // Store::get_chunk is better.
+
+    // For now, I'll read directly to avoid changing Store interface in this step if possible.
+    // But Store encapsulates path logic.
+    // I'll add get_chunk to Store in a separate step or just duplicate path logic here?
+    // Duplicate for speed, then refactor.
+
+    let prefix = &commit_id[..2];
+    let filename = commit_id;
+    let obj_path = shard_dir.join("objects").join(prefix).join(filename);
+
+    if !obj_path.exists() {
+        anyhow::bail!("Commit object not found: {}", commit_id);
+    }
+
+    let data = fs::read(obj_path)?;
+    let commit: Commit = serde_json::from_slice(&data)?;
+
+    // 2. Verify signature
+    if let Some(sig_hex) = &commit.signature {
+        // We need the public key.
+        // For local verification, we use the local public key?
+        // Or the author's public key?
+        // The commit doesn't store the public key, only the signature.
+        // We assume the local keypair is the author for now.
+        // Or we should store the public key in the commit or look it up.
+        // "Keys are stored in ~/.shard/keys and per-repo config references them."
+        // For Phase 1, I'll use the local public key.
+
+        let pub_key_path = shard_dir.join("keys/public.key");
+        let pub_bytes = fs::read(pub_key_path)?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?;
+
+        // Reconstruct unsigned JSON
+        let mut unsigned_commit = commit.clone(); // Need Clone for Commit
+        unsigned_commit.signature = None;
+        let json_unsigned = serde_json::to_vec(&unsigned_commit)?;
+
+        let sig_bytes = hex::decode(sig_hex)?;
+        let signature = ed25519_dalek::Signature::from_bytes(sig_bytes.as_slice().try_into()?);
+
+        verifying_key.verify(&json_unsigned, &signature)?;
+        println!("Signature verified.");
+    } else {
+        println!("Warning: Commit is unsigned.");
+    }
+
+    // 3. Verify manifests
+    for manifest_id in &commit.manifests {
+        let prefix = &manifest_id[..2];
+        let path = shard_dir.join("objects").join(prefix).join(manifest_id);
+        if !path.exists() {
+            anyhow::bail!("Manifest missing: {}", manifest_id);
+        }
+
+        let data = fs::read(path)?;
+        // Verify hash
+        let hash = blake3::hash(&data);
+        if hash.to_hex().to_string() != *manifest_id {
+            anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
+        }
+
+        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        println!("Verifying file: {}", manifest.name);
+
+        // 4. Verify chunks
+        for chunk_id in &manifest.chunks {
+            let prefix = &chunk_id[..2];
+            let path = shard_dir.join("objects").join(prefix).join(chunk_id);
+            if !path.exists() {
+                anyhow::bail!("Chunk missing: {}", chunk_id);
+            }
+            // Optional: Verify chunk hash (expensive for large files)
+            // For "verify" command, we SHOULD verify content.
+            let data = fs::read(path)?;
+            let hash = blake3::hash(&data);
+            if hash.to_hex().to_string() != *chunk_id {
+                anyhow::bail!("Chunk hash mismatch: {}", chunk_id);
+            }
+        }
+    }
+
+    println!("Verification successful.");
     Ok(())
 }

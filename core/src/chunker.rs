@@ -50,3 +50,23 @@ impl<R: Read> Chunker<R> {
         Ok(Some(chunk))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_chunking() {
+        let data = vec![0u8; 1024];
+        let reader = Cursor::new(&data);
+        let mut chunker = Chunker::new(reader);
+
+        let chunk = chunker.next_chunk().unwrap().unwrap();
+        assert_eq!(chunk.data.len(), 1024);
+        assert_eq!(chunk.offset, 0);
+
+        let next = chunker.next_chunk().unwrap();
+        assert!(next.is_none());
+    }
+}
