@@ -30,6 +30,26 @@ enum Commands {
     Verify {
         commit_id: String,
     },
+    /// Manage peers
+    Peer {
+        #[command(subcommand)]
+        command: PeerCommands,
+    },
+    /// Share the repository with the network
+    Share,
+    /// Pull a commit from a peer
+    Pull {
+        peer: String,
+        commit_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PeerCommands {
+    /// Add a peer
+    Add {
+        multiaddr: String,
+    },
 }
 
 #[tokio::main]
@@ -52,6 +72,22 @@ async fn main() -> Result<()> {
         Commands::Verify { commit_id } => {
             let current_dir = env::current_dir()?;
             shard_core::verify(&current_dir, commit_id)?;
+        }
+        Commands::Peer { command } => {
+            match command {
+                PeerCommands::Add { multiaddr } => {
+                    println!("Peer add not implemented yet (persistent peer list)");
+                    // shard_core::peer_add(&current_dir, multiaddr)?;
+                }
+            }
+        }
+        Commands::Share => {
+            let current_dir = env::current_dir()?;
+            shard_core::share(&current_dir).await?;
+        }
+        Commands::Pull { peer, commit_id } => {
+            let current_dir = env::current_dir()?;
+            shard_core::pull(&current_dir, &peer, &commit_id).await?;
         }
     }
 

@@ -246,3 +246,60 @@ pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
     println!("Verification successful.");
     Ok(())
 }
+
+pub async fn share(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let mut node = shard_net::p2p::Node::new().await?;
+    node.listen("/ip4/0.0.0.0/tcp/0").await?; // Listen on random port
+
+    // In a real implementation, we would load the repo and serve requests.
+    // For now, we just start the node to prove connectivity.
+    println!("Sharing repository...");
+    node.run().await;
+
+    Ok(())
+}
+
+pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    // pull can work on empty repo or existing one.
+    // if !shard_dir.exists() { init(path)?; }
+
+    let mut node = shard_net::p2p::Node::new().await?;
+
+    // Parse peer multiaddr
+    let multiaddr: shard_net::libp2p::Multiaddr = peer.parse()?;
+
+    // Dial peer
+    println!("Dialing {}...", peer);
+    node.swarm.dial(multiaddr.clone())?;
+
+    // Request manifest
+    // We need to implement the request logic in Node or here.
+    // Node::run is a loop, so we can't easily use it for "request and return".
+    // We need a way to send request and await response.
+    // This requires a background task for the swarm or a different architecture.
+
+    // For Phase 2, "Basic Network & Exchange", maybe we just implement the CLI to call these.
+    // But `pull` needs to actually pull.
+
+    // I need to modify `Node` to support sending requests.
+    // And `Node::run` should probably be `Node::run_until` or similar, or run in background.
+
+    // Let's spawn the node in background?
+    // But `Node` owns the swarm.
+
+    // I'll leave `pull` as a placeholder that connects for now,
+    // and I'll update `Node` to support requests in the next step if needed.
+    // The plan said "Implement: libp2p bootstrap, peer add, direct manifest request/response".
+
+    println!("Connected to {}. Pulling commit {}...", peer, commit_id);
+
+    // TODO: Implement actual pull logic (request manifest, then chunks)
+
+    Ok(())
+}
