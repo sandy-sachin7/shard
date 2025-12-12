@@ -37,12 +37,21 @@ shard commit -m "Initial commit"
 ### Verify a commit
 ```bash
 shard verify <commit_id>
+### Share repository
+```bash
+shard share
+# Output: Listening on /ip4/127.0.0.1/tcp/XXXXX
+```
+
+### Pull from peer
+```bash
+shard pull <multiaddr> <commit_id>
 ```
 
 ## Roadmap
 
 *   [x] Phase 1: Local Core (Init, Add, Commit, Verify)
-*   [ ] Phase 2: Basic Network & Exchange (P2P, Pull, Share)
+*   [x] Phase 2: Basic Network & Exchange (P2P, Pull, Share)
 *   [ ] Phase 3: PubSub & Parallel Sync
 *   [ ] Phase 4: Security & Provenance
 
