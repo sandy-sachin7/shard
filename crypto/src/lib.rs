@@ -1,14 +1,30 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
+use anyhow::Result;
+use std::fs;
+use std::path::Path;
+
+pub struct KeyPair {
+    pub signing_key: SigningKey,
+    pub verifying_key: VerifyingKey,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl KeyPair {
+    pub fn generate() -> Self {
+        let mut csprng = OsRng;
+        let mut bytes = [0u8; 32];
+        use rand::RngCore;
+        csprng.fill_bytes(&mut bytes);
+        let signing_key = SigningKey::from_bytes(&bytes);
+        let verifying_key = signing_key.verifying_key();
+        Self { signing_key, verifying_key }
+    }
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let bytes = self.signing_key.to_bytes();
+        fs::write(path.join("secret.key"), bytes)?;
+        let pub_bytes = self.verifying_key.to_bytes();
+        fs::write(path.join("public.key"), pub_bytes)?;
+        Ok(())
     }
 }

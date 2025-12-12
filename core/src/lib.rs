@@ -1,14 +1,19 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+use std::path::Path;
+use anyhow::Result;
+use std::fs;
+use shard_crypto::KeyPair;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+pub fn init(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if shard_dir.exists() {
+        anyhow::bail!("Shard repository already initialized");
     }
+    fs::create_dir_all(shard_dir.join("objects"))?;
+    fs::create_dir_all(shard_dir.join("keys"))?;
+
+    let keys = KeyPair::generate();
+    keys.save(&shard_dir.join("keys"))?;
+
+    println!("Initialized empty Shard repository in {}", shard_dir.display());
+    Ok(())
 }
