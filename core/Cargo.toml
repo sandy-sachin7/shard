@@ -12,3 +12,5 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 shard-crypto = { path = "../crypto" }
 shard-storage = { path = "../storage" }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }

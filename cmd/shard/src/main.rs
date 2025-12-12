@@ -19,6 +19,13 @@ enum Commands {
     Add {
         path: PathBuf,
     },
+    /// Record changes to the repository
+    Commit {
+        #[arg(short, long)]
+        message: String,
+        #[arg(long, default_value = "User <user@example.com>")]
+        author: String,
+    },
 }
 
 #[tokio::main]
@@ -33,6 +40,10 @@ async fn main() -> Result<()> {
         Commands::Add { path } => {
             let current_dir = env::current_dir()?;
             shard_core::add(&current_dir, path)?;
+        }
+        Commands::Commit { message, author } => {
+            let current_dir = env::current_dir()?;
+            shard_core::commit(&current_dir, message, author)?;
         }
     }
 
