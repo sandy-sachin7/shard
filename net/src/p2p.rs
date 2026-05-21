@@ -376,6 +376,27 @@ impl Node {
         }
     }
 
+    pub fn subscribe(&mut self, topic: &gossipsub::IdentTopic) -> Result<()> {
+        self.swarm.behaviour_mut().gossipsub.subscribe(topic)?;
+        Ok(())
+    }
+
+    pub fn publish(
+        &mut self,
+        topic: &gossipsub::IdentTopic,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<()> {
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic.clone(), data)?;
+        Ok(())
+    }
+
+    pub fn local_peer_id(&self) -> PeerId {
+        *self.swarm.local_peer_id()
+    }
+
     pub async fn wait_for_peer(&mut self, peer: PeerId) -> Result<()> {
         loop {
             match self.swarm.select_next_some().await {

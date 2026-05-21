@@ -13,6 +13,8 @@ use anyhow::Result;
 use ed25519_dalek::{Signer, Verifier};
 use serde::Serialize;
 use shard_crypto::KeyPair;
+use shard_net::libp2p::futures::StreamExt;
+use shard_net::p2p::ShardContentProvider;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -750,6 +752,168 @@ pub async fn share(path: &Path) -> Result<()> {
     node.run(provider).await;
 
     Ok(())
+}
+
+pub async fn sync(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let topic_str = format!(
+        "/shard/repo/{}",
+        blake3::hash(shard_dir.to_string_lossy().as_bytes()).to_hex()
+    );
+    let topic = shard_net::libp2p::gossipsub::IdentTopic::new(topic_str);
+
+    let mut node = shard_net::p2p::Node::new().await?;
+    node.subscribe(&topic)?;
+
+    let head_path = shard_dir.join("HEAD");
+    if head_path.exists() {
+        let head = fs::read_to_string(&head_path)?;
+        let head = head.trim().to_string();
+        let msg = format!("announce:{}", head);
+        node.publish(&topic, msg.as_bytes())?;
+        println!("Announced commit {} on sync topic", head);
+    } else {
+        println!("No commits to announce");
+    }
+
+    println!("Syncing on topic with peer id: {}", node.local_peer_id());
+
+    let store = Store::new(&shard_dir);
+    let provider = RepoProvider { store };
+
+    loop {
+        match node.swarm.select_next_some().await {
+            shard_net::libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
+                println!("Listening on {address:?}");
+            }
+            shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                shard_net::p2p::ShardBehaviourEvent::Mdns(
+                    shard_net::libp2p::mdns::Event::Discovered(list),
+                ),
+            ) => {
+                for (peer_id, multiaddr) in list {
+                    println!("mDNS discovered: {peer_id} {multiaddr}");
+                    node.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .add_explicit_peer(&peer_id);
+                    node.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, multiaddr);
+                }
+            }
+            shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                shard_net::p2p::ShardBehaviourEvent::Mdns(shard_net::libp2p::mdns::Event::Expired(
+                    list,
+                )),
+            ) => {
+                for (peer_id, _multiaddr) in list {
+                    println!("mDNS expired: {peer_id}");
+                    node.swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .remove_explicit_peer(&peer_id);
+                }
+            }
+            shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                shard_net::p2p::ShardBehaviourEvent::Gossipsub(
+                    shard_net::libp2p::gossipsub::Event::Message {
+                        propagation_source,
+                        message,
+                        ..
+                    },
+                ),
+            ) => {
+                if let Ok(text) = String::from_utf8(message.data.clone()) {
+                    if let Some(commit_id) = text.strip_prefix("announce:") {
+                        println!(
+                            "Peer {} announced commit: {}",
+                            propagation_source, commit_id
+                        );
+                    }
+                }
+            }
+            shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                shard_net::p2p::ShardBehaviourEvent::RequestResponse(
+                    shard_net::libp2p::request_response::Event::Message { peer: _, message },
+                ),
+            ) => {
+                if let shard_net::libp2p::request_response::Message::Request {
+                    request,
+                    channel,
+                    ..
+                } = message
+                {
+                    match request {
+                        shard_net::protocol::ShardRequest::GetManifest(id) => {
+                            if let Some(data) = provider.get_manifest(&id) {
+                                let _ = node.swarm.behaviour_mut().request_response.send_response(
+                                    channel,
+                                    shard_net::protocol::ShardResponse::Manifest(data),
+                                );
+                            } else {
+                                let _ = node.swarm.behaviour_mut().request_response.send_response(
+                                    channel,
+                                    shard_net::protocol::ShardResponse::NotFound,
+                                );
+                            }
+                        }
+                        shard_net::protocol::ShardRequest::GetChunk(id) => {
+                            if let Some(data) = provider.get_chunk(&id) {
+                                let _ = node.swarm.behaviour_mut().request_response.send_response(
+                                    channel,
+                                    shard_net::protocol::ShardResponse::Chunk(data),
+                                );
+                            } else {
+                                let _ = node.swarm.behaviour_mut().request_response.send_response(
+                                    channel,
+                                    shard_net::protocol::ShardResponse::NotFound,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                shard_net::p2p::ShardBehaviourEvent::RequestResponse(
+                    shard_net::libp2p::request_response::Event::OutboundFailure {
+                        peer, error, ..
+                    },
+                ),
+            ) => {
+                eprintln!("Outbound failure to {}: {:?}", peer, error);
+            }
+            shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                shard_net::p2p::ShardBehaviourEvent::RequestResponse(
+                    shard_net::libp2p::request_response::Event::InboundFailure {
+                        peer, error, ..
+                    },
+                ),
+            ) => {
+                eprintln!("Inbound failure from {}: {:?}", peer, error);
+            }
+            shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                shard_net::p2p::ShardBehaviourEvent::Identify(event),
+            ) => {
+                println!("Identify event: {:?}", event);
+            }
+            shard_net::libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                println!("Connection established with {}", peer_id);
+                node.swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .add_explicit_peer(&peer_id);
+            }
+            e => {
+                println!("Event: {:?}", e);
+            }
+        }
+    }
 }
 
 pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {

@@ -71,6 +71,8 @@ enum Commands {
     },
     /// Prune unreachable objects
     Prune,
+    /// Sync with peers via pubsub announcements
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -168,6 +170,10 @@ async fn main() -> Result<()> {
         Commands::Prune => {
             let current_dir = env::current_dir()?;
             shard_core::prune(&current_dir)?;
+        }
+        Commands::Sync => {
+            let current_dir = env::current_dir()?;
+            shard_core::sync(&current_dir).await?;
         }
     }
 
