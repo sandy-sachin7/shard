@@ -16,7 +16,7 @@ use libp2p::{
 pub struct ShardBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub kademlia: kad::Behaviour<MemoryStore>,
-    pub request_response: request_response::json::Behaviour<ShardRequest, ShardResponse>,
+    pub request_response: request_response::cbor::Behaviour<ShardRequest, ShardResponse>,
     pub mdns: mdns::tokio::Behaviour,
     pub identify: libp2p::identify::Behaviour,
     pub ping: ping::Behaviour,
@@ -52,8 +52,8 @@ impl Node {
                 let store = MemoryStore::new(local_peer_id);
                 let kademlia = kad::Behaviour::new(local_peer_id, store);
 
-                // Request-Response
-                let request_response = request_response::json::Behaviour::new(
+                // Request-Response (CBOR for compact binary encoding)
+                let request_response = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new("/shard/1"), ProtocolSupport::Full)],
                     request_response::Config::default(),
                 );

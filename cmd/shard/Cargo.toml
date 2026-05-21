@@ -9,3 +9,7 @@ shard-crypto = { path = "../../crypto" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+walkdir = { workspace = true }
