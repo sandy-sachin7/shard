@@ -42,6 +42,8 @@ enum Commands {
     },
     /// Checkout files from a commit
     Checkout { commit_id: String },
+    /// Show working tree status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -92,6 +94,10 @@ async fn main() -> Result<()> {
         Commands::Checkout { commit_id } => {
             let current_dir = env::current_dir()?;
             shard_core::checkout(&current_dir, commit_id)?;
+        }
+        Commands::Status => {
+            let current_dir = env::current_dir()?;
+            shard_core::status(&current_dir)?;
         }
     }
 

@@ -77,7 +77,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     }
 
     let store = Store::new(&shard_dir);
-    let index = Index::load(&shard_dir.join("index"))?;
+    let mut index = Index::load(&shard_dir.join("index"))?;
 
     if index.files.is_empty() {
         anyhow::bail!("Nothing to commit");
@@ -142,6 +142,10 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     // 6. Update HEAD
     let commit_id = hash.to_hex().to_string();
     fs::write(head_path, &commit_id)?;
+
+    // 7. Clear index
+    index.files.clear();
+    index.save(&shard_dir.join("index"))?;
 
     println!("Committed {} ({})", commit_id, message);
     Ok(())
@@ -365,6 +369,80 @@ pub fn checkout(path: &Path, commit_id: &str) -> Result<()> {
     }
 
     println!("Checkout complete.");
+    Ok(())
+}
+
+pub fn status(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let head_path = shard_dir.join("HEAD");
+    if head_path.exists() {
+        let head = fs::read_to_string(&head_path)?;
+        println!("On commit: {}", head.trim());
+    } else {
+        println!("No commits yet.");
+    }
+
+    let index = Index::load(&shard_dir.join("index"))?;
+    if index.files.is_empty() {
+        println!("Nothing staged.");
+    } else {
+        println!("\nStaged files:");
+        for name in index.files.keys() {
+            println!("  {} (to be committed)", name);
+        }
+    }
+
+    let tracked_names: std::collections::HashSet<String> =
+        if let Ok(head) = fs::read_to_string(&head_path) {
+            let head = head.trim().to_string();
+            let mut names = std::collections::HashSet::new();
+            if let Ok(commit) = load_commit(&shard_dir, &head) {
+                let store = Store::new(&shard_dir);
+                for manifest_id in &commit.manifests {
+                    if let Ok(data) = store.get_chunk(manifest_id) {
+                        if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&data) {
+                            let file_path = path.join(&manifest.name);
+                            if !file_path.exists() {
+                                println!("\nDeleted files:");
+                                println!("  {} (deleted)", manifest.name);
+                            }
+                            names.insert(manifest.name);
+                        }
+                    }
+                }
+            }
+            names
+        } else {
+            std::collections::HashSet::new()
+        };
+
+    let mut untracked = Vec::new();
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(ftype) = entry.file_type() {
+                if ftype.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !name.starts_with('.')
+                        && !index.files.contains_key(&name)
+                        && !tracked_names.contains(&name)
+                    {
+                        untracked.push(name);
+                    }
+                }
+            }
+        }
+    }
+    if !untracked.is_empty() {
+        println!("\nUntracked files:");
+        for name in &untracked {
+            println!("  {}", name);
+        }
+    }
+
     Ok(())
 }
 

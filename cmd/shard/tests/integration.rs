@@ -349,3 +349,45 @@ fn test_checkout_wrong_commit_fails() {
     .unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn test_status_after_init() {
+    let dir = repo_dir("status-init");
+    shard(&["init"], &dir).output().unwrap();
+    let output = shard(&["status"], &dir).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("No commits"));
+}
+
+#[test]
+fn test_status_after_commit() {
+    let dir = repo_dir("status-commit");
+    shard(&["init"], &dir).output().unwrap();
+    fs::write(dir.join("f.txt"), b"data").unwrap();
+    shard(&["add", "f.txt"], &dir).output().unwrap();
+    shard(&["commit", "-m", "first", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    let output = shard(&["status"], &dir).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("On commit"));
+    assert!(stdout.contains("Nothing staged"));
+}
+
+#[test]
+fn test_status_shows_untracked() {
+    let dir = repo_dir("status-untracked");
+    shard(&["init"], &dir).output().unwrap();
+    fs::write(dir.join("tracked.txt"), b"tracked").unwrap();
+    shard(&["add", "tracked.txt"], &dir).output().unwrap();
+    shard(&["commit", "-m", "first", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    fs::write(dir.join("untracked.txt"), b"untracked").unwrap();
+    let output = shard(&["status"], &dir).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("untracked.txt"));
+}
