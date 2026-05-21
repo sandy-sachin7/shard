@@ -279,3 +279,73 @@ fn test_log_empty_repo_fails() {
     let output = shard(&["log"], &dir).output().unwrap();
     assert!(!output.status.success());
 }
+
+#[test]
+fn test_checkout_restores_files() {
+    let dir = repo_dir("checkout-test");
+    shard(&["init"], &dir).output().unwrap();
+
+    fs::write(dir.join("hello.txt"), b"Hello, checkout!").unwrap();
+    shard(&["add", "hello.txt"], &dir).output().unwrap();
+    let output = shard(&["commit", "-m", "checkout-me", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    // Remove the file
+    fs::remove_file(dir.join("hello.txt")).unwrap();
+
+    // Checkout restores it
+    let output = shard(&["checkout", &commit_id], &dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "checkout failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join("hello.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir.join("hello.txt")).unwrap(),
+        "Hello, checkout!"
+    );
+}
+
+#[test]
+fn test_checkout_multiple_files() {
+    let dir = repo_dir("checkout-multi");
+    shard(&["init"], &dir).output().unwrap();
+
+    fs::write(dir.join("a.txt"), b"AAA").unwrap();
+    fs::write(dir.join("b.txt"), b"BBB").unwrap();
+    shard(&["add", "a.txt"], &dir).output().unwrap();
+    shard(&["add", "b.txt"], &dir).output().unwrap();
+    let output = shard(&["commit", "-m", "multi", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    fs::remove_file(dir.join("a.txt")).unwrap();
+    fs::remove_file(dir.join("b.txt")).unwrap();
+
+    let output = shard(&["checkout", &commit_id], &dir).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "AAA");
+    assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "BBB");
+}
+
+#[test]
+fn test_checkout_wrong_commit_fails() {
+    let dir = repo_dir("checkout-bad");
+    shard(&["init"], &dir).output().unwrap();
+    let output = shard(
+        &[
+            "checkout",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(!output.status.success());
+}

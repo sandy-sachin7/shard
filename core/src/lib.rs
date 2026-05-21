@@ -337,6 +337,37 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn checkout(path: &Path, commit_id: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let store = Store::new(&shard_dir);
+    let commit = load_commit(&shard_dir, commit_id)?;
+
+    for manifest_id in &commit.manifests {
+        let data = store.get_chunk(manifest_id)?;
+        let hash = blake3::hash(&data);
+        if hash.to_hex().to_string() != *manifest_id {
+            anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
+        }
+        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        println!("Checking out file: {}", manifest.name);
+
+        let mut file_data = Vec::new();
+        for chunk_id in &manifest.chunks {
+            let chunk_data = store.get_chunk(chunk_id)?;
+            file_data.extend_from_slice(&chunk_data);
+        }
+        fs::write(path.join(&manifest.name), file_data)?;
+        println!("  -> {}", manifest.name);
+    }
+
+    println!("Checkout complete.");
+    Ok(())
+}
+
 pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {

@@ -40,6 +40,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Checkout files from a commit
+    Checkout { commit_id: String },
 }
 
 #[derive(Subcommand)]
@@ -86,6 +88,10 @@ async fn main() -> Result<()> {
         Commands::Log { json } => {
             let current_dir = env::current_dir()?;
             shard_core::log_cmd(&current_dir, *json)?;
+        }
+        Commands::Checkout { commit_id } => {
+            let current_dir = env::current_dir()?;
+            shard_core::checkout(&current_dir, commit_id)?;
         }
     }
 
