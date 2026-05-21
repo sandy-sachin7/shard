@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::time::Duration;
 
 use crate::protocol::{ShardRequest, ShardResponse};
@@ -40,6 +41,7 @@ impl Node {
             .with_behaviour(|key| {
                 let local_peer_id = PeerId::from(key.public());
                 println!("Local peer id: {local_peer_id}");
+                let _ = std::io::stdout().flush();
 
                 // Gossipsub
                 let gossipsub_config = gossipsub::Config::default();
@@ -104,7 +106,10 @@ impl Node {
     pub async fn run(&mut self, provider: impl ShardContentProvider) {
         loop {
             match self.swarm.select_next_some().await {
-                SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {address:?}"),
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Listening on {address:?}");
+                    let _ = std::io::stdout().flush();
+                }
                 SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, multiaddr) in list {
                         println!("mDNS discovered: {peer_id} {multiaddr}");

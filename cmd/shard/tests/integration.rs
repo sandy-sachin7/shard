@@ -1,6 +1,9 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 fn shard_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shard"))
@@ -632,4 +635,226 @@ fn test_init_private_sets_config() {
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("private = true"));
+}
+
+#[test]
+fn test_three_node_pull() {
+    let dir_a = repo_dir("3node-a");
+    let dir_b = repo_dir("3node-b");
+    let dir_c = repo_dir("3node-c");
+
+    // Setup node A: init, add, commit
+    shard(&["init"], &dir_a).output().unwrap();
+    fs::write(dir_a.join("data.txt"), b"shared data").unwrap();
+    shard(&["add", "data.txt"], &dir_a).output().unwrap();
+    let out = shard(&["commit", "-m", "shared", "--author", "T"], &dir_a)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    // Start share on node A in background, pipe stdout to capture peer ID + listen addr
+    let mut child = Command::new(shard_bin())
+        .arg("share")
+        .current_dir(&dir_a)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start share");
+
+    let reader = BufReader::new(child.stdout.take().unwrap());
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut peer_id = String::new();
+        let mut listen_addr = String::new();
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            if let Some(id) = line.strip_prefix("Local peer id: ") {
+                peer_id = id.to_string();
+            }
+            if let Some(addr) = line.strip_prefix("Listening on ") {
+                listen_addr = addr.trim().trim_matches('"').to_string();
+            }
+            if !peer_id.is_empty() && !listen_addr.is_empty() {
+                let _ = tx.send((peer_id.clone(), listen_addr.clone()));
+                peer_id.clear();
+                listen_addr.clear();
+            }
+        }
+    });
+
+    let (peer_id, listen_addr) = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("timed out waiting for share output");
+    let multiaddr = format!("{}/p2p/{}", listen_addr, peer_id);
+
+    // Node B pulls from A
+    let out = shard(&["pull", &multiaddr, &commit_id], &dir_b)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "B pull failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir_b.join("data.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir_b.join("data.txt")).unwrap(),
+        "shared data"
+    );
+
+    // Node C pulls from A
+    let out = shard(&["pull", &multiaddr, &commit_id], &dir_c)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "C pull failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir_c.join("data.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir_c.join("data.txt")).unwrap(),
+        "shared data"
+    );
+
+    // Cleanup
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn test_sync_auto_pull() {
+    let dir_a = repo_dir("sync-a");
+    let dir_b = repo_dir("sync-b");
+
+    // Setup node A: init, add, commit
+    shard(&["init"], &dir_a).output().unwrap();
+    fs::write(dir_a.join("shared.txt"), b"sync test data").unwrap();
+    shard(&["add", "shared.txt"], &dir_a).output().unwrap();
+    let out = shard(&["commit", "-m", "sync-test", "--author", "T"], &dir_a)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    // Start sync on A in background
+    let mut child_a = Command::new(shard_bin())
+        .arg("sync")
+        .current_dir(&dir_a)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start sync A");
+
+    let reader_a = BufReader::new(child_a.stdout.take().unwrap());
+    let (tx_a, rx_a) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut peer_id = String::new();
+        let mut listen_addr = String::new();
+        for line in reader_a.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            if let Some(id) = line.strip_prefix("Local peer id: ") {
+                peer_id = id.to_string();
+            }
+            if let Some(addr) = line.strip_prefix("Listening on ") {
+                listen_addr = addr.trim().trim_matches('"').to_string();
+            }
+            if !peer_id.is_empty() && !listen_addr.is_empty() {
+                let _ = tx_a.send((peer_id.clone(), listen_addr.clone()));
+                peer_id.clear();
+                listen_addr.clear();
+            }
+        }
+    });
+
+    let (peer_id_a, listen_addr_a) = rx_a
+        .recv_timeout(Duration::from_secs(30))
+        .expect("timed out waiting for sync A output");
+    let multiaddr_a = format!("{}/p2p/{}", listen_addr_a, peer_id_a);
+
+    // Configure B with A's address as a peer
+    shard(&["init"], &dir_b).output().unwrap();
+    // Copy A's repo_id so both repos share the same gossipsub topic
+    let a_config: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(dir_a.join(".shard/config.json")).unwrap()).unwrap();
+    let repo_id = a_config.get("repo_id").expect("A has repo_id");
+    let out = shard(&["config", "set", "repo_id", repo_id], &dir_b)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "config set repo_id failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = shard(&["peer", "add", &multiaddr_a], &dir_b)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "peer add failed");
+
+    // Start sync on B in background
+    let mut child_b = Command::new(shard_bin())
+        .arg("sync")
+        .current_dir(&dir_b)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start sync B");
+
+    let reader_b = BufReader::new(child_b.stdout.take().unwrap());
+    let stderr_b = child_b.stderr.take().unwrap();
+    let (tx_b, rx_b) = mpsc::channel();
+    std::thread::spawn(move || {
+        let stderr_reader = BufReader::new(stderr_b);
+        let stderr_tx = tx_b.clone();
+        std::thread::spawn(move || {
+            for l in stderr_reader.lines().map_while(Result::ok) {
+                eprintln!("[sync-B stderr] {}", l);
+                if l.contains("auto-pull") || l.contains("Auto-pull") || l.contains("announce") {
+                    let _ = stderr_tx.send(format!("stderr:{}", l));
+                }
+            }
+        });
+        for line in reader_b.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            eprintln!("[sync-B stdout] {}", line);
+            if line.starts_with("Auto-pulled commit") {
+                let _ = tx_b.send(line);
+            }
+        }
+    });
+
+    // Wait for B to auto-pull
+    let result = rx_b.recv_timeout(Duration::from_secs(60));
+    assert!(
+        result.is_ok(),
+        "B did not auto-pull commit within timeout: {:?}",
+        result.err()
+    );
+    let msg = result.unwrap();
+    assert!(msg.contains(&commit_id), "auto-pulled wrong commit: {msg}");
+
+    // Verify file was pulled
+    assert!(dir_b.join("shared.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir_b.join("shared.txt")).unwrap(),
+        "sync test data"
+    );
+
+    // Cleanup
+    let _ = child_a.kill();
+    let _ = child_a.wait();
+    let _ = child_b.kill();
+    let _ = child_b.wait();
 }
