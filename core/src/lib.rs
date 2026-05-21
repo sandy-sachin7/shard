@@ -772,17 +772,15 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         _ => anyhow::bail!("Multiaddr must end with /p2p/<peer_id>"),
     };
 
-    // 1. Get Commit (dial + wait + request in one event loop)
+    // 1. Get Commit (sequential — single request)
     println!("Pulling commit {} from {}...", commit_id, peer);
     let commit_data = node
         .request_manifest(&multiaddr, peer_id, commit_id.to_string())
         .await?;
-    // Verify hash
     let hash = blake3::hash(&commit_data);
     if hash.to_hex().to_string() != commit_id {
         anyhow::bail!("Commit hash mismatch");
     }
-    // Store commit
     let chunk = crate::chunker::Chunk {
         hash,
         data: commit_data.clone(),
@@ -793,52 +791,77 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     let commit: Commit = serde_json::from_slice(&commit_data)?;
     println!("Got commit: {}", commit.message);
 
-    // 2. Get Manifests
-    for manifest_id in commit.manifests {
-        println!("Fetching manifest {}...", manifest_id);
-        let manifest_data = node
-            .request_manifest(&multiaddr, peer_id, manifest_id.clone())
-            .await?;
+    // 2. Fetch all manifests in parallel
+    let manifest_requests: Vec<(String, shard_net::protocol::ShardRequest)> = commit
+        .manifests
+        .iter()
+        .map(|id| {
+            (
+                id.clone(),
+                shard_net::protocol::ShardRequest::GetManifest(id.clone()),
+            )
+        })
+        .collect();
+    let manifest_results = node
+        .request_parallel(&multiaddr, peer_id, manifest_requests)
+        .await?;
 
-        let hash = blake3::hash(&manifest_data);
-        if hash.to_hex().to_string() != manifest_id {
-            anyhow::bail!("Manifest hash mismatch");
+    let mut all_chunk_ids: Vec<String> = Vec::new();
+    let mut file_manifests: Vec<FileManifest> = Vec::new();
+
+    for (manifest_id, manifest_data) in &manifest_results {
+        let hash = blake3::hash(manifest_data);
+        if hash.to_hex().to_string() != *manifest_id {
+            anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
         }
-
         let chunk = crate::chunker::Chunk {
             hash,
             data: manifest_data.clone(),
             offset: 0,
         };
         store.put_chunk(&chunk)?;
-
-        let manifest: FileManifest = serde_json::from_slice(&manifest_data)?;
+        let manifest: FileManifest = serde_json::from_slice(manifest_data)?;
         println!("Fetching file: {}", manifest.name);
+        all_chunk_ids.extend(manifest.chunks.clone());
+        file_manifests.push(manifest);
+    }
 
-        // 3. Get Chunks
-        for chunk_id in &manifest.chunks {
-            // Check if we already have it
-            if store.get_chunk(chunk_id).is_ok() {
-                continue;
-            }
+    // 3. Fetch all missing chunks in parallel
+    let needed_chunks: Vec<String> = all_chunk_ids
+        .into_iter()
+        .filter(|id| store.get_chunk(id).is_err())
+        .collect();
 
-            let chunk_data = node
-                .request_chunk(&multiaddr, peer_id, chunk_id.clone())
-                .await?;
-            let hash = blake3::hash(&chunk_data);
+    if !needed_chunks.is_empty() {
+        println!("Fetching {} chunks...", needed_chunks.len());
+        let chunk_requests: Vec<(String, shard_net::protocol::ShardRequest)> = needed_chunks
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    shard_net::protocol::ShardRequest::GetChunk(id.clone()),
+                )
+            })
+            .collect();
+        let chunk_results = node
+            .request_parallel(&multiaddr, peer_id, chunk_requests)
+            .await?;
+        for (chunk_id, chunk_data) in &chunk_results {
+            let hash = blake3::hash(chunk_data);
             if hash.to_hex().to_string() != *chunk_id {
-                anyhow::bail!("Chunk hash mismatch");
+                anyhow::bail!("Chunk hash mismatch: {}", chunk_id);
             }
-
             let chunk = crate::chunker::Chunk {
                 hash,
-                data: chunk_data,
+                data: chunk_data.clone(),
                 offset: 0,
             };
             store.put_chunk(&chunk)?;
         }
+    }
 
-        // 4. Reconstruct file
+    // 4. Reconstruct all files
+    for manifest in &file_manifests {
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
             let data = store.get_chunk(chunk_id)?;

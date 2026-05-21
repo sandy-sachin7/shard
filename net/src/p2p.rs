@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::protocol::{ShardRequest, ShardResponse};
@@ -297,6 +298,78 @@ impl Node {
                             .kademlia
                             .add_address(&peer_id, multiaddr);
                     }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub async fn request_parallel(
+        &mut self,
+        multiaddr: &libp2p::Multiaddr,
+        peer: PeerId,
+        requests: Vec<(String, ShardRequest)>,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.swarm.add_peer_address(peer, multiaddr.clone());
+        self.swarm.dial(multiaddr.clone())?;
+
+        let mut request_map: HashMap<libp2p::request_response::OutboundRequestId, String> =
+            HashMap::new();
+        let mut results: Vec<(String, Vec<u8>)> = Vec::with_capacity(requests.len());
+        let mut sent = false;
+
+        loop {
+            match self.swarm.select_next_some().await {
+                SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
+                    sent = true;
+                    for (id, req) in &requests {
+                        let rid = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&peer, req.clone());
+                        request_map.insert(rid, id.clone());
+                    }
+                }
+                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                    request_response::Event::Message {
+                        message:
+                            request_response::Message::Response {
+                                request_id,
+                                response,
+                            },
+                        ..
+                    },
+                )) => {
+                    if let Some(original_id) = request_map.remove(&request_id) {
+                        match response {
+                            ShardResponse::Manifest(data) | ShardResponse::Chunk(data) => {
+                                results.push((original_id, data));
+                            }
+                            ShardResponse::NotFound => {
+                                anyhow::bail!("Object not found: {}", original_id);
+                            }
+                        }
+                        if request_map.is_empty() && sent {
+                            return Ok(results);
+                        }
+                    }
+                }
+                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                    request_response::Event::OutboundFailure {
+                        peer: p,
+                        request_id,
+                        error,
+                    },
+                )) if p == peer => {
+                    if let Some(id) = request_map.remove(&request_id) {
+                        anyhow::bail!("Failed to fetch {}: {:?}", id, error);
+                    }
+                }
+                SwarmEvent::OutgoingConnectionError {
+                    peer_id: Some(p), ..
+                } if p == peer => {
+                    let _ = self.swarm.dial(multiaddr.clone());
                 }
                 _ => {}
             }
