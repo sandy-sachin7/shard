@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::io::Read;
-use blake3::Hasher;
 
 pub const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 

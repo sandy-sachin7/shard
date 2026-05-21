@@ -1,6 +1,6 @@
+use anyhow::Result;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
@@ -17,7 +17,10 @@ impl KeyPair {
         csprng.fill_bytes(&mut bytes);
         let signing_key = SigningKey::from_bytes(&bytes);
         let verifying_key = signing_key.verifying_key();
-        Self { signing_key, verifying_key }
+        Self {
+            signing_key,
+            verifying_key,
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -35,6 +38,9 @@ impl KeyPair {
         let signing_key = SigningKey::from_bytes(secret_bytes.as_slice().try_into()?);
         let verifying_key = VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?;
 
-        Ok(Self { signing_key, verifying_key })
+        Ok(Self {
+            signing_key,
+            verifying_key,
+        })
     }
 }

@@ -1,7 +1,7 @@
-use anyhow::Result;
-use std::path::{Path, PathBuf};
-use std::fs;
 use crate::chunker::Chunk;
+use anyhow::Result;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub struct Store {
     root: PathBuf,
@@ -9,7 +9,9 @@ pub struct Store {
 
 impl Store {
     pub fn new(root: &Path) -> Self {
-        Self { root: root.to_path_buf() }
+        Self {
+            root: root.to_path_buf(),
+        }
     }
 
     pub fn put_chunk(&self, chunk: &Chunk) -> Result<()> {
@@ -26,5 +28,17 @@ impl Store {
         }
 
         Ok(())
+    }
+
+    pub fn get_chunk(&self, hash_hex: &str) -> Result<Vec<u8>> {
+        let prefix = &hash_hex[..2];
+        let filename = hash_hex;
+        let path = self.root.join("objects").join(prefix).join(filename);
+
+        if !path.exists() {
+            anyhow::bail!("Chunk not found: {}", hash_hex);
+        }
+
+        Ok(fs::read(path)?)
     }
 }

@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Commit {
@@ -11,7 +11,6 @@ pub struct Commit {
     // Or maybe it's like a block header?
     // "Commit node: JSON with commit_id (hash of canonical commit JSON)..."
     // This implies commit_id is NOT in the JSON that is hashed.
-
     pub parents: Vec<String>,
     pub manifests: Vec<String>, // Hash of manifest objects
     pub author: String,

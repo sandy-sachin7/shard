@@ -1,5 +1,5 @@
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use std::env;
 
 use std::path::PathBuf;
@@ -16,9 +16,7 @@ enum Commands {
     /// Initialize a new Shard repository
     Init,
     /// Add a file to the staging area
-    Add {
-        path: PathBuf,
-    },
+    Add { path: PathBuf },
     /// Record changes to the repository
     Commit {
         #[arg(short, long)]
@@ -27,9 +25,7 @@ enum Commands {
         author: String,
     },
     /// Verify the integrity of a commit
-    Verify {
-        commit_id: String,
-    },
+    Verify { commit_id: String },
     /// Manage peers
     Peer {
         #[command(subcommand)]
@@ -38,18 +34,13 @@ enum Commands {
     /// Share the repository with the network
     Share,
     /// Pull a commit from a peer
-    Pull {
-        peer: String,
-        commit_id: String,
-    },
+    Pull { peer: String, commit_id: String },
 }
 
 #[derive(Subcommand)]
 enum PeerCommands {
     /// Add a peer
-    Add {
-        multiaddr: String,
-    },
+    Add { multiaddr: String },
 }
 
 #[tokio::main]
@@ -73,21 +64,19 @@ async fn main() -> Result<()> {
             let current_dir = env::current_dir()?;
             shard_core::verify(&current_dir, commit_id)?;
         }
-        Commands::Peer { command } => {
-            match command {
-                PeerCommands::Add { multiaddr } => {
-                    println!("Peer add not implemented yet (persistent peer list)");
-                    // shard_core::peer_add(&current_dir, multiaddr)?;
-                }
+        Commands::Peer { command } => match command {
+            PeerCommands::Add { multiaddr } => {
+                let current_dir = env::current_dir()?;
+                shard_core::peer_add(&current_dir, multiaddr)?;
             }
-        }
+        },
         Commands::Share => {
             let current_dir = env::current_dir()?;
             shard_core::share(&current_dir).await?;
         }
         Commands::Pull { peer, commit_id } => {
             let current_dir = env::current_dir()?;
-            shard_core::pull(&current_dir, &peer, &commit_id).await?;
+            shard_core::pull(&current_dir, peer, commit_id).await?;
         }
     }
 

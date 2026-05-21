@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use crate::manifest::FileManifest;
 use anyhow::Result;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct Index {

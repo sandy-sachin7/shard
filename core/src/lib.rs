@@ -1,20 +1,20 @@
 pub mod chunker;
-pub mod store;
-pub mod manifest;
-pub mod index;
 pub mod commit;
+pub mod index;
+pub mod manifest;
+pub mod store;
 
-use std::path::Path;
-use anyhow::Result;
-use std::fs;
-use shard_crypto::KeyPair;
 use crate::chunker::Chunker;
-use crate::store::Store;
-use crate::manifest::FileManifest;
-use crate::index::Index;
 use crate::commit::Commit;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::index::Index;
+use crate::manifest::FileManifest;
+use crate::store::Store;
+use anyhow::Result;
 use ed25519_dalek::{Signer, Verifier};
+use shard_crypto::KeyPair;
+use std::fs;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn init(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
@@ -27,7 +27,10 @@ pub fn init(path: &Path) -> Result<()> {
     let keys = KeyPair::generate();
     keys.save(&shard_dir.join("keys"))?;
 
-    println!("Initialized empty Shard repository in {}", shard_dir.display());
+    println!(
+        "Initialized empty Shard repository in {}",
+        shard_dir.display()
+    );
     Ok(())
 }
 
@@ -149,7 +152,7 @@ pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let store = Store::new(&shard_dir);
+    let _store = Store::new(&shard_dir);
 
     // 1. Load commit
     // We need a way to get chunk by hash. Store::get_chunk?
@@ -186,7 +189,8 @@ pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
 
         let pub_key_path = shard_dir.join("keys/public.key");
         let pub_bytes = fs::read(pub_key_path)?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?;
+        let verifying_key =
+            ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?;
 
         // Reconstruct unsigned JSON
         let mut unsigned_commit = commit.clone(); // Need Clone for Commit
@@ -241,6 +245,55 @@ pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let peers_path = shard_dir.join("peers.json");
+    let mut peers: Vec<String> = if peers_path.exists() {
+        let data = fs::read(&peers_path)?;
+        serde_json::from_slice(&data)?
+    } else {
+        Vec::new()
+    };
+
+    if !peers.contains(&multiaddr.to_string()) {
+        peers.push(multiaddr.to_string());
+        let data = serde_json::to_vec(&peers)?;
+        fs::write(peers_path, data)?;
+        println!("Added peer: {}", multiaddr);
+    } else {
+        println!("Peer already exists: {}", multiaddr);
+    }
+
+    Ok(())
+}
+
+fn load_peers(shard_dir: &Path) -> Result<Vec<String>> {
+    let peers_path = shard_dir.join("peers.json");
+    if peers_path.exists() {
+        let data = fs::read(peers_path)?;
+        Ok(serde_json::from_slice(&data)?)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+struct RepoProvider {
+    store: Store,
+}
+
+impl shard_net::p2p::ShardContentProvider for RepoProvider {
+    fn get_manifest(&self, id: &str) -> Option<Vec<u8>> {
+        self.store.get_chunk(id).ok()
+    }
+    fn get_chunk(&self, id: &str) -> Option<Vec<u8>> {
+        self.store.get_chunk(id).ok()
+    }
+}
+
 pub async fn share(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
@@ -248,12 +301,23 @@ pub async fn share(path: &Path) -> Result<()> {
     }
 
     let mut node = shard_net::p2p::Node::new().await?;
-    node.listen("/ip4/0.0.0.0/tcp/0").await?; // Listen on random port
+
+    // Bootstrap from peers
+    let peers = load_peers(&shard_dir)?;
+    for peer in peers {
+        if let Ok(addr) = peer.parse::<shard_net::libp2p::Multiaddr>() {
+            let _ = node.swarm.dial(addr);
+        }
+    }
+
+    node.listen("/ip4/0.0.0.0/tcp/0").await?; // Listen on random port (TCP)
 
     // In a real implementation, we would load the repo and serve requests.
     // For now, we just start the node to prove connectivity.
     println!("Sharing repository...");
-    node.run().await;
+    let store = Store::new(&shard_dir);
+    let provider = RepoProvider { store };
+    node.run(provider).await;
 
     Ok(())
 }
@@ -263,37 +327,97 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     // pull can work on empty repo or existing one.
     // if !shard_dir.exists() { init(path)?; }
 
+    if !shard_dir.exists() {
+        init(path)?;
+    }
+
+    let store = Store::new(&shard_dir);
+
     let mut node = shard_net::p2p::Node::new().await?;
 
     // Parse peer multiaddr
     let multiaddr: shard_net::libp2p::Multiaddr = peer.parse()?;
+    let peer_id = match multiaddr.iter().last() {
+        Some(shard_net::libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,
+        _ => anyhow::bail!("Multiaddr must end with /p2p/<peer_id>"),
+    };
 
-    // Dial peer
-    println!("Dialing {}...", peer);
-    node.swarm.dial(multiaddr.clone())?;
+    // 1. Get Commit (dial + wait + request in one event loop)
+    println!("Pulling commit {} from {}...", commit_id, peer);
+    let commit_data = node
+        .request_manifest(&multiaddr, peer_id, commit_id.to_string())
+        .await?;
+    // Verify hash
+    let hash = blake3::hash(&commit_data);
+    if hash.to_hex().to_string() != commit_id {
+        anyhow::bail!("Commit hash mismatch");
+    }
+    // Store commit
+    let chunk = crate::chunker::Chunk {
+        hash,
+        data: commit_data.clone(),
+        offset: 0,
+    };
+    store.put_chunk(&chunk)?;
 
-    // Request manifest
-    // We need to implement the request logic in Node or here.
-    // Node::run is a loop, so we can't easily use it for "request and return".
-    // We need a way to send request and await response.
-    // This requires a background task for the swarm or a different architecture.
+    let commit: Commit = serde_json::from_slice(&commit_data)?;
+    println!("Got commit: {}", commit.message);
 
-    // For Phase 2, "Basic Network & Exchange", maybe we just implement the CLI to call these.
-    // But `pull` needs to actually pull.
+    // 2. Get Manifests
+    for manifest_id in commit.manifests {
+        println!("Fetching manifest {}...", manifest_id);
+        let manifest_data = node
+            .request_manifest(&multiaddr, peer_id, manifest_id.clone())
+            .await?;
 
-    // I need to modify `Node` to support sending requests.
-    // And `Node::run` should probably be `Node::run_until` or similar, or run in background.
+        let hash = blake3::hash(&manifest_data);
+        if hash.to_hex().to_string() != manifest_id {
+            anyhow::bail!("Manifest hash mismatch");
+        }
 
-    // Let's spawn the node in background?
-    // But `Node` owns the swarm.
+        let chunk = crate::chunker::Chunk {
+            hash,
+            data: manifest_data.clone(),
+            offset: 0,
+        };
+        store.put_chunk(&chunk)?;
 
-    // I'll leave `pull` as a placeholder that connects for now,
-    // and I'll update `Node` to support requests in the next step if needed.
-    // The plan said "Implement: libp2p bootstrap, peer add, direct manifest request/response".
+        let manifest: FileManifest = serde_json::from_slice(&manifest_data)?;
+        println!("Fetching file: {}", manifest.name);
 
-    println!("Connected to {}. Pulling commit {}...", peer, commit_id);
+        // 3. Get Chunks
+        for chunk_id in &manifest.chunks {
+            // Check if we already have it
+            if store.get_chunk(chunk_id).is_ok() {
+                continue;
+            }
 
-    // TODO: Implement actual pull logic (request manifest, then chunks)
+            let chunk_data = node
+                .request_chunk(&multiaddr, peer_id, chunk_id.clone())
+                .await?;
+            let hash = blake3::hash(&chunk_data);
+            if hash.to_hex().to_string() != *chunk_id {
+                anyhow::bail!("Chunk hash mismatch");
+            }
 
+            let chunk = crate::chunker::Chunk {
+                hash,
+                data: chunk_data,
+                offset: 0,
+            };
+            store.put_chunk(&chunk)?;
+        }
+
+        // 4. Reconstruct file
+        let mut file_data = Vec::new();
+        for chunk_id in &manifest.chunks {
+            let data = store.get_chunk(chunk_id)?;
+            file_data.extend_from_slice(&data);
+        }
+        fs::write(path.join(&manifest.name), file_data)?;
+        println!("Reconstructed file: {}", manifest.name);
+    }
+
+    println!("Pull complete.");
     Ok(())
 }
