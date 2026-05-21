@@ -434,3 +434,202 @@ fn test_config_get_missing_fails() {
         .unwrap();
     assert!(!out.status.success());
 }
+
+#[test]
+fn test_tag_add_and_list() {
+    let dir = repo_dir("tag-test");
+    shard(&["init"], &dir).output().unwrap();
+    fs::write(dir.join("f.txt"), b"data").unwrap();
+    shard(&["add", "f.txt"], &dir).output().unwrap();
+    let out = shard(&["commit", "-m", "first", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let cid = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    let out = shard(&["tag", "add", "v1", &cid], &dir).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8(out.stdout).unwrap().contains("Tagged"));
+
+    let out = shard(&["tag", "list"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("v1"));
+    assert!(stdout.contains(&cid));
+}
+
+#[test]
+fn test_tag_bad_commit_fails() {
+    let dir = repo_dir("tag-bad");
+    shard(&["init"], &dir).output().unwrap();
+    let out = shard(
+        &[
+            "tag",
+            "add",
+            "bad",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
+fn test_prune_removes_unreachable_objects() {
+    let dir = repo_dir("prune-test");
+    shard(&["init"], &dir).output().unwrap();
+
+    // Create and commit a file
+    fs::write(dir.join("keep.txt"), b"keep me").unwrap();
+    shard(&["add", "keep.txt"], &dir).output().unwrap();
+    let out = shard(&["commit", "-m", "first", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    // Create an orphan object (unreachable)
+    let orphan_hash = "aa00000000000000000000000000000000000000000000000000000000000000";
+    let orphan_dir = dir.join(".shard/objects/aa");
+    fs::create_dir_all(&orphan_dir).unwrap();
+    fs::write(orphan_dir.join(orphan_hash), b"orphan").unwrap();
+
+    // Prune
+    let out = shard(&["prune"], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "prune failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Pruned 1"), "expected 1 pruned: {stdout}");
+
+    // Verify orphan is gone
+    assert!(
+        !orphan_dir.join(orphan_hash).exists(),
+        "orphan should be removed"
+    );
+
+    // Verify reachable commit still exists
+    let prefix = &commit_id[..2];
+    assert!(
+        dir.join(".shard/objects")
+            .join(prefix)
+            .join(&commit_id)
+            .exists(),
+        "commit should still exist"
+    );
+}
+
+#[test]
+fn test_prune_keeps_staged_objects() {
+    let dir = repo_dir("prune-staged");
+    shard(&["init"], &dir).output().unwrap();
+
+    // Stage a file (chunks stored but not committed)
+    fs::write(dir.join("staged.txt"), b"staged data").unwrap();
+    shard(&["add", "staged.txt"], &dir).output().unwrap();
+
+    // Create an orphan object
+    let orphan_hash = "bb00000000000000000000000000000000000000000000000000000000000000";
+    let orphan_dir = dir.join(".shard/objects/bb");
+    fs::create_dir_all(&orphan_dir).unwrap();
+    fs::write(orphan_dir.join(orphan_hash), b"orphan").unwrap();
+
+    // Prune
+    let out = shard(&["prune"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Pruned 1"), "expected 1 pruned: {stdout}");
+    assert!(
+        !orphan_dir.join(orphan_hash).exists(),
+        "orphan should be removed"
+    );
+}
+
+#[test]
+fn test_verify_json_output() {
+    let dir = repo_dir("verify-json");
+    shard(&["init"], &dir).output().unwrap();
+
+    fs::write(dir.join("f.txt"), b"data").unwrap();
+    shard(&["add", "f.txt"], &dir).output().unwrap();
+    let out = shard(&["commit", "-m", "json-verify", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap();
+
+    let out = shard(&["verify", "--json", commit_id], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["verified"], true);
+    assert_eq!(v["signature_verified"], true);
+    assert!(v["files_checked"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[test]
+fn test_status_json_output() {
+    let dir = repo_dir("status-json");
+    shard(&["init"], &dir).output().unwrap();
+
+    fs::write(dir.join("a.txt"), b"alpha").unwrap();
+    shard(&["add", "a.txt"], &dir).output().unwrap();
+    shard(&["commit", "-m", "first", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+
+    let out = shard(&["status", "--json"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["commit"].is_string());
+    assert!(v["staged"].is_array());
+    assert!(v["deleted"].is_array());
+    assert!(v["untracked"].is_array());
+}
+
+#[test]
+fn test_checkout_json_output() {
+    let dir = repo_dir("checkout-json");
+    shard(&["init"], &dir).output().unwrap();
+
+    fs::write(dir.join("f.txt"), b"checkout json").unwrap();
+    shard(&["add", "f.txt"], &dir).output().unwrap();
+    let out = shard(&["commit", "-m", "json-co", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    fs::remove_file(dir.join("f.txt")).unwrap();
+
+    let out = shard(&["checkout", "--json", &commit_id], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["commit_id"], commit_id);
+    assert!(v["files"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("f.txt")));
+}
+
+#[test]
+fn test_init_private_sets_config() {
+    let dir = repo_dir("init-private");
+    let out = shard(&["init", "--private"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    let out = shard(&["config", "get", "private"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("private = true"));
+}

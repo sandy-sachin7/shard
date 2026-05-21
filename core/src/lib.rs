@@ -151,28 +151,16 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
+pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let _store = Store::new(&shard_dir);
-
-    // 1. Load commit
-    // We need a way to get chunk by hash. Store::get_chunk?
-    // I implemented put_chunk but not get_chunk.
-    // I'll implement get_chunk in Store first or just read file here.
-    // Store::get_chunk is better.
-
-    // For now, I'll read directly to avoid changing Store interface in this step if possible.
-    // But Store encapsulates path logic.
-    // I'll add get_chunk to Store in a separate step or just duplicate path logic here?
-    // Duplicate for speed, then refactor.
+    let store = Store::new(&shard_dir);
 
     let prefix = &commit_id[..2];
-    let filename = commit_id;
-    let obj_path = shard_dir.join("objects").join(prefix).join(filename);
+    let obj_path = shard_dir.join("objects").join(prefix).join(commit_id);
 
     if !obj_path.exists() {
         anyhow::bail!("Commit object not found: {}", commit_id);
@@ -181,24 +169,16 @@ pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
     let data = fs::read(obj_path)?;
     let commit: Commit = serde_json::from_slice(&data)?;
 
-    // 2. Verify signature
-    if let Some(sig_hex) = &commit.signature {
-        // We need the public key.
-        // For local verification, we use the local public key?
-        // Or the author's public key?
-        // The commit doesn't store the public key, only the signature.
-        // We assume the local keypair is the author for now.
-        // Or we should store the public key in the commit or look it up.
-        // "Keys are stored in ~/.shard/keys and per-repo config references them."
-        // For Phase 1, I'll use the local public key.
+    let mut sig_verified = false;
+    let mut files_checked = 0u64;
 
+    if let Some(sig_hex) = &commit.signature {
         let pub_key_path = shard_dir.join("keys/public.key");
         let pub_bytes = fs::read(pub_key_path)?;
         let verifying_key =
             ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?;
 
-        // Reconstruct unsigned JSON
-        let mut unsigned_commit = commit.clone(); // Need Clone for Commit
+        let mut unsigned_commit = commit.clone();
         unsigned_commit.signature = None;
         let json_unsigned = serde_json::to_vec(&unsigned_commit)?;
 
@@ -206,47 +186,49 @@ pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
         let signature = ed25519_dalek::Signature::from_bytes(sig_bytes.as_slice().try_into()?);
 
         verifying_key.verify(&json_unsigned, &signature)?;
-        println!("Signature verified.");
-    } else {
+        sig_verified = true;
+        if !json {
+            println!("Signature verified.");
+        }
+    } else if !json {
         println!("Warning: Commit is unsigned.");
     }
 
-    // 3. Verify manifests
     for manifest_id in &commit.manifests {
-        let prefix = &manifest_id[..2];
-        let path = shard_dir.join("objects").join(prefix).join(manifest_id);
-        if !path.exists() {
-            anyhow::bail!("Manifest missing: {}", manifest_id);
-        }
-
-        let data = fs::read(path)?;
-        // Verify hash
-        let hash = blake3::hash(&data);
+        let manifest_data = store.get_chunk(manifest_id)?;
+        let hash = blake3::hash(&manifest_data);
         if hash.to_hex().to_string() != *manifest_id {
             anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
         }
 
-        let manifest: FileManifest = serde_json::from_slice(&data)?;
-        println!("Verifying file: {}", manifest.name);
+        let manifest: FileManifest = serde_json::from_slice(&manifest_data)?;
+        if !json {
+            println!("Verifying file: {}", manifest.name);
+        }
 
-        // 4. Verify chunks
         for chunk_id in &manifest.chunks {
-            let prefix = &chunk_id[..2];
-            let path = shard_dir.join("objects").join(prefix).join(chunk_id);
-            if !path.exists() {
-                anyhow::bail!("Chunk missing: {}", chunk_id);
-            }
-            // Optional: Verify chunk hash (expensive for large files)
-            // For "verify" command, we SHOULD verify content.
-            let data = fs::read(path)?;
-            let hash = blake3::hash(&data);
+            let chunk_data = store.get_chunk(chunk_id)?;
+            let hash = blake3::hash(&chunk_data);
             if hash.to_hex().to_string() != *chunk_id {
                 anyhow::bail!("Chunk hash mismatch: {}", chunk_id);
             }
         }
+        files_checked += 1;
     }
 
-    println!("Verification successful.");
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "commit_id": commit_id,
+                "verified": true,
+                "signature_verified": sig_verified,
+                "files_checked": files_checked,
+            }))?
+        );
+    } else {
+        println!("Verification successful.");
+    }
     Ok(())
 }
 
@@ -341,7 +323,7 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn checkout(path: &Path, commit_id: &str) -> Result<()> {
+pub fn checkout(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("Not a Shard repository");
@@ -349,6 +331,7 @@ pub fn checkout(path: &Path, commit_id: &str) -> Result<()> {
 
     let store = Store::new(&shard_dir);
     let commit = load_commit(&shard_dir, commit_id)?;
+    let mut files = Vec::new();
 
     for manifest_id in &commit.manifests {
         let data = store.get_chunk(manifest_id)?;
@@ -357,7 +340,9 @@ pub fn checkout(path: &Path, commit_id: &str) -> Result<()> {
             anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
         }
         let manifest: FileManifest = serde_json::from_slice(&data)?;
-        println!("Checking out file: {}", manifest.name);
+        if !json {
+            println!("Checking out file: {}", manifest.name);
+        }
 
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
@@ -365,60 +350,85 @@ pub fn checkout(path: &Path, commit_id: &str) -> Result<()> {
             file_data.extend_from_slice(&chunk_data);
         }
         fs::write(path.join(&manifest.name), file_data)?;
-        println!("  -> {}", manifest.name);
+        if !json {
+            println!("  -> {}", manifest.name);
+        }
+        files.push(manifest.name);
     }
 
-    println!("Checkout complete.");
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "commit_id": commit_id,
+                "files": files,
+            }))?
+        );
+    } else {
+        println!("Checkout complete.");
+    }
     Ok(())
 }
 
-pub fn status(path: &Path) -> Result<()> {
+pub fn status(path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("Not a Shard repository");
     }
 
     let head_path = shard_dir.join("HEAD");
+    let mut commit_id: Option<String> = None;
     if head_path.exists() {
         let head = fs::read_to_string(&head_path)?;
-        println!("On commit: {}", head.trim());
-    } else {
+        commit_id = Some(head.trim().to_string());
+        if !json {
+            println!("On commit: {}", commit_id.as_ref().unwrap());
+        }
+    } else if !json {
         println!("No commits yet.");
     }
 
     let index = Index::load(&shard_dir.join("index"))?;
-    if index.files.is_empty() {
-        println!("Nothing staged.");
-    } else {
-        println!("\nStaged files:");
-        for name in index.files.keys() {
-            println!("  {} (to be committed)", name);
+    let staged: Vec<String> = index.files.keys().cloned().collect();
+    if !json {
+        if staged.is_empty() {
+            println!("Nothing staged.");
+        } else {
+            println!("\nStaged files:");
+            for name in &staged {
+                println!("  {} (to be committed)", name);
+            }
         }
     }
 
-    let tracked_names: std::collections::HashSet<String> =
-        if let Ok(head) = fs::read_to_string(&head_path) {
-            let head = head.trim().to_string();
-            let mut names = std::collections::HashSet::new();
-            if let Ok(commit) = load_commit(&shard_dir, &head) {
-                let store = Store::new(&shard_dir);
-                for manifest_id in &commit.manifests {
-                    if let Ok(data) = store.get_chunk(manifest_id) {
-                        if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&data) {
-                            let file_path = path.join(&manifest.name);
-                            if !file_path.exists() {
-                                println!("\nDeleted files:");
-                                println!("  {} (deleted)", manifest.name);
-                            }
-                            names.insert(manifest.name);
+    let mut deleted = Vec::new();
+    let tracked_names: std::collections::HashSet<String> = if let Some(head) = &commit_id {
+        let mut names = std::collections::HashSet::new();
+        if let Ok(commit) = load_commit(&shard_dir, head) {
+            let store = Store::new(&shard_dir);
+            for manifest_id in &commit.manifests {
+                if let Ok(data) = store.get_chunk(manifest_id) {
+                    if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&data) {
+                        let file_path = path.join(&manifest.name);
+                        if !file_path.exists() {
+                            deleted.push(manifest.name.clone());
                         }
+                        names.insert(manifest.name);
                     }
                 }
             }
-            names
-        } else {
-            std::collections::HashSet::new()
-        };
+        }
+        names
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    if !json && !deleted.is_empty() {
+        println!("\nDeleted files:");
+        for name in &deleted {
+            println!("  {} (deleted)", name);
+        }
+    }
 
     let mut untracked = Vec::new();
     if let Ok(entries) = fs::read_dir(path) {
@@ -436,11 +446,23 @@ pub fn status(path: &Path) -> Result<()> {
             }
         }
     }
-    if !untracked.is_empty() {
+    if !json && !untracked.is_empty() {
         println!("\nUntracked files:");
         for name in &untracked {
             println!("  {}", name);
         }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "commit": commit_id,
+                "staged": staged,
+                "deleted": deleted,
+                "untracked": untracked,
+            }))?
+        );
     }
 
     Ok(())
@@ -493,6 +515,163 @@ pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
     config.insert(key.to_string(), value.to_string());
     save_config(&shard_dir, &config)?;
     println!("{} = {}", key, value);
+    Ok(())
+}
+
+fn load_tags(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    let tags_path = shard_dir.join("tags.json");
+    if tags_path.exists() {
+        let data = fs::read(&tags_path)?;
+        Ok(serde_json::from_slice(&data)?)
+    } else {
+        Ok(std::collections::BTreeMap::new())
+    }
+}
+
+fn save_tags(shard_dir: &Path, tags: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    let data = serde_json::to_string_pretty(tags)?;
+    fs::write(shard_dir.join("tags.json"), data)?;
+    Ok(())
+}
+
+pub fn tag_add(path: &Path, name: &str, commit_id: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    // Verify commit exists
+    load_commit(&shard_dir, commit_id)?;
+    let mut tags = load_tags(&shard_dir)?;
+    tags.insert(name.to_string(), commit_id.to_string());
+    save_tags(&shard_dir, &tags)?;
+    println!("Tagged '{}' -> {}", name, commit_id);
+    Ok(())
+}
+
+pub fn tag_list(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    let tags = load_tags(&shard_dir)?;
+    if tags.is_empty() {
+        println!("No tags.");
+    } else {
+        for (name, commit_id) in &tags {
+            println!("{} -> {}", name, commit_id);
+        }
+    }
+    Ok(())
+}
+
+fn collect_reachable(
+    store: &Store,
+    shard_dir: &Path,
+    commit_id: &str,
+    seen_commits: &mut std::collections::HashSet<String>,
+    reachable: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    if !seen_commits.insert(commit_id.to_string()) {
+        return Ok(());
+    }
+
+    reachable.insert(commit_id.to_string());
+
+    let commit = match load_commit(shard_dir, commit_id) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    for manifest_id in &commit.manifests {
+        reachable.insert(manifest_id.clone());
+
+        if let Ok(data) = store.get_chunk(manifest_id) {
+            if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&data) {
+                for chunk_id in &manifest.chunks {
+                    reachable.insert(chunk_id.clone());
+                }
+            }
+        }
+    }
+
+    for parent_id in &commit.parents {
+        collect_reachable(store, shard_dir, parent_id, seen_commits, reachable)?;
+    }
+
+    Ok(())
+}
+
+pub fn prune(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let store = Store::new(&shard_dir);
+    let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // 1. Walk from HEAD commit
+    let head_path = shard_dir.join("HEAD");
+    if head_path.exists() {
+        let head = fs::read_to_string(&head_path)?;
+        let head = head.trim().to_string();
+        collect_reachable(
+            &store,
+            &shard_dir,
+            &head,
+            &mut std::collections::HashSet::new(),
+            &mut reachable,
+        )?;
+    }
+
+    // 2. Walk from tags
+    let tags = load_tags(&shard_dir)?;
+    for commit_id in tags.values() {
+        collect_reachable(
+            &store,
+            &shard_dir,
+            commit_id,
+            &mut std::collections::HashSet::new(),
+            &mut reachable,
+        )?;
+    }
+
+    // 3. Walk from index (staged files)
+    let index = Index::load(&shard_dir.join("index"))?;
+    for manifest in index.files.values() {
+        let json = serde_json::to_vec(manifest)?;
+        let hash = blake3::hash(&json);
+        let hash_hex = hash.to_hex().to_string();
+        reachable.insert(hash_hex);
+        for chunk_hash in &manifest.chunks {
+            reachable.insert(chunk_hash.clone());
+        }
+    }
+
+    // 4. Scan objects and remove unreachable
+    let objects_dir = shard_dir.join("objects");
+    let mut pruned = 0u64;
+    let mut kept = 0u64;
+    if objects_dir.exists() {
+        for entry in fs::read_dir(&objects_dir)? {
+            let entry = entry?;
+            let prefix_dir = entry.path();
+            if prefix_dir.is_dir() {
+                for file_entry in fs::read_dir(&prefix_dir)? {
+                    let file_entry = file_entry?;
+                    let hash_hex = file_entry.file_name().to_string_lossy().to_string();
+                    if !reachable.contains(&hash_hex) {
+                        fs::remove_file(file_entry.path())?;
+                        pruned += 1;
+                    } else {
+                        kept += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Pruned {} objects. {} objects remain.", pruned, kept);
     Ok(())
 }
 
