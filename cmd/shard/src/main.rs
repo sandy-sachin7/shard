@@ -44,6 +44,19 @@ enum Commands {
     Checkout { commit_id: String },
     /// Show working tree status
     Status,
+    /// Get or set configuration values
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Get a config value (or all if no key given)
+    Get { key: Option<String> },
+    /// Set a config value
+    Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -99,6 +112,16 @@ async fn main() -> Result<()> {
             let current_dir = env::current_dir()?;
             shard_core::status(&current_dir)?;
         }
+        Commands::Config { command } => match command {
+            ConfigCommands::Get { key } => {
+                let current_dir = env::current_dir()?;
+                shard_core::config_get(&current_dir, key.as_deref())?;
+            }
+            ConfigCommands::Set { key, value } => {
+                let current_dir = env::current_dir()?;
+                shard_core::config_set(&current_dir, key, value)?;
+            }
+        },
     }
 
     Ok(())

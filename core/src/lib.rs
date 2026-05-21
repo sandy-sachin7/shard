@@ -446,6 +446,56 @@ pub fn status(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn load_config(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    let config_path = shard_dir.join("config.json");
+    if config_path.exists() {
+        let data = fs::read(&config_path)?;
+        Ok(serde_json::from_slice(&data)?)
+    } else {
+        Ok(std::collections::BTreeMap::new())
+    }
+}
+
+fn save_config(
+    shard_dir: &Path,
+    config: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let data = serde_json::to_string_pretty(config)?;
+    fs::write(shard_dir.join("config.json"), data)?;
+    Ok(())
+}
+
+pub fn config_get(path: &Path, key: Option<&str>) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    let config = load_config(&shard_dir)?;
+    if let Some(key) = key {
+        match config.get(key) {
+            Some(value) => println!("{} = {}", key, value),
+            None => anyhow::bail!("config key not found: {}", key),
+        }
+    } else {
+        for (k, v) in &config {
+            println!("{} = {}", k, v);
+        }
+    }
+    Ok(())
+}
+
+pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    let mut config = load_config(&shard_dir)?;
+    config.insert(key.to_string(), value.to_string());
+    save_config(&shard_dir, &config)?;
+    println!("{} = {}", key, value);
+    Ok(())
+}
+
 pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {

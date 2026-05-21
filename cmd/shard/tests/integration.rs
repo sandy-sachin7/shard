@@ -391,3 +391,46 @@ fn test_status_shows_untracked() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("untracked.txt"));
 }
+
+#[test]
+fn test_config_set_and_get() {
+    let dir = repo_dir("config-test");
+    shard(&["init"], &dir).output().unwrap();
+
+    let out = shard(&["config", "set", "user.name", "Alice"], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let out = shard(&["config", "get", "user.name"], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8(out.stdout).unwrap().contains("Alice"));
+}
+
+#[test]
+fn test_config_get_all() {
+    let dir = repo_dir("config-all");
+    shard(&["init"], &dir).output().unwrap();
+
+    shard(&["config", "set", "a", "1"], &dir).output().unwrap();
+    shard(&["config", "set", "b", "2"], &dir).output().unwrap();
+
+    let out = shard(&["config", "get"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("a = 1"));
+    assert!(stdout.contains("b = 2"));
+}
+
+#[test]
+fn test_config_get_missing_fails() {
+    let dir = repo_dir("config-missing");
+    shard(&["init"], &dir).output().unwrap();
+
+    let out = shard(&["config", "get", "nonexistent"], &dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}
