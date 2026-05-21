@@ -11,6 +11,7 @@ use crate::manifest::FileManifest;
 use crate::store::Store;
 use anyhow::Result;
 use ed25519_dalek::{Signer, Verifier};
+use serde::Serialize;
 use shard_crypto::KeyPair;
 use std::fs;
 use std::path::Path;
@@ -242,6 +243,97 @@ pub fn verify(path: &Path, commit_id: &str) -> Result<()> {
     }
 
     println!("Verification successful.");
+    Ok(())
+}
+
+fn load_commit(shard_dir: &Path, commit_id: &str) -> Result<Commit> {
+    let prefix = &commit_id[..2];
+    let path = shard_dir.join("objects").join(prefix).join(commit_id);
+    let data = fs::read(path)?;
+    let mut commit: Commit = serde_json::from_slice(&data)?;
+    commit.commit_id = commit_id.to_string();
+    Ok(commit)
+}
+
+#[derive(Serialize)]
+pub struct LogEntry {
+    pub commit_id: String,
+    pub parents: Vec<String>,
+    pub manifests: Vec<String>,
+    pub author: String,
+    pub message: String,
+    pub timestamp: u64,
+    pub signature: Option<String>,
+}
+
+impl From<Commit> for LogEntry {
+    fn from(c: Commit) -> Self {
+        LogEntry {
+            commit_id: c.commit_id,
+            parents: c.parents,
+            manifests: c.manifests,
+            author: c.author,
+            message: c.message,
+            timestamp: c.timestamp,
+            signature: c.signature,
+        }
+    }
+}
+
+pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let head_path = shard_dir.join("HEAD");
+    if !head_path.exists() {
+        anyhow::bail!("No commits yet");
+    }
+
+    let head = fs::read_to_string(&head_path)?;
+    let head = head.trim();
+
+    let mut entries: Vec<LogEntry> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![head.to_string()];
+
+    while let Some(cid) = stack.pop() {
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
+        let commit = load_commit(&shard_dir, &cid)?;
+        for parent in &commit.parents {
+            stack.push(parent.clone());
+        }
+        entries.push(commit.into());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        for entry in &entries {
+            let ts = {
+                let secs = entry.timestamp as i64;
+                let tm = time::OffsetDateTime::from_unix_timestamp(secs)
+                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+                tm.format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| entry.timestamp.to_string())
+            };
+            println!("commit {}", entry.commit_id);
+            if !entry.parents.is_empty() {
+                println!("parents: {}", entry.parents.join(" "));
+            }
+            println!("author: {}", entry.author);
+            println!("date:   {}", ts);
+            println!();
+            for line in entry.message.lines() {
+                println!("    {}", line);
+            }
+            println!();
+        }
+    }
+
     Ok(())
 }
 

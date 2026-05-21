@@ -2699,6 +2699,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "shard-core",
  "shard-crypto",
  "tempfile",
@@ -2720,6 +2721,7 @@ dependencies = [
  "shard-net",
  "shard-storage",
  "thiserror 1.0.69",
+ "time",
  "tokio",
 ]
 
