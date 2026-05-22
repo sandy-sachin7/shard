@@ -4,6 +4,7 @@ pub mod compression;
 pub mod index;
 pub mod manifest;
 pub mod store;
+pub mod wal;
 
 use crate::commit::Commit;
 use crate::compression::Compression;
@@ -148,11 +149,23 @@ fn add_file(
     Ok(())
 }
 
+pub fn recover(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    wal::recover(&shard_dir)?;
+    println!("Recovery complete.");
+    Ok(())
+}
+
 pub fn add(path: &Path, file_path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("Not a Shard repository");
     }
+
+    wal::recover(&shard_dir)?;
 
     let config = load_config(&shard_dir)?;
     let compression: Compression = config
@@ -209,6 +222,9 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
+    // Recover from any previous crash before mutating
+    wal::recover(&shard_dir)?;
+
     let store = Store::open(&shard_dir)?;
     let mut index = Index::load(&shard_dir.join("index"))?;
 
@@ -216,10 +232,24 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
         anyhow::bail!("Nothing to commit");
     }
 
+    let head_path = shard_dir.join("HEAD");
+
+    // WAL: back up pre-commit state
+    let wal = wal::Wal::new(&shard_dir);
+    let head_backup = if head_path.exists() {
+        Some(fs::read_to_string(&head_path)?)
+    } else {
+        None
+    };
+    let index_backup = fs::read(shard_dir.join("index"))?;
+    wal.append(&wal::WalEntry::CommitBegin {
+        head_backup,
+        index_backup,
+    })?;
+
     // 1. Store manifests
     let mut manifest_ids = Vec::new();
     for manifest in index.files.values() {
-        // Canonical JSON
         let json = serde_json::to_vec(manifest)?;
         let hash = blake3::hash(&json);
         let chunk = crate::chunker::Chunk {
@@ -230,10 +260,9 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
         store.put_chunk(&chunk)?;
         manifest_ids.push(hash.to_hex().to_string());
     }
-    manifest_ids.sort(); // Canonical order
+    manifest_ids.sort();
 
     // 2. Get parent
-    let head_path = shard_dir.join("HEAD");
     let mut parents = Vec::new();
     if head_path.exists() {
         let head = fs::read_to_string(&head_path)?;
@@ -273,11 +302,15 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 
     // 6. Update HEAD
     let commit_id = hash.to_hex().to_string();
-    fs::write(head_path, &commit_id)?;
+    fs::write(&head_path, &commit_id)?;
 
     // 7. Clear index
     index.files.clear();
     index.save(&shard_dir.join("index"))?;
+
+    // WAL: mark commit complete
+    wal.append(&wal::WalEntry::CommitEnd)?;
+    wal.truncate()?;
 
     println!("Committed {} ({})", commit_id, message);
     Ok(())

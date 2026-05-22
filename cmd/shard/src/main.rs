@@ -83,6 +83,8 @@ enum Commands {
     },
     /// Prune unreachable objects
     Prune,
+    /// Recover from a crash using the write-ahead log
+    Recover,
     /// Sync with peers via pubsub announcements
     Sync,
 }
@@ -188,6 +190,10 @@ async fn main() -> Result<()> {
         Commands::Prune => {
             let current_dir = env::current_dir()?;
             shard_core::prune(&current_dir)?;
+        }
+        Commands::Recover => {
+            let current_dir = env::current_dir()?;
+            shard_core::recover(&current_dir)?;
         }
         Commands::Sync => {
             let current_dir = env::current_dir()?;
