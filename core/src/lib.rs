@@ -33,7 +33,10 @@ pub fn init(
 ) -> Result<()> {
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
-        anyhow::bail!("Shard repository already initialized");
+        anyhow::bail!(
+            "repository already initialized at {} (run `shard status` to confirm)",
+            shard_dir.display()
+        );
     }
     fs::create_dir_all(shard_dir.join("objects"))?;
     fs::create_dir_all(shard_dir.join("keys"))?;
@@ -156,7 +159,7 @@ fn add_file(
 pub fn recover(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     wal::recover(&shard_dir)?;
     info!("Recovery complete.");
@@ -166,7 +169,7 @@ pub fn recover(path: &Path) -> Result<()> {
 pub fn add(path: &Path, file_path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     wal::recover(&shard_dir)?;
@@ -223,7 +226,7 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
 pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     // Recover from any previous crash before mutating
@@ -233,7 +236,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     let mut index = Index::load(&shard_dir.join("index"))?;
 
     if index.files.is_empty() {
-        anyhow::bail!("Nothing to commit");
+        anyhow::bail!("nothing to commit (stage files with `shard add` first)");
     }
 
     let head_path = shard_dir.join("HEAD");
@@ -324,11 +327,13 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
+    if commit_id.len() < 2 {
+        anyhow::bail!("invalid commit id (too short: need at least 2 characters)");
+    }
     let store = Store::open(&shard_dir)?;
-
     let commit_data = store.get_chunk(commit_id)?;
     let commit: Commit = serde_json::from_slice(&commit_data)?;
 
@@ -365,7 +370,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         let manifest_data = store.get_chunk(manifest_id)?;
         let hash = blake3::hash(&manifest_data);
         if hash.to_hex().to_string() != *manifest_id {
-            anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
+            anyhow::bail!("manifest object hash mismatch for manifest '{}': content does not match stored hash. The object store may be corrupted.", manifest_id);
         }
 
         let manifest: FileManifest = serde_json::from_slice(&manifest_data)?;
@@ -382,7 +387,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
             let decompressed = compression.decompress(&chunk_data)?;
             let hash = blake3::hash(&decompressed);
             if hash.to_hex().to_string() != *chunk_id {
-                anyhow::bail!("Chunk hash mismatch: {}", chunk_id);
+                anyhow::bail!("chunk hash mismatch for '{}': content does not match stored hash (expected {}, got {}). File may be corrupted.", manifest.name, chunk_id, hash.to_hex());
             }
         }
         files_checked += 1;
@@ -406,7 +411,11 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
 
 fn load_commit(store: &Store, commit_id: &str) -> Result<Commit> {
     if commit_id.len() < 2 {
-        anyhow::bail!("Commit ID too short: {}", commit_id);
+        anyhow::bail!(
+            "commit id too short (got {} chars, need at least 2): '{}'",
+            commit_id.len(),
+            commit_id
+        );
     };
     let data = store.get_chunk(commit_id)?;
     let mut commit: Commit = serde_json::from_slice(&data)?;
@@ -442,13 +451,14 @@ impl From<Commit> for LogEntry {
 pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let store = Store::open(&shard_dir)?;
 
     let (_, head_commit) = branch::resolve_head(&shard_dir)?;
-    let head = head_commit.ok_or_else(|| anyhow::anyhow!("No commits yet"))?;
+    let head = head_commit
+        .ok_or_else(|| anyhow::anyhow!("no commits yet (run `shard commit` after adding files)"))?;
 
     let mut entries: Vec<LogEntry> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -496,7 +506,7 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
 pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let store = Store::open(&shard_dir)?;
@@ -560,7 +570,7 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
 pub fn status(path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let (current_branch, head_commit) = branch::resolve_head(&shard_dir)?;
@@ -680,7 +690,7 @@ fn save_config(
 pub fn config_get(path: &Path, key: Option<&str>) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let config = load_config(&shard_dir)?;
     if let Some(key) = key {
@@ -699,7 +709,7 @@ pub fn config_get(path: &Path, key: Option<&str>) -> Result<()> {
 pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let mut config = load_config(&shard_dir)?;
     config.insert(key.to_string(), value.to_string());
@@ -727,7 +737,7 @@ fn save_tags(shard_dir: &Path, tags: &std::collections::BTreeMap<String, String>
 pub fn tag_add(path: &Path, name: &str, commit_id: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     // Verify commit exists
     let store = Store::open(&shard_dir)?;
@@ -742,7 +752,7 @@ pub fn tag_add(path: &Path, name: &str, commit_id: &str) -> Result<()> {
 pub fn branch_create(path: &Path, name: &str, commit_id: Option<&str>) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let id = match commit_id {
         Some(cid) => cid.to_string(),
@@ -760,7 +770,7 @@ pub fn branch_create(path: &Path, name: &str, commit_id: Option<&str>) -> Result
 pub fn branch_delete(path: &Path, name: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     branch::delete_branch(&shard_dir, name)
 }
@@ -768,7 +778,7 @@ pub fn branch_delete(path: &Path, name: &str) -> Result<()> {
 pub fn branch_list(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let (current, branches) = branch::list_branches(&shard_dir)?;
     if branches.is_empty() {
@@ -794,7 +804,7 @@ pub fn branch_list(path: &Path) -> Result<()> {
 pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let store = Store::open(&shard_dir)?;
@@ -898,7 +908,7 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
 pub fn tag_list(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let tags = load_tags(&shard_dir)?;
     if tags.is_empty() {
@@ -950,7 +960,7 @@ fn collect_reachable(
 pub fn prune(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let store = Store::open(&shard_dir)?;
@@ -1022,12 +1032,12 @@ pub fn prune(path: &Path) -> Result<()> {
 pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     // Validate multiaddr format
     if multiaddr.is_empty() || multiaddr.parse::<shard_net::libp2p::Multiaddr>().is_err() {
-        anyhow::bail!("Invalid multiaddr: {}", multiaddr);
+        anyhow::bail!("invalid multiaddr '{}' (must be a valid libp2p multiaddr, e.g. /ip4/1.2.3.4/tcp/5678/p2p/...)", multiaddr);
     }
 
     let peers_path = shard_dir.join("peers.json");
@@ -1116,7 +1126,7 @@ pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> 
 pub fn backup(path: &Path, output: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let file = fs::File::create(output)?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
@@ -1130,7 +1140,7 @@ pub fn backup(path: &Path, output: &Path) -> Result<()> {
 pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let store = Store::open(&shard_dir)?;
     let commit = load_commit(&store, commit_id)?;
@@ -1176,7 +1186,7 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
 pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     // Walk files in source_dir
     let config = load_config(&shard_dir)?;
@@ -1302,7 +1312,7 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
 pub async fn share(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let mut node = shard_net::p2p::Node::new().await?;
@@ -1333,7 +1343,7 @@ pub async fn share(path: &Path) -> Result<()> {
 pub async fn sync(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let config = load_config(&shard_dir)?;
@@ -1714,7 +1724,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
 pub async fn push(path: &Path, peer: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let (_, head_id) = branch::resolve_head(&shard_dir)?;

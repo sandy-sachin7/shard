@@ -135,7 +135,7 @@ fn test_empty_commit_fails() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Nothing to commit"),
+        stderr.contains("nothing to commit"),
         "wrong error: {stderr}"
     );
 }
