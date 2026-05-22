@@ -2,7 +2,10 @@
 name = "shard-storage"
 version = "0.1.0"
 edition = "2021"
+description = "Storage backends for shard (sled, sqlite, flat)"
 
 [dependencies]
 anyhow = { workspace = true }
-tokio = { workspace = true, features = ["fs"] }
+sled = "0.34"
+serde = { workspace = true }
+serde_json = { workspace = true }

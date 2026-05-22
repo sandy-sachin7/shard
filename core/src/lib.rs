@@ -20,7 +20,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub fn init(path: &Path) -> Result<()> {
+pub fn init(path: &Path, backend: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
         anyhow::bail!("Shard repository already initialized");
@@ -37,11 +37,13 @@ pub fn init(path: &Path) -> Result<()> {
     let repo_id = blake3::hash(&pubkey).to_hex().to_string();
     let mut config = load_config(&shard_dir)?;
     config.insert("repo_id".to_string(), repo_id);
+    config.insert("storage_backend".to_string(), backend.to_string());
     save_config(&shard_dir, &config)?;
 
     println!(
-        "Initialized empty Shard repository in {}",
-        shard_dir.display()
+        "Initialized empty Shard repository in {} with {} storage",
+        shard_dir.display(),
+        backend
     );
     Ok(())
 }
@@ -52,7 +54,7 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let store = Store::new(&shard_dir);
+    let store = Store::open(&shard_dir)?;
     let mut index = Index::load(&shard_dir.join("index"))?;
 
     let file = fs::File::open(file_path)?;
@@ -91,7 +93,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let store = Store::new(&shard_dir);
+    let store = Store::open(&shard_dir)?;
     let mut index = Index::load(&shard_dir.join("index"))?;
 
     if index.files.is_empty() {
@@ -171,20 +173,10 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let store = Store::new(&shard_dir);
+    let store = Store::open(&shard_dir)?;
 
-    if commit_id.len() < 2 {
-        anyhow::bail!("Commit ID too short: {}", commit_id);
-    }
-    let prefix = &commit_id[..2];
-    let obj_path = shard_dir.join("objects").join(prefix).join(commit_id);
-
-    if !obj_path.exists() {
-        anyhow::bail!("Commit object not found: {}", commit_id);
-    }
-
-    let data = fs::read(obj_path)?;
-    let commit: Commit = serde_json::from_slice(&data)?;
+    let commit_data = store.get_chunk(commit_id)?;
+    let commit: Commit = serde_json::from_slice(&commit_data)?;
 
     let mut sig_verified = false;
     let mut files_checked = 0u64;
@@ -253,13 +245,11 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn load_commit(shard_dir: &Path, commit_id: &str) -> Result<Commit> {
+fn load_commit(store: &Store, commit_id: &str) -> Result<Commit> {
     if commit_id.len() < 2 {
         anyhow::bail!("Commit ID too short: {}", commit_id);
-    }
-    let prefix = &commit_id[..2];
-    let path = shard_dir.join("objects").join(prefix).join(commit_id);
-    let data = fs::read(path)?;
+    };
+    let data = store.get_chunk(commit_id)?;
     let mut commit: Commit = serde_json::from_slice(&data)?;
     commit.commit_id = commit_id.to_string();
     Ok(commit)
@@ -296,6 +286,8 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
+    let store = Store::open(&shard_dir)?;
+
     let head_path = shard_dir.join("HEAD");
     if !head_path.exists() {
         anyhow::bail!("No commits yet");
@@ -312,7 +304,7 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
         if !seen.insert(cid.clone()) {
             continue;
         }
-        let commit = load_commit(&shard_dir, &cid)?;
+        let commit = load_commit(&store, &cid)?;
         for parent in &commit.parents {
             stack.push(parent.clone());
         }
@@ -353,8 +345,8 @@ pub fn checkout(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let store = Store::new(&shard_dir);
-    let commit = load_commit(&shard_dir, commit_id)?;
+    let store = Store::open(&shard_dir)?;
+    let commit = load_commit(&store, commit_id)?;
     let mut files = Vec::new();
 
     for manifest_id in &commit.manifests {
@@ -425,11 +417,11 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         }
     }
 
+    let store = Store::open(&shard_dir)?;
     let mut deleted = Vec::new();
     let tracked_names: std::collections::HashSet<String> = if let Some(head) = &commit_id {
         let mut names = std::collections::HashSet::new();
-        if let Ok(commit) = load_commit(&shard_dir, head) {
-            let store = Store::new(&shard_dir);
+        if let Ok(commit) = load_commit(&store, head) {
             for manifest_id in &commit.manifests {
                 if let Ok(data) = store.get_chunk(manifest_id) {
                     if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&data) {
@@ -564,7 +556,8 @@ pub fn tag_add(path: &Path, name: &str, commit_id: &str) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
     // Verify commit exists
-    load_commit(&shard_dir, commit_id)?;
+    let store = Store::open(&shard_dir)?;
+    load_commit(&store, commit_id)?;
     let mut tags = load_tags(&shard_dir)?;
     tags.insert(name.to_string(), commit_id.to_string());
     save_tags(&shard_dir, &tags)?;
@@ -590,7 +583,6 @@ pub fn tag_list(path: &Path) -> Result<()> {
 
 fn collect_reachable(
     store: &Store,
-    shard_dir: &Path,
     commit_id: &str,
     seen_commits: &mut std::collections::HashSet<String>,
     reachable: &mut std::collections::HashSet<String>,
@@ -601,7 +593,7 @@ fn collect_reachable(
 
     reachable.insert(commit_id.to_string());
 
-    let commit = match load_commit(shard_dir, commit_id) {
+    let commit = match load_commit(store, commit_id) {
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
@@ -619,7 +611,7 @@ fn collect_reachable(
     }
 
     for parent_id in &commit.parents {
-        collect_reachable(store, shard_dir, parent_id, seen_commits, reachable)?;
+        collect_reachable(store, parent_id, seen_commits, reachable)?;
     }
 
     Ok(())
@@ -631,7 +623,7 @@ pub fn prune(path: &Path) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let store = Store::new(&shard_dir);
+    let store = Store::open(&shard_dir)?;
     let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 1. Walk from HEAD commit
@@ -641,7 +633,6 @@ pub fn prune(path: &Path) -> Result<()> {
         let head = head.trim().to_string();
         collect_reachable(
             &store,
-            &shard_dir,
             &head,
             &mut std::collections::HashSet::new(),
             &mut reachable,
@@ -653,7 +644,6 @@ pub fn prune(path: &Path) -> Result<()> {
     for commit_id in tags.values() {
         collect_reachable(
             &store,
-            &shard_dir,
             commit_id,
             &mut std::collections::HashSet::new(),
             &mut reachable,
@@ -673,25 +663,15 @@ pub fn prune(path: &Path) -> Result<()> {
     }
 
     // 4. Scan objects and remove unreachable
-    let objects_dir = shard_dir.join("objects");
+    let all_chunks = store.iter_chunks()?;
     let mut pruned = 0u64;
     let mut kept = 0u64;
-    if objects_dir.exists() {
-        for entry in fs::read_dir(&objects_dir)? {
-            let entry = entry?;
-            let prefix_dir = entry.path();
-            if prefix_dir.is_dir() {
-                for file_entry in fs::read_dir(&prefix_dir)? {
-                    let file_entry = file_entry?;
-                    let hash_hex = file_entry.file_name().to_string_lossy().to_string();
-                    if !reachable.contains(&hash_hex) {
-                        fs::remove_file(file_entry.path())?;
-                        pruned += 1;
-                    } else {
-                        kept += 1;
-                    }
-                }
-            }
+    for (hash_hex, full_path) in &all_chunks {
+        if !reachable.contains(hash_hex) {
+            store.delete_chunk(hash_hex, Some(full_path))?;
+            pruned += 1;
+        } else {
+            kept += 1;
         }
     }
 
@@ -774,7 +754,7 @@ pub async fn share(path: &Path) -> Result<()> {
     // In a real implementation, we would load the repo and serve requests.
     // For now, we just start the node to prove connectivity.
     println!("Sharing repository...");
-    let store = Store::new(&shard_dir);
+    let store = Store::open(&shard_dir)?;
     let provider = RepoProvider { store };
     node.run(provider).await;
 
@@ -825,7 +805,7 @@ pub async fn sync(path: &Path) -> Result<()> {
     println!("Syncing on topic with peer id: {}", node.local_peer_id());
     let _ = std::io::stdout().flush();
 
-    let store = Store::new(&shard_dir);
+    let store = Store::open(&shard_dir)?;
     let provider = RepoProvider { store };
 
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -1024,10 +1004,10 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     // if !shard_dir.exists() { init(path)?; }
 
     if !shard_dir.exists() {
-        init(path)?;
+        init(path, "flat")?;
     }
 
-    let store = Store::new(&shard_dir);
+    let store = Store::open(&shard_dir)?;
 
     let mut node = shard_net::p2p::Node::new().await?;
 

@@ -18,6 +18,9 @@ enum Commands {
         /// Initialize as a private repository
         #[arg(long)]
         private: bool,
+        /// Storage backend (flat, sled)
+        #[arg(long, default_value = "flat")]
+        db: String,
     },
     /// Add a file to the staging area
     Add { path: PathBuf },
@@ -102,9 +105,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Init { private } => {
+        Commands::Init { private, db } => {
             let current_dir = env::current_dir()?;
-            shard_core::init(&current_dir)?;
+            shard_core::init(&current_dir, db)?;
             if *private {
                 shard_core::config_set(&current_dir, "private", "true")?;
             }
