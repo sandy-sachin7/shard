@@ -126,22 +126,21 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 
     // 3. Create commit
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let keys = KeyPair::load(&shard_dir.join("keys"))?;
+    let public_key_hex = hex::encode(keys.verifying_key.to_bytes());
     let mut commit = Commit {
-        commit_id: String::new(), // Placeholder
+        commit_id: String::new(),
         parents,
         manifests: manifest_ids,
         author: author.to_string(),
         message: message.to_string(),
         timestamp,
+        public_key: Some(public_key_hex),
         signature: None,
     };
 
     // 4. Sign
-    // Load keys
-    let keys = KeyPair::load(&shard_dir.join("keys"))?;
     let signing_key = keys.signing_key;
-
-    // Canonical JSON for signing (without signature)
     let json_unsigned = serde_json::to_vec(&commit)?;
     let signature = signing_key.sign(&json_unsigned);
     commit.signature = Some(hex::encode(signature.to_bytes()));
@@ -190,10 +189,14 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     let mut files_checked = 0u64;
 
     if let Some(sig_hex) = &commit.signature {
-        let pub_key_path = shard_dir.join("keys/public.key");
-        let pub_bytes = fs::read(pub_key_path)?;
-        let verifying_key =
-            ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?;
+        let verifying_key = if let Some(pk_hex) = &commit.public_key {
+            let pk_bytes = hex::decode(pk_hex)?;
+            ed25519_dalek::VerifyingKey::from_bytes(pk_bytes.as_slice().try_into()?)?
+        } else {
+            let pub_key_path = shard_dir.join("keys/public.key");
+            let pub_bytes = fs::read(pub_key_path)?;
+            ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?
+        };
 
         let mut unsigned_commit = commit.clone();
         unsigned_commit.signature = None;
