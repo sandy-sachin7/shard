@@ -1070,6 +1070,20 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
     fn get_chunk(&self, id: &str) -> Option<Vec<u8>> {
         self.store.get_chunk(id).ok()
     }
+    fn put_chunk(&mut self, id: &str, data: &[u8]) -> bool {
+        let hash = blake3::hash(data);
+        let hex = hash.to_hex().to_string();
+        if hex != id {
+            return false;
+        }
+        self.store
+            .put_chunk(&crate::chunker::Chunk {
+                hash,
+                data: data.to_vec(),
+                offset: 0,
+            })
+            .is_ok()
+    }
 }
 
 pub async fn share(path: &Path) -> Result<()> {
@@ -1142,7 +1156,7 @@ pub async fn sync(path: &Path) -> Result<()> {
     let _ = std::io::stdout().flush();
 
     let store = Store::open(&shard_dir)?;
-    let provider = RepoProvider { store };
+    let mut provider = RepoProvider { store };
 
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     let mut address_book: HashMap<shard_net::libp2p::PeerId, Vec<shard_net::libp2p::Multiaddr>> =
@@ -1249,7 +1263,7 @@ pub async fn sync(path: &Path) -> Result<()> {
                         } = message
                         {
                             println!("Received request from {}", peer);
-                            node.serve_request(&provider, request, channel);
+                            node.serve_request(&mut provider, request, channel);
                         } else {
                             println!("Received Response from {}", peer);
                         }
@@ -1475,5 +1489,73 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     }
 
     println!("Pull complete.");
+    Ok(())
+}
+
+pub async fn push(path: &Path, peer: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let (_, head_id) = branch::resolve_head(&shard_dir)?;
+    let head_id = head_id.ok_or_else(|| anyhow::anyhow!("No commits to push"))?;
+
+    let store = Store::open(&shard_dir)?;
+
+    // Collect all reachable objects
+    let mut objects: std::collections::BTreeMap<String, Vec<u8>> =
+        std::collections::BTreeMap::new();
+
+    // Walk commits
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![head_id.clone()];
+    while let Some(cid) = stack.pop() {
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
+        if let Ok(data) = store.get_chunk(&cid) {
+            objects.insert(cid, data.clone());
+            if let Ok(commit) = serde_json::from_slice::<Commit>(&data) {
+                for mid in &commit.manifests {
+                    if let Ok(manifest_data) = store.get_chunk(mid) {
+                        objects.insert(mid.clone(), manifest_data.clone());
+                        if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&manifest_data)
+                        {
+                            for cid in &manifest.chunks {
+                                if let Ok(chunk_data) = store.get_chunk(cid) {
+                                    objects.insert(cid.clone(), chunk_data);
+                                }
+                            }
+                        }
+                    }
+                }
+                for parent in &commit.parents {
+                    stack.push(parent.clone());
+                }
+            }
+        }
+    }
+
+    println!(
+        "Pushing {} objects ({} bytes)...",
+        objects.len(),
+        objects.values().map(|v| v.len() as u64).sum::<u64>()
+    );
+
+    // Connect and send all objects
+    let mut node = shard_net::p2p::Node::new().await?;
+    let multiaddr: shard_net::libp2p::Multiaddr = peer.parse()?;
+    let peer_id = match multiaddr.iter().last() {
+        Some(shard_net::libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,
+        _ => anyhow::bail!("Multiaddr must end with /p2p/<peer_id>"),
+    };
+
+    for (id, data) in &objects {
+        node.request_put_chunk(&multiaddr, peer_id, id.clone(), data.clone())
+            .await?;
+    }
+
+    println!("Push complete ({} objects).", objects.len());
     Ok(())
 }

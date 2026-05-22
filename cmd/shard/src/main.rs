@@ -55,6 +55,8 @@ enum Commands {
     Share,
     /// Pull a commit from a peer
     Pull { peer: String, commit_id: String },
+    /// Push all reachable objects to a peer
+    Push { peer: String },
     /// Show commit log
     Log {
         #[arg(long)]
@@ -190,6 +192,10 @@ async fn main() -> Result<()> {
         Commands::Pull { peer, commit_id } => {
             let current_dir = env::current_dir()?;
             shard_core::pull(&current_dir, peer, commit_id).await?;
+        }
+        Commands::Push { peer } => {
+            let current_dir = env::current_dir()?;
+            shard_core::push(&current_dir, peer).await?;
         }
         Commands::Log { json } => {
             let current_dir = env::current_dir()?;

@@ -96,13 +96,14 @@ impl Node {
 pub trait ShardContentProvider {
     fn get_manifest(&self, id: &str) -> Option<Vec<u8>>;
     fn get_chunk(&self, id: &str) -> Option<Vec<u8>>;
+    fn put_chunk(&mut self, id: &str, data: &[u8]) -> bool;
 }
 
 impl Node {
     /// Serve a content request through the given response channel.
     pub fn serve_request(
         &mut self,
-        provider: &impl ShardContentProvider,
+        provider: &mut impl ShardContentProvider,
         request: ShardRequest,
         channel: request_response::ResponseChannel<ShardResponse>,
     ) {
@@ -137,6 +138,17 @@ impl Node {
                         .send_response(channel, ShardResponse::NotFound);
                 }
             }
+            ShardRequest::PutChunk { id, data } => {
+                let ok = provider.put_chunk(&id, &data);
+                let _ = self.swarm.behaviour_mut().request_response.send_response(
+                    channel,
+                    if ok {
+                        ShardResponse::PutAck
+                    } else {
+                        ShardResponse::NotFound
+                    },
+                );
+            }
         }
     }
 
@@ -145,7 +157,7 @@ impl Node {
         Ok(())
     }
 
-    pub async fn run(&mut self, provider: impl ShardContentProvider) {
+    pub async fn run(&mut self, mut provider: impl ShardContentProvider) {
         loop {
             tokio::select! {
                 _ = signal::ctrl_c() => {
@@ -188,7 +200,7 @@ impl Node {
                                 request, channel, ..
                             } => {
                                 println!("Received request from {}", peer);
-                                self.serve_request(&provider, request, channel);
+                                self.serve_request(&mut provider, request, channel);
                             }
                             request_response::Message::Response { .. } => {
                                 println!("Received Response from {}", peer);
@@ -258,6 +270,68 @@ impl Node {
             .await
     }
 
+    pub async fn request_put_chunk(
+        &mut self,
+        multiaddr: &libp2p::Multiaddr,
+        peer: PeerId,
+        id: String,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        self.swarm.add_peer_address(peer, multiaddr.clone());
+        self.swarm.dial(multiaddr.clone())?;
+        let mut request_id = None;
+
+        loop {
+            match self.swarm.select_next_some().await {
+                SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
+                    let rid = self.swarm.behaviour_mut().request_response.send_request(
+                        &peer,
+                        ShardRequest::PutChunk {
+                            id: id.clone(),
+                            data: data.clone(),
+                        },
+                    );
+                    request_id = Some(rid);
+                }
+                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                    request_response::Event::Message { message, .. },
+                )) => {
+                    if let Some(rid) = &request_id {
+                        if let request_response::Message::Response {
+                            request_id: actual_rid,
+                            response,
+                        } = message
+                        {
+                            if *rid == actual_rid {
+                                return match response {
+                                    ShardResponse::PutAck => Ok(()),
+                                    ShardResponse::NotFound => anyhow::bail!("Peer rejected chunk"),
+                                    _ => anyhow::bail!("Unexpected response to put"),
+                                };
+                            }
+                        }
+                    }
+                }
+                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                    request_response::Event::OutboundFailure { peer, error, .. },
+                )) => {
+                    anyhow::bail!("Outbound failure to {}: {:?}", peer, error);
+                }
+                SwarmEvent::ConnectionClosed { peer_id, cause, .. } if peer_id == peer => {
+                    eprintln!("Connection closed to {}: {:?}", peer_id, cause);
+                    let _ = self.swarm.dial(multiaddr.clone());
+                }
+                SwarmEvent::OutgoingConnectionError {
+                    peer_id: Some(p), ..
+                } if p == peer => {
+                    eprintln!("Outgoing connection error: {:?}", p);
+                    let _ = self.swarm.dial(multiaddr.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
     async fn dial_send_wait(
         &mut self,
         multiaddr: &libp2p::Multiaddr,
@@ -293,6 +367,7 @@ impl Node {
                                         Ok(data)
                                     }
                                     ShardResponse::NotFound => anyhow::bail!("Not found"),
+                                    _ => anyhow::bail!("Unexpected response"),
                                 };
                             }
                         }
@@ -374,6 +449,9 @@ impl Node {
                             }
                             ShardResponse::NotFound => {
                                 anyhow::bail!("Object not found: {}", original_id);
+                            }
+                            _ => {
+                                anyhow::bail!("Unexpected response for: {}", original_id);
                             }
                         }
                         if request_map.is_empty() && sent {
