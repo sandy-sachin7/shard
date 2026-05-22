@@ -21,6 +21,9 @@ enum Commands {
         /// Storage backend (flat, sled)
         #[arg(long, default_value = "flat")]
         db: String,
+        /// Compression algorithm (none, zstd, zlib)
+        #[arg(long, default_value = "zstd")]
+        compression: String,
     },
     /// Add a file to the staging area
     Add { path: PathBuf },
@@ -105,9 +108,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Init { private, db } => {
+        Commands::Init {
+            private,
+            db,
+            compression,
+        } => {
             let current_dir = env::current_dir()?;
-            shard_core::init(&current_dir, db)?;
+            shard_core::init(&current_dir, db, compression)?;
             if *private {
                 shard_core::config_set(&current_dir, "private", "true")?;
             }

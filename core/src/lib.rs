@@ -1,11 +1,13 @@
 pub mod chunker;
 pub mod commit;
+pub mod compression;
 pub mod index;
 pub mod manifest;
 pub mod store;
 
 use crate::chunker::Chunker;
 use crate::commit::Commit;
+use crate::compression::Compression;
 use crate::index::Index;
 use crate::manifest::FileManifest;
 use crate::store::Store;
@@ -20,7 +22,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub fn init(path: &Path, backend: &str) -> Result<()> {
+pub fn init(path: &Path, backend: &str, compression_algo: &str) -> Result<()> {
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
         anyhow::bail!("Shard repository already initialized");
@@ -38,12 +40,14 @@ pub fn init(path: &Path, backend: &str) -> Result<()> {
     let mut config = load_config(&shard_dir)?;
     config.insert("repo_id".to_string(), repo_id);
     config.insert("storage_backend".to_string(), backend.to_string());
+    config.insert("compression".to_string(), compression_algo.to_string());
     save_config(&shard_dir, &config)?;
 
     println!(
-        "Initialized empty Shard repository in {} with {} storage",
+        "Initialized empty Shard repository in {} with {} storage (compression: {})",
         shard_dir.display(),
-        backend
+        backend,
+        compression_algo
     );
     Ok(())
 }
@@ -54,6 +58,13 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
+    let config = load_config(&shard_dir)?;
+    let compression: Compression = config
+        .get("compression")
+        .map(|s| s.as_str())
+        .unwrap_or("zstd")
+        .parse()?;
+
     let store = Store::open(&shard_dir)?;
     let mut index = Index::load(&shard_dir.join("index"))?;
 
@@ -63,8 +74,15 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
     let mut total_size = 0;
 
     while let Some(chunk) = chunker.next_chunk()? {
-        store.put_chunk(&chunk)?;
-        chunk_hashes.push(chunk.hash.to_hex().to_string());
+        let hash = chunk.hash;
+        let compressed_data = compression.compress(&chunk.data)?;
+        let stored = crate::chunker::Chunk {
+            hash,
+            data: compressed_data,
+            offset: chunk.offset,
+        };
+        store.put_chunk(&stored)?;
+        chunk_hashes.push(hash.to_hex().to_string());
         total_size += chunk.data.len() as u64;
     }
 
@@ -78,6 +96,7 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         size: total_size,
         chunks: chunk_hashes,
         content_type: None,
+        compression: compression.as_str().to_string(),
     };
 
     index.files.insert(filename.clone(), manifest);
@@ -215,13 +234,18 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         }
 
         let manifest: FileManifest = serde_json::from_slice(&manifest_data)?;
+        let compression = manifest.compression.parse::<Compression>()?;
         if !json {
-            println!("Verifying file: {}", manifest.name);
+            println!(
+                "Verifying file: {} (compression: {})",
+                manifest.name, manifest.compression
+            );
         }
 
         for chunk_id in &manifest.chunks {
             let chunk_data = store.get_chunk(chunk_id)?;
-            let hash = blake3::hash(&chunk_data);
+            let decompressed = compression.decompress(&chunk_data)?;
+            let hash = blake3::hash(&decompressed);
             if hash.to_hex().to_string() != *chunk_id {
                 anyhow::bail!("Chunk hash mismatch: {}", chunk_id);
             }
@@ -356,14 +380,19 @@ pub fn checkout(path: &Path, commit_id: &str, json: bool) -> Result<()> {
             anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
         }
         let manifest: FileManifest = serde_json::from_slice(&data)?;
+        let compression = manifest.compression.parse::<Compression>()?;
         if !json {
-            println!("Checking out file: {}", manifest.name);
+            println!(
+                "Checking out file: {} (compression: {})",
+                manifest.name, manifest.compression
+            );
         }
 
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
             let chunk_data = store.get_chunk(chunk_id)?;
-            file_data.extend_from_slice(&chunk_data);
+            let decompressed = compression.decompress(&chunk_data)?;
+            file_data.extend_from_slice(&decompressed);
         }
         fs::write(path.join(&manifest.name), file_data)?;
         if !json {
@@ -1004,7 +1033,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     // if !shard_dir.exists() { init(path)?; }
 
     if !shard_dir.exists() {
-        init(path, "flat")?;
+        init(path, "flat", "zstd")?;
     }
 
     let store = Store::open(&shard_dir)?;
@@ -1063,6 +1092,8 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
 
     let mut all_chunk_ids: Vec<String> = Vec::new();
     let mut file_manifests: Vec<FileManifest> = Vec::new();
+    // Map chunk_id -> compression type for verification in step 3
+    let mut chunk_compression: HashMap<String, String> = HashMap::new();
 
     for (manifest_id, manifest_data) in &manifest_results {
         let hash = blake3::hash(manifest_data);
@@ -1076,7 +1107,13 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         };
         store.put_chunk(&chunk)?;
         let manifest: FileManifest = serde_json::from_slice(manifest_data)?;
-        println!("Fetching file: {}", manifest.name);
+        println!(
+            "Fetching file: {} (compression: {})",
+            manifest.name, manifest.compression
+        );
+        for cid in &manifest.chunks {
+            chunk_compression.insert(cid.clone(), manifest.compression.clone());
+        }
         all_chunk_ids.extend(manifest.chunks.clone());
         file_manifests.push(manifest);
     }
@@ -1102,10 +1139,19 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
             .request_parallel(&multiaddr, peer_id, chunk_requests)
             .await?;
         for (chunk_id, chunk_data) in &chunk_results {
-            let hash = blake3::hash(chunk_data);
+            // Determine compression from the manifest this chunk belongs to
+            let compression: Compression = chunk_compression
+                .get(chunk_id)
+                .map(|s| s.as_str())
+                .unwrap_or("none")
+                .parse()?;
+            // Decompress to verify the content hash
+            let decompressed = compression.decompress(chunk_data)?;
+            let hash = blake3::hash(&decompressed);
             if hash.to_hex().to_string() != *chunk_id {
                 anyhow::bail!("Chunk hash mismatch: {}", chunk_id);
             }
+            // Store the compressed data (as received)
             let chunk = crate::chunker::Chunk {
                 hash,
                 data: chunk_data.clone(),
@@ -1117,13 +1163,18 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
 
     // 4. Reconstruct all files
     for manifest in &file_manifests {
+        let compression = manifest.compression.parse::<Compression>()?;
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
-            let data = store.get_chunk(chunk_id)?;
-            file_data.extend_from_slice(&data);
+            let compressed = store.get_chunk(chunk_id)?;
+            let decompressed = compression.decompress(&compressed)?;
+            file_data.extend_from_slice(&decompressed);
         }
         fs::write(path.join(&manifest.name), file_data)?;
-        println!("Reconstructed file: {}", manifest.name);
+        println!(
+            "Reconstructed file: {} ({} bytes)",
+            manifest.name, manifest.size
+        );
     }
 
     println!("Pull complete.");
