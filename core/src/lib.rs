@@ -1112,6 +1112,134 @@ pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> 
     Ok(())
 }
 
+pub fn backup(path: &Path, output: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    let file = fs::File::create(output)?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    archive.append_dir_all(".", &shard_dir)?;
+    archive.finish()?;
+    println!("Backup created: {}", output.display());
+    Ok(())
+}
+
+pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    let store = Store::open(&shard_dir)?;
+    let commit = load_commit(&store, commit_id)?;
+    let mut files = Vec::new();
+    for manifest_id in &commit.manifests {
+        let data = store.get_chunk(manifest_id)?;
+        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        let compression = manifest.compression.parse::<Compression>()?;
+        if !json {
+            println!("Exporting file: {}", manifest.name);
+        }
+        let mut file_data = Vec::new();
+        for chunk_id in &manifest.chunks {
+            let chunk_data = store.get_chunk(chunk_id)?;
+            let decompressed = compression.decompress(&chunk_data)?;
+            file_data.extend_from_slice(&decompressed);
+        }
+        let out_path = output_dir.join(&manifest.name);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&out_path, file_data)?;
+        if !json {
+            println!("  -> {}", out_path.display());
+        }
+        files.push(manifest.name);
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "commit_id": commit_id,
+                "files": files,
+                "output_dir": output_dir.to_string_lossy(),
+            }))?
+        );
+    } else {
+        println!("Export complete.");
+    }
+    Ok(())
+}
+
+pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    // Walk files in source_dir
+    let config = load_config(&shard_dir)?;
+    let compression: Compression = config
+        .get("compression")
+        .map(|s| s.as_str())
+        .unwrap_or("zstd")
+        .parse()?;
+    let chunker_mode = chunker::ChunkerMode::from_config(&config);
+    let store = Store::open(&shard_dir)?;
+    let mut index = Index::load(&shard_dir.join("index"))?;
+    if !source_dir.is_dir() {
+        anyhow::bail!("Source must be a directory");
+    }
+    for entry in walkdir::WalkDir::new(source_dir)
+        .into_iter()
+        .filter_entry(|e| {
+            e.file_name()
+                .to_str()
+                .map(|s| !s.starts_with('.'))
+                .unwrap_or(false)
+        })
+    {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            add_file(
+                path,
+                entry.path(),
+                &store,
+                &mut index,
+                &compression,
+                &chunker_mode,
+            )?;
+        }
+    }
+    index.save(&shard_dir.join("index"))?;
+    // Auto-commit
+    if !index.files.is_empty() {
+        commit(path, message, author)?;
+    } else {
+        println!("No files found to import.");
+    }
+    Ok(())
+}
+
+pub fn restore(path: &Path, backup_file: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if shard_dir.exists() {
+        anyhow::bail!(
+            "Repository already exists — remove .shard first or use a different directory"
+        );
+    }
+    let file = fs::File::open(backup_file)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(path)?;
+    // Verify the result
+    if !path.join(".shard").exists() {
+        anyhow::bail!("Backup does not contain a valid .shard directory");
+    }
+    println!("Restored from {}", backup_file.display());
+    Ok(())
+}
+
 struct RepoProvider {
     store: Store,
     shard_dir: std::path::PathBuf,

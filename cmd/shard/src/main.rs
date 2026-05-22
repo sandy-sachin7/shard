@@ -97,6 +97,33 @@ enum Commands {
     Recover,
     /// Sync with peers via pubsub announcements
     Sync,
+    /// Create a backup archive of the .shard directory
+    Backup {
+        /// Output path for the backup tar.gz file
+        output: PathBuf,
+    },
+    /// Export commit files to a directory
+    Export {
+        commit_id: String,
+        /// Output directory for exported files
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import files from a directory as a new commit
+    Import {
+        /// Source directory to import from
+        path: PathBuf,
+        #[arg(short, long)]
+        message: String,
+        #[arg(long, default_value = "User <user@example.com>")]
+        author: String,
+    },
+    /// Restore a repository from a backup archive
+    Restore {
+        /// Path to the backup tar.gz file
+        backup: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -267,6 +294,30 @@ async fn main() -> Result<()> {
         Commands::Sync => {
             let current_dir = env::current_dir()?;
             shard_core::sync(&current_dir).await?;
+        }
+        Commands::Backup { output } => {
+            let current_dir = env::current_dir()?;
+            shard_core::backup(&current_dir, output)?;
+        }
+        Commands::Export {
+            commit_id,
+            output,
+            json,
+        } => {
+            let current_dir = env::current_dir()?;
+            shard_core::export(&current_dir, commit_id, output, *json)?;
+        }
+        Commands::Import {
+            path,
+            message,
+            author,
+        } => {
+            let current_dir = env::current_dir()?;
+            shard_core::import(&current_dir, path, message, author)?;
+        }
+        Commands::Restore { backup } => {
+            let current_dir = env::current_dir()?;
+            shard_core::restore(&current_dir, backup)?;
         }
     }
 
