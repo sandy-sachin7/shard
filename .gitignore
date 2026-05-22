@@ -46,4 +46,3 @@ criterion/
 # Generated benchmark fixtures
 benches/fixtures/medium/
 benches/fixtures/large/
-session-ses_1b40.md
