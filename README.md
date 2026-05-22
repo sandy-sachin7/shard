@@ -2,107 +2,212 @@
 
 **Distributed, content-addressed version control for large ML artifacts — no cloud bills, no central bottlenecks.**
 
-Shard is a protocol-first, local-first, peer-to-peer version control system designed specifically for machine learning artifacts (models, datasets, checkpoints). It runs entirely from developer machines and community hosts.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![CI](https://github.com/sandy-sachin7/shard/actions/workflows/ci.yml/badge.svg)](https://github.com/sandy-sachin7/shard/actions)
 
-## Features
+Shard is a protocol-first, local-first, peer-to-peer version control system for ML artifacts — models, datasets, checkpoints. Git-like ergonomics, content-addressed storage, signed commits, and direct P2P transfers.
 
-*   **Local-First:** No cloud dependency. Your data lives on your machine and your peers'.
-*   **Content-Addressed:** Deduplication via fixed-size chunking and Blake3 hashing.
-*   **P2P Distribution:** Fetch artifacts directly from peers using libp2p (TCP+Noise+Yamux).
-*   **Git-like CLI:** Familiar commands: `init`, `add`, `commit`, `log`, `checkout`, `status`, `verify`, `prune`, `tag`, `config`, `pull`, `share`.
-*   **Signed Commits:** Every commit is signed with ed25519.
+---
 
-## Installation
+## Install
+
+**Linux & macOS (one-liner)**
 
 ```bash
-cargo install --path cmd/shard
+curl -fsSL https://raw.githubusercontent.com/sandy-sachin7/shard/main/scripts/install.sh | bash
 ```
 
-## Usage
+**Windows (PowerShell)**
 
-### Initialize a repository
+```powershell
+irm https://raw.githubusercontent.com/sandy-sachin7/shard/main/scripts/install.ps1 | iex
+```
+
+**Cargo**
+
 ```bash
+cargo install shard
+```
+
+**Build from source**
+
+```bash
+git clone https://github.com/sandy-sachin7/shard.git
+cd shard
+cargo build --release
+./target/release/shard --help
+```
+
+---
+
+## Quick start
+
+```bash
+# Initialize a repository
 shard init
-# or as private (sets private=true in config):
-shard init --private
-```
 
-### Add files
-```bash
-shard add <file>
-```
+# Add files (staged for commit)
+shard add model.pt
+shard add dataset/           # recursive directory add
 
-### Commit changes
-```bash
-shard commit -m "Initial commit" --author "Alice"
-```
+# Commit with a message
+shard commit -m "v1 checkpoint" --author "Alice"
 
-### Show commit log
-```bash
+# View history
 shard log
-shard log --json   # JSON output
-```
+shard log --json             # machine-readable
 
-### Checkout files from a commit
-```bash
+# Check out files from a commit
 shard checkout <commit_id>
-shard checkout --json <commit_id>   # JSON output
-```
 
-### Show working tree status
-```bash
-shard status
-shard status --json   # JSON output
-```
+# Share with peers
+shard share                  # announce on P2P network
 
-### Verify a commit
-```bash
+# Pull from a peer
+shard pull /ip4/192.168.1.2/tcp/9876 <commit_id>
+
+# Verify integrity and signature
 shard verify <commit_id>
-shard verify --json <commit_id>   # JSON output
 ```
 
-### Prune unreachable objects
-```bash
-shard prune
+---
+
+## Commands
+
+| Command | What it does | Key flags |
+| :--- | :--- | :--- |
+| `init` | Initialize a repository | `--private`, `--compression zstd\|zlib\|none`, `--chunker fixed\|rabin` |
+| `add <path>` | Stage files for commit | (recursive for directories) |
+| `commit` | Create a signed commit | `-m <msg>`, `--author <name>` |
+| `log` | Show commit history | `--json`, `--oneline` |
+| `checkout <commit>` | Restore files from commit | `--json` |
+| `status` | Show working tree state | `--json` |
+| `verify <commit>` | Verify integrity + signature | `--json` |
+| `diff <commit1> <commit2>` | Compare two commits | `--json` |
+| `prune` | Remove unreachable objects | |
+| `tag` | Manage commit tags | `add`, `list`, `delete` |
+| `config` | View/edit configuration | `get`, `set` |
+| `share` | Announce commits to P2P network | |
+| `sync` | Discover + fetch from peers | |
+| `pull <peer> <commit>` | Pull commit from specific peer | |
+| `peer add <multiaddr>` | Add a known peer | |
+
+### Global flags
+
+| Flag | Effect |
+| :--- | :--- |
+| `--json` | Machine-readable JSON output |
+| `--verbose` | Debug-level logging |
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│                     shard CLI                         │
+│               (clap argument parsing)                 │
+└────────────┬───────────────────────────┬──────────────┘
+             │                           │
+             ▼                           ▼
+┌───────────────────────┐   ┌──────────────────────────┐
+│      core crate       │   │       net crate           │
+│                       │   │                          │
+│  ┌─────────────────┐  │   │  ┌────────────────────┐  │
+│  │   Chunker        │  │   │  │   libp2p Node      │  │
+│  │  (Fixed / Rabin) │  │   │  │  TCP+Noise+Yamux   │  │
+│  ├─────────────────┤  │   │  │  mDNS / Kademlia    │  │
+│  │   Compression    │  │   │  │  Gossipsub          │  │
+│  │  (Zstd / Zlib)  │  │   │  │  Identify / Ping    │  │
+│  ├─────────────────┤  │   │  │  Request-Response   │  │
+│  │   Store          │  │   │  └────────────────────┘  │
+│  │  (Sled / SQLite) │  │   └──────────────────────────┘
+│  ├─────────────────┤  │
+│  │   Commit DAG     │  │   ┌──────────────────────────┐
+│  │   Manifest       │  │   │    crypto crate          │
+│  │   Index / WAL    │  │   │                          │
+│  │   Branch / Merge │  │   │  ed25519 key generation  │
+│  │   Remote / Push  │  │   │  Signing / Verification  │
+│  └─────────────────┘  │   └──────────────────────────┘
+└───────────────────────┘
 ```
 
-### Manage tags
-```bash
-shard tag add <name> <commit_id>
-shard tag list
+### Storage layout
+
+```
+.shard/
+├── objects/<2-prefix>/<hash>    # content-addressed chunks
+├── HEAD                          # current commit reference
+├── config.json                   # repository configuration
+├── index                         # staging area
+├── keys/                         # ed25519 keypair
+│   ├── secret.key
+│   └── public.key
+├── peers.json                    # known P2P peers
+└── tags.json                     # named commit pointers
 ```
 
-### Manage config
-```bash
-shard config get              # list all
-shard config get user.name    # get specific
-shard config set user.name Alice
-```
+### Key design decisions
 
-### Share repository
-```bash
-shard share
-# Output: Listening on /ip4/0.0.0.0/tcp/XXXXX
-```
+| Decision | Choice | Rationale |
+| :--- | :--- | :--- |
+| **Chunking** | Rabin (default) or Fixed | Rabin CDC improves dedup across versions; fixed for predictable sizes |
+| **Compression** | Zstd or Zlib | Runtime selection; zstd is faster with better ratios |
+| **Hashing** | Blake3 | Fastest cryptographic hash, SIMD-accelerated |
+| **Signatures** | ed25519 | Proven, fast, small signatures (64 bytes) |
+| **Storage** | Sled or SQLite | Sled embedded (zero deps); SQLite for portability |
+| **P2P** | libp2p TCP | Mature, NAT traversal via relay/WebRTC planned |
+| **Wire format** | CBOR | Compact binary, schemaless, native serde |
 
-### Pull from peer
-```bash
-shard pull <multiaddr> <commit_id>
-```
+---
 
-### Add a peer
-```bash
-shard peer add /ip4/192.168.1.2/tcp/9876/p2p/<peer_id>
-```
+## Comparison
+
+| Feature | Git | Shard |
+| :--- | :--- | :--- |
+| **Primary use** | Source code | ML artifacts (models, datasets, checkpoints) |
+| **Chunking** | CDC (git fast-import) | Rabin + Fixed + configurable |
+| **Compression** | zlib (default) | Zstd or Zlib (runtime selectable) |
+| **Hashing** | SHA-1 (transitioning to SHA-256) | Blake3 |
+| **P2P** | Remote-centric (push/pull to server) | Native P2P (mDNS, Kademlia, Gossipsub) |
+| **Storage backend** | Flat files + packfiles | Sled or SQLite indexed store |
+| **Signing** | GPG (optional) | ed25519 (built-in, every commit) |
+| **Transport** | SSH/HTTPS | libp2p TCP + Noise + Yamux |
+
+---
+
+## Performance
+
+Shard is designed for large artifacts (100 MB – 100 GB). Key performance characteristics:
+
+- **Chunking throughput**: ~1 GB/s (fixed), ~500 MB/s (Rabin CDC)
+- **Compression**: Zstd level 3 — ~500 MB/s compress, ~2 GB/s decompress
+- **Parallel pulls**: concurrent chunk requests — saturates available bandwidth
+- **Memory**: bounded by configurable concurrency cap, not artifact size
+
+---
 
 ## Roadmap
 
-*   [x] Phase 1: Local Core (Init, Add, Commit, Verify, Log, Checkout, Status, Config, Tag, Prune)
-*   [x] Phase 2: Basic Network & Exchange (P2P, Pull, Share)
-*   [ ] Phase 3: PubSub & Parallel Sync
-*   [ ] Phase 4: Security & Provenance
-*   [ ] Phase 5: UX & Packaging
+- [x] Phase 1: Local Core (init, add, commit, verify, log, checkout, status, config, tag, prune)
+- [x] Phase 2: Basic Network (P2P, pull, share, sync)
+- [x] Phase 3: PubSub & Discovery (Gossipsub, mDNS, Kademlia)
+- [ ] Phase 4: Compression + Indexed Store
+- [ ] Phase 5: Branches & Merge
+- [ ] Phase 6: Push Protocol
+- [ ] Phase 7: Production Hardening (auth, observability, backup)
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). All contributors must follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

@@ -1,4 +1,48 @@
 /target
+
+# Rust build artifacts
 **/*.rs.bk
+
+# Shard repository data
 .shard/
+
+# Design doc (internal, not for public)
 ANTIGRAVITY.md
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows metadata
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+secrets/
+
+# Python cache (fixture generator)
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs
+*.log
+criterion/
+
+# Generated benchmark fixtures
+benches/fixtures/medium/
+benches/fixtures/large/

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Discussion
+    url: https://github.com/sandy-sachin7/shard/discussions
+    about: Ask questions, share workflows, discuss ideas

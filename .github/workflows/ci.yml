@@ -10,37 +10,65 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  quality:
-    runs-on: ubuntu-latest
+  test:
+    name: Test · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          tools: clippy, rustfmt
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: cargo build
-        run: cargo build --all-targets
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo check
+        run: cargo check
 
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked
 
-      - name: cargo fmt --check
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cargo fmt check
         run: cargo fmt --check
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  audit:
+  security:
+    name: Security audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
-      - name: cargo audit
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit
+      - name: Run audit
+        run: cargo audit
