@@ -16,9 +16,9 @@ serde_json = { workspace = true }
 blake3 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-shard-crypto = { path = "../crypto" }
-shard-storage = { path = "../storage" }
-shard-net = { path = "../net" }
+shard-crypto = { path = "../crypto", version = "1.0.0" }
+shard-storage = { path = "../storage", version = "1.0.0" }
+shard-net = { path = "../net", version = "1.0.0" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 time = { workspace = true }
