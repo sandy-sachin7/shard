@@ -24,6 +24,12 @@ enum Commands {
         /// Compression algorithm (none, zstd, zlib)
         #[arg(long, default_value = "zstd")]
         compression: String,
+        /// Chunking mode (fixed, rabin)
+        #[arg(long, default_value = "fixed")]
+        chunker: String,
+        /// Chunk size in bytes (default 4194304)
+        #[arg(long)]
+        chunk_size: Option<u64>,
     },
     /// Add a file to the staging area
     Add { path: PathBuf },
@@ -112,9 +118,11 @@ async fn main() -> Result<()> {
             private,
             db,
             compression,
+            chunker,
+            chunk_size,
         } => {
             let current_dir = env::current_dir()?;
-            shard_core::init(&current_dir, db, compression)?;
+            shard_core::init(&current_dir, db, compression, chunker, *chunk_size)?;
             if *private {
                 shard_core::config_set(&current_dir, "private", "true")?;
             }

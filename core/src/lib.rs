@@ -5,7 +5,6 @@ pub mod index;
 pub mod manifest;
 pub mod store;
 
-use crate::chunker::Chunker;
 use crate::commit::Commit;
 use crate::compression::Compression;
 use crate::index::Index;
@@ -22,7 +21,13 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub fn init(path: &Path, backend: &str, compression_algo: &str) -> Result<()> {
+pub fn init(
+    path: &Path,
+    backend: &str,
+    compression_algo: &str,
+    chunker_mode: &str,
+    chunk_size: Option<u64>,
+) -> Result<()> {
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
         anyhow::bail!("Shard repository already initialized");
@@ -41,13 +46,40 @@ pub fn init(path: &Path, backend: &str, compression_algo: &str) -> Result<()> {
     config.insert("repo_id".to_string(), repo_id);
     config.insert("storage_backend".to_string(), backend.to_string());
     config.insert("compression".to_string(), compression_algo.to_string());
+    config.insert("chunker_mode".to_string(), chunker_mode.to_string());
+    match chunker_mode {
+        "rabin" => {
+            let chunk_size = chunk_size.unwrap_or(4_194_304);
+            let min = chunk_size / 4;
+            let max = chunk_size * 2;
+            config.insert("chunk_min".to_string(), min.to_string());
+            config.insert("chunk_avg".to_string(), chunk_size.to_string());
+            config.insert("chunk_max".to_string(), max.to_string());
+        }
+        _ => {
+            let cs = chunk_size.unwrap_or(4_194_304);
+            config.insert("chunk_size".to_string(), cs.to_string());
+        }
+    }
     save_config(&shard_dir, &config)?;
 
+    let chunker_desc = if chunker_mode == "rabin" {
+        format!(
+            "rabin (avg {} bytes)",
+            config.get("chunk_avg").unwrap_or(&"4 MiB".to_string())
+        )
+    } else {
+        format!(
+            "fixed ({} bytes)",
+            config.get("chunk_size").unwrap_or(&"4 MiB".to_string())
+        )
+    };
     println!(
-        "Initialized empty Shard repository in {} with {} storage (compression: {})",
+        "Initialized empty Shard repository in {} with {} storage (compression: {}, chunking: {})",
         shard_dir.display(),
         backend,
-        compression_algo
+        compression_algo,
+        chunker_desc,
     );
     Ok(())
 }
@@ -75,9 +107,17 @@ fn add_file(
     store: &Store,
     index: &mut Index,
     compression: &Compression,
+    chunker_mode: &chunker::ChunkerMode,
 ) -> Result<()> {
     let file = fs::File::open(file_path)?;
-    let mut chunker = Chunker::new(file);
+    let mut chunker = match chunker_mode {
+        chunker::ChunkerMode::Fixed { chunk_size } => {
+            chunker::Chunker::new_fixed(Box::new(file), *chunk_size)
+        }
+        chunker::ChunkerMode::Rabin { min, avg, max } => {
+            chunker::Chunker::new_rabin(Box::new(file), *min, *avg, *max)
+        }
+    };
     let mut chunk_hashes = Vec::new();
     let mut total_size = 0;
 
@@ -121,6 +161,8 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         .unwrap_or("zstd")
         .parse()?;
 
+    let chunker_mode = chunker::ChunkerMode::from_config(&config);
+
     let store = Store::open(&shard_dir)?;
     let mut index = Index::load(&shard_dir.join("index"))?;
 
@@ -136,11 +178,25 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         {
             let entry = entry?;
             if entry.file_type().is_file() {
-                add_file(path, entry.path(), &store, &mut index, &compression)?;
+                add_file(
+                    path,
+                    entry.path(),
+                    &store,
+                    &mut index,
+                    &compression,
+                    &chunker_mode,
+                )?;
             }
         }
     } else {
-        add_file(path, file_path, &store, &mut index, &compression)?;
+        add_file(
+            path,
+            file_path,
+            &store,
+            &mut index,
+            &compression,
+            &chunker_mode,
+        )?;
     }
 
     index.save(&shard_dir.join("index"))?;
@@ -1074,7 +1130,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     // if !shard_dir.exists() { init(path)?; }
 
     if !shard_dir.exists() {
-        init(path, "flat", "zstd")?;
+        init(path, "flat", "zstd", "fixed", None)?;
     }
 
     let store = Store::open(&shard_dir)?;
