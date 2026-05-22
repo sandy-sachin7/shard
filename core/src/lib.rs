@@ -22,6 +22,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{error, info};
 
 pub fn init(
     path: &Path,
@@ -78,7 +79,7 @@ pub fn init(
             config.get("chunk_size").unwrap_or(&"4 MiB".to_string())
         )
     };
-    println!(
+    info!(
         "Initialized empty Shard repository in {} with {} storage (compression: {}, chunking: {})",
         shard_dir.display(),
         backend,
@@ -148,7 +149,7 @@ fn add_file(
     };
 
     index.files.insert(name.clone(), manifest);
-    println!("Added {} ({})", name, total_size);
+    info!("Added {} ({})", name, total_size);
     Ok(())
 }
 
@@ -158,7 +159,7 @@ pub fn recover(path: &Path) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
     wal::recover(&shard_dir)?;
-    println!("Recovery complete.");
+    info!("Recovery complete.");
     Ok(())
 }
 
@@ -316,7 +317,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     wal.append(&wal::WalEntry::CommitEnd)?;
     wal.truncate()?;
 
-    println!("Committed {} ({})", commit_id, message);
+    info!("Committed {} ({})", commit_id, message);
     Ok(())
 }
 
@@ -354,10 +355,10 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         verifying_key.verify(&json_unsigned, &signature)?;
         sig_verified = true;
         if !json {
-            println!("Signature verified.");
+            info!("Signature verified.");
         }
     } else if !json {
-        println!("Warning: Commit is unsigned.");
+        info!("Warning: Commit is unsigned.");
     }
 
     for manifest_id in &commit.manifests {
@@ -370,7 +371,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         let manifest: FileManifest = serde_json::from_slice(&manifest_data)?;
         let compression = manifest.compression.parse::<Compression>()?;
         if !json {
-            println!(
+            info!(
                 "Verifying file: {} (compression: {})",
                 manifest.name, manifest.compression
             );
@@ -388,7 +389,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     }
 
     if json {
-        println!(
+        info!(
             "{}",
             serde_json::to_string(&serde_json::json!({
                 "commit_id": commit_id,
@@ -398,7 +399,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
             }))?
         );
     } else {
-        println!("Verification successful.");
+        info!("Verification successful.");
     }
     Ok(())
 }
@@ -465,7 +466,7 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        info!("{}", serde_json::to_string_pretty(&entries)?);
     } else {
         for entry in &entries {
             let ts = {
@@ -475,17 +476,17 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
                 tm.format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_else(|_| entry.timestamp.to_string())
             };
-            println!("commit {}", entry.commit_id);
+            info!("commit {}", entry.commit_id);
             if !entry.parents.is_empty() {
-                println!("parents: {}", entry.parents.join(" "));
+                info!("parents: {}", entry.parents.join(" "));
             }
-            println!("author: {}", entry.author);
-            println!("date:   {}", ts);
-            println!();
+            info!("author: {}", entry.author);
+            info!("date:   {}", ts);
+            info!("");
             for line in entry.message.lines() {
-                println!("    {}", line);
+                info!("    {}", line);
             }
-            println!();
+            info!("");
         }
     }
 
@@ -523,7 +524,7 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
         let manifest: FileManifest = serde_json::from_slice(&data)?;
         let compression = manifest.compression.parse::<Compression>()?;
         if !json {
-            println!(
+            info!(
                 "Checking out file: {} (compression: {})",
                 manifest.name, manifest.compression
             );
@@ -537,13 +538,13 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
         }
         fs::write(path.join(&manifest.name), file_data)?;
         if !json {
-            println!("  -> {}", manifest.name);
+            info!("  -> {}", manifest.name);
         }
         files.push(manifest.name);
     }
 
     if json {
-        println!(
+        info!(
             "{}",
             serde_json::to_string(&serde_json::json!({
                 "commit_id": commit_id,
@@ -551,7 +552,7 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
             }))?
         );
     } else {
-        println!("Checkout complete.");
+        info!("Checkout complete.");
     }
     Ok(())
 }
@@ -568,24 +569,24 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         commit_id = Some(cid);
         if !json {
             if let Some(ref branch) = current_branch {
-                println!("On branch: {}", branch);
+                info!("On branch: {}", branch);
             } else {
-                println!("HEAD detached at {}", commit_id.as_ref().unwrap());
+                info!("HEAD detached at {}", commit_id.as_ref().unwrap());
             }
         }
     } else if !json {
-        println!("No commits yet.");
+        info!("No commits yet.");
     }
 
     let index = Index::load(&shard_dir.join("index"))?;
     let staged: Vec<String> = index.files.keys().cloned().collect();
     if !json {
         if staged.is_empty() {
-            println!("Nothing staged.");
+            info!("Nothing staged.");
         } else {
-            println!("\nStaged files:");
+            info!("\nStaged files:");
             for name in &staged {
-                println!("  {} (to be committed)", name);
+                info!("  {} (to be committed)", name);
             }
         }
     }
@@ -613,9 +614,9 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
     };
 
     if !json && !deleted.is_empty() {
-        println!("\nDeleted files:");
+        info!("\nDeleted files:");
         for name in &deleted {
-            println!("  {} (deleted)", name);
+            info!("  {} (deleted)", name);
         }
     }
 
@@ -636,14 +637,14 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         }
     }
     if !json && !untracked.is_empty() {
-        println!("\nUntracked files:");
+        info!("\nUntracked files:");
         for name in &untracked {
-            println!("  {}", name);
+            info!("  {}", name);
         }
     }
 
     if json {
-        println!(
+        info!(
             "{}",
             serde_json::to_string(&serde_json::json!({
                 "commit": commit_id,
@@ -684,12 +685,12 @@ pub fn config_get(path: &Path, key: Option<&str>) -> Result<()> {
     let config = load_config(&shard_dir)?;
     if let Some(key) = key {
         match config.get(key) {
-            Some(value) => println!("{} = {}", key, value),
+            Some(value) => info!("{} = {}", key, value),
             None => anyhow::bail!("config key not found: {}", key),
         }
     } else {
         for (k, v) in &config {
-            println!("{} = {}", k, v);
+            info!("{} = {}", k, v);
         }
     }
     Ok(())
@@ -703,7 +704,7 @@ pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
     let mut config = load_config(&shard_dir)?;
     config.insert(key.to_string(), value.to_string());
     save_config(&shard_dir, &config)?;
-    println!("{} = {}", key, value);
+    info!("{} = {}", key, value);
     Ok(())
 }
 
@@ -734,7 +735,7 @@ pub fn tag_add(path: &Path, name: &str, commit_id: &str) -> Result<()> {
     let mut tags = load_tags(&shard_dir)?;
     tags.insert(name.to_string(), commit_id.to_string());
     save_tags(&shard_dir, &tags)?;
-    println!("Tagged '{}' -> {}", name, commit_id);
+    info!("Tagged '{}' -> {}", name, commit_id);
     Ok(())
 }
 
@@ -771,7 +772,7 @@ pub fn branch_list(path: &Path) -> Result<()> {
     }
     let (current, branches) = branch::list_branches(&shard_dir)?;
     if branches.is_empty() {
-        println!("No branches.");
+        info!("No branches.");
         return Ok(());
     }
     for (name, commit_id) in &branches {
@@ -780,7 +781,7 @@ pub fn branch_list(path: &Path) -> Result<()> {
         } else {
             "  "
         };
-        println!(
+        info!(
             "{}{} ({})",
             prefix,
             name,
@@ -890,7 +891,7 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
         branch::set_head_commit(&shard_dir, &merge_commit_id)?;
     }
 
-    println!("Merge commit {} ({})", merge_commit_id, message);
+    info!("Merge commit {} ({})", merge_commit_id, message);
     Ok(())
 }
 
@@ -901,10 +902,10 @@ pub fn tag_list(path: &Path) -> Result<()> {
     }
     let tags = load_tags(&shard_dir)?;
     if tags.is_empty() {
-        println!("No tags.");
+        info!("No tags.");
     } else {
         for (name, commit_id) in &tags {
-            println!("{} -> {}", name, commit_id);
+            info!("{} -> {}", name, commit_id);
         }
     }
     Ok(())
@@ -1014,7 +1015,7 @@ pub fn prune(path: &Path) -> Result<()> {
         }
     }
 
-    println!("Pruned {} objects. {} objects remain.", pruned, kept);
+    info!("Pruned {} objects. {} objects remain.", pruned, kept);
     Ok(())
 }
 
@@ -1041,9 +1042,9 @@ pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
         peers.push(multiaddr.to_string());
         let data = serde_json::to_vec(&peers)?;
         fs::write(peers_path, data)?;
-        println!("Added peer: {}", multiaddr);
+        info!("Added peer: {}", multiaddr);
     } else {
-        println!("Peer already exists: {}", multiaddr);
+        info!("Peer already exists: {}", multiaddr);
     }
 
     Ok(())
@@ -1102,13 +1103,13 @@ pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> 
     };
     // Check if key already exists
     if content.lines().any(|l| l.trim() == public_key_hex) {
-        println!("Key already authorized");
+        info!("Key already authorized");
         return Ok(());
     }
     content.push_str(public_key_hex);
     content.push('\n');
     fs::write(&path, content)?;
-    println!("Authorized key added");
+    info!("Authorized key added");
     Ok(())
 }
 
@@ -1122,7 +1123,7 @@ pub fn backup(path: &Path, output: &Path) -> Result<()> {
     let mut archive = tar::Builder::new(encoder);
     archive.append_dir_all(".", &shard_dir)?;
     archive.finish()?;
-    println!("Backup created: {}", output.display());
+    info!("Backup created: {}", output.display());
     Ok(())
 }
 
@@ -1139,7 +1140,7 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
         let manifest: FileManifest = serde_json::from_slice(&data)?;
         let compression = manifest.compression.parse::<Compression>()?;
         if !json {
-            println!("Exporting file: {}", manifest.name);
+            info!("Exporting file: {}", manifest.name);
         }
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
@@ -1153,12 +1154,12 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
         }
         fs::write(&out_path, file_data)?;
         if !json {
-            println!("  -> {}", out_path.display());
+            info!("  -> {}", out_path.display());
         }
         files.push(manifest.name);
     }
     if json {
-        println!(
+        info!(
             "{}",
             serde_json::to_string(&serde_json::json!({
                 "commit_id": commit_id,
@@ -1167,7 +1168,7 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
             }))?
         );
     } else {
-        println!("Export complete.");
+        info!("Export complete.");
     }
     Ok(())
 }
@@ -1216,7 +1217,7 @@ pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Re
     if !index.files.is_empty() {
         commit(path, message, author)?;
     } else {
-        println!("No files found to import.");
+        info!("No files found to import.");
     }
     Ok(())
 }
@@ -1236,7 +1237,7 @@ pub fn restore(path: &Path, backup_file: &Path) -> Result<()> {
     if !path.join(".shard").exists() {
         anyhow::bail!("Backup does not contain a valid .shard directory");
     }
-    println!("Restored from {}", backup_file.display());
+    info!("Restored from {}", backup_file.display());
     Ok(())
 }
 
@@ -1318,7 +1319,7 @@ pub async fn share(path: &Path) -> Result<()> {
 
     // In a real implementation, we would load the repo and serve requests.
     // For now, we just start the node to prove connectivity.
-    println!("Sharing repository...");
+    info!("Sharing repository...");
     let store = Store::open(&shard_dir)?;
     let provider = RepoProvider {
         store,
@@ -1360,14 +1361,14 @@ pub async fn sync(path: &Path) -> Result<()> {
     if let Some(ref head) = head_commit {
         let msg = format!("announce:{}", head);
         match node.publish(&topic, msg.as_bytes()) {
-            Ok(_) => println!("Announced commit {} on sync topic", head),
-            Err(e) => eprintln!("Initial announce (will retry): {}", e),
+            Ok(_) => info!("Announced commit {} on sync topic", head),
+            Err(e) => error!("Initial announce (will retry): {}", e),
         }
     } else {
-        println!("No commits to announce");
+        info!("No commits to announce");
     }
 
-    println!("Syncing on topic with peer id: {}", node.local_peer_id());
+    info!("Syncing on topic with peer id: {}", node.local_peer_id());
     let _ = std::io::stdout().flush();
 
     let store = Store::open(&shard_dir)?;
@@ -1384,22 +1385,22 @@ pub async fn sync(path: &Path) -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                println!("\nSync shutting down...");
+                info!("\nSync shutting down...");
                 break Ok(());
             }
             _ = interval.tick() => {
                 if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
                     let msg = format!("announce:{}", head);
                     match node.publish(&topic, msg.as_bytes()) {
-                        Ok(_) => println!("Re-announced commit {} on sync topic", head),
-                        Err(e) => eprintln!("Re-announce failed: {}", e),
+                        Ok(_) => info!("Re-announced commit {} on sync topic", head),
+                        Err(e) => error!("Re-announce failed: {}", e),
                     }
                 }
             }
             event = node.swarm.select_next_some() => {
                 match event {
                     shard_net::libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
-                        println!("Listening on {address:?}");
+                        info!("Listening on {address:?}");
                         let _ = std::io::stdout().flush();
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
@@ -1408,7 +1409,7 @@ pub async fn sync(path: &Path) -> Result<()> {
                         ),
                     ) => {
                         for (peer_id, multiaddr) in list {
-                            println!("mDNS discovered: {peer_id} {multiaddr}");
+                            info!("mDNS discovered: {peer_id} {multiaddr}");
                             address_book.entry(peer_id).or_default().push(multiaddr.clone());
                             node.swarm
                                 .behaviour_mut()
@@ -1426,7 +1427,7 @@ pub async fn sync(path: &Path) -> Result<()> {
                         )),
                     ) => {
                         for (peer_id, _multiaddr) in list {
-                            println!("mDNS expired: {peer_id}");
+                            info!("mDNS expired: {peer_id}");
                             node.swarm
                                 .behaviour_mut()
                                 .gossipsub
@@ -1444,7 +1445,7 @@ pub async fn sync(path: &Path) -> Result<()> {
                     ) => {
                         if let Ok(text) = String::from_utf8(message.data.clone()) {
                             if let Some(commit_id) = text.strip_prefix("announce:") {
-                                println!(
+                                info!(
                                     "Peer {} announced commit: {}",
                                     propagation_source, commit_id
                                 );
@@ -1462,8 +1463,8 @@ pub async fn sync(path: &Path) -> Result<()> {
                                         let path_clone = path_buf.clone();
                                         tokio::spawn(async move {
                                             match pull(&path_clone, &multiaddr_str, &commit_id_owned).await {
-                                                Ok(_) => println!("Auto-pulled commit {} from {}", commit_id_owned, peer),
-                                                Err(e) => eprintln!("Auto-pull failed for commit {} from {}: {}", commit_id_owned, peer, e),
+                                                Ok(_) => info!("Auto-pulled commit {} from {}", commit_id_owned, peer),
+                                                Err(e) => error!("Auto-pull failed for commit {} from {}: {}", commit_id_owned, peer, e),
                                             }
                                         });
                                     }
@@ -1480,10 +1481,10 @@ pub async fn sync(path: &Path) -> Result<()> {
                             request, channel, ..
                         } = message
                         {
-                            println!("Received request from {}", peer);
+                            info!("Received request from {}", peer);
                             node.serve_request(&peer, &mut provider, request, channel);
                         } else {
-                            println!("Received Response from {}", peer);
+                            info!("Received Response from {}", peer);
                         }
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
@@ -1493,7 +1494,7 @@ pub async fn sync(path: &Path) -> Result<()> {
                             },
                         ),
                     ) => {
-                        eprintln!("Outbound failure to {}: {:?}", peer, error);
+                        error!("Outbound failure to {}: {:?}", peer, error);
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
                         shard_net::p2p::ShardBehaviourEvent::RequestResponse(
@@ -1502,14 +1503,14 @@ pub async fn sync(path: &Path) -> Result<()> {
                             },
                         ),
                     ) => {
-                        eprintln!("Inbound failure from {}: {:?}", peer, error);
+                        error!("Inbound failure from {}: {:?}", peer, error);
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
                         shard_net::p2p::ShardBehaviourEvent::Identify(
                             shard_net::libp2p::identify::Event::Received { peer_id, info },
                         ),
                     ) => {
-                        println!("Identify received from {}: {:?}", peer_id, info.listen_addrs);
+                        info!("Identify received from {}: {:?}", peer_id, info.listen_addrs);
                         for addr in info.listen_addrs {
                             address_book.entry(peer_id).or_default().push(addr);
                         }
@@ -1518,10 +1519,10 @@ pub async fn sync(path: &Path) -> Result<()> {
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
                         shard_net::p2p::ShardBehaviourEvent::Identify(event),
                     ) => {
-                        println!("Identify event: {:?}", event);
+                        info!("Identify event: {:?}", event);
                     }
                     shard_net::libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
-                        println!("Connection established with {}", peer_id);
+                        info!("Connection established with {}", peer_id);
                         // Only store the address when we dialed (it's the peer's listen addr).
                         // For listener connections, send_back_addr is the ephemeral port — useless for dialing back.
                         if let shard_net::libp2p::core::ConnectedPoint::Dialer { address, .. } = &endpoint {
@@ -1542,13 +1543,13 @@ pub async fn sync(path: &Path) -> Result<()> {
                         send_back_addr,
                         ..
                     } => {
-                        println!(
+                        info!(
                             "Incoming connection from {} to {}",
                             send_back_addr, local_addr
                         );
                     }
                     e => {
-                        println!("Event: {:?}", e);
+                        info!("Event: {:?}", e);
                     }
                 }
             }
@@ -1577,7 +1578,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     };
 
     // 1. Get Commit (sequential — single request)
-    println!("Pulling commit {} from {}...", commit_id, peer);
+    info!("Pulling commit {} from {}...", commit_id, peer);
     let commit_data = node
         .request_manifest(&multiaddr, peer_id, commit_id.to_string())
         .await?;
@@ -1593,7 +1594,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     store.put_chunk(&chunk)?;
 
     let commit: Commit = serde_json::from_slice(&commit_data)?;
-    println!("Got commit: {}", commit.message);
+    info!("Got commit: {}", commit.message);
 
     // Set repo_id from commit's public key so clones share the gossipsub topic
     if let Some(pk_hex) = &commit.public_key {
@@ -1636,7 +1637,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         };
         store.put_chunk(&chunk)?;
         let manifest: FileManifest = serde_json::from_slice(manifest_data)?;
-        println!(
+        info!(
             "Fetching file: {} (compression: {})",
             manifest.name, manifest.compression
         );
@@ -1654,7 +1655,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         .collect();
 
     if !needed_chunks.is_empty() {
-        println!("Fetching {} chunks...", needed_chunks.len());
+        info!("Fetching {} chunks...", needed_chunks.len());
         let chunk_requests: Vec<(String, shard_net::protocol::ShardRequest)> = needed_chunks
             .iter()
             .map(|id| {
@@ -1700,13 +1701,13 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
             file_data.extend_from_slice(&decompressed);
         }
         fs::write(path.join(&manifest.name), file_data)?;
-        println!(
+        info!(
             "Reconstructed file: {} ({} bytes)",
             manifest.name, manifest.size
         );
     }
 
-    println!("Pull complete.");
+    info!("Pull complete.");
     Ok(())
 }
 
@@ -1755,7 +1756,7 @@ pub async fn push(path: &Path, peer: &str) -> Result<()> {
         }
     }
 
-    println!(
+    info!(
         "Pushing {} objects ({} bytes)...",
         objects.len(),
         objects.values().map(|v| v.len() as u64).sum::<u64>()
@@ -1774,6 +1775,6 @@ pub async fn push(path: &Path, peer: &str) -> Result<()> {
             .await?;
     }
 
-    println!("Push complete ({} objects).", objects.len());
+    info!("Push complete ({} objects).", objects.len());
     Ok(())
 }
