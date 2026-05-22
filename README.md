@@ -27,7 +27,22 @@ irm https://raw.githubusercontent.com/sandy-sachin7/shard/main/scripts/install.p
 **Cargo**
 
 ```bash
-cargo install shard
+cargo install shard-cli
+```
+
+Build from source
+
+```bash
+git clone https://github.com/sandy-sachin7/shard.git
+cd shard
+cargo build --release
+./target/release/shard --help
+```
+
+Install from local source
+
+```bash
+cargo install --path cmd/shard-cli
 ```
 
 **Build from source**
@@ -69,6 +84,20 @@ shard pull /ip4/192.168.1.2/tcp/9876 <commit_id>
 
 # Verify integrity and signature
 shard verify <commit_id>
+
+# Branching and merging
+shard branch create experiment
+shard checkout experiment
+shard add model.pt
+shard commit -m "experimental changes"
+shard checkout main
+shard merge experiment -m "merge experiment" --author "Alice"
+
+# Backup and recovery
+shard backup /tmp/repo-backup.tar.gz
+shard restore /tmp/repo-backup.tar.gz
+shard export <commit_id> /tmp/reconstructed
+shard import /tmp/datasets -m "imported dataset" --author "Alice"
 ```
 
 ---
@@ -80,18 +109,26 @@ shard verify <commit_id>
 | `init` | Initialize a repository | `--private`, `--compression zstd\|zlib\|none`, `--chunker fixed\|rabin` |
 | `add <path>` | Stage files for commit | (recursive for directories) |
 | `commit` | Create a signed commit | `-m <msg>`, `--author <name>` |
-| `log` | Show commit history | `--json`, `--oneline` |
+| `log` | Show commit history | `--json` |
 | `checkout <commit>` | Restore files from commit | `--json` |
 | `status` | Show working tree state | `--json` |
 | `verify <commit>` | Verify integrity + signature | `--json` |
 | `diff <commit1> <commit2>` | Compare two commits | `--json` |
 | `prune` | Remove unreachable objects | |
 | `tag` | Manage commit tags | `add`, `list`, `delete` |
+| `branch` | Manage branches | `create`, `delete`, `list` |
+| `merge <branch>` | Merge branch into current HEAD | `-m <msg>`, `--author <name>` |
 | `config` | View/edit configuration | `get`, `set` |
 | `share` | Announce commits to P2P network | |
 | `sync` | Discover + fetch from peers | |
 | `pull <peer> <commit>` | Pull commit from specific peer | |
-| `peer add <multiaddr>` | Add a known peer | |
+| `push <peer>` | Push commits to peer | |
+| `peer add <multiaddr>` | Add a known peer | `--public-key <hex>` |
+| `backup <output>` | Create a tar.gz backup | |
+| `restore <backup>` | Restore repo from backup | |
+| `export <commit> <dir>` | Reconstruct commit to directory | `--json` |
+| `import <dir>` | Ingest directory as commit | `-m <msg>`, `--author <name>` |
+| `recover` | Recover from WAL crash | |
 
 ### Global flags
 
@@ -138,12 +175,16 @@ shard verify <commit_id>
 ```
 .shard/
 ├── objects/<2-prefix>/<hash>    # content-addressed chunks
+├── objects.idx                   # chunk index (flat store O(1) iteration)
 ├── HEAD                          # current commit reference
 ├── config.json                   # repository configuration
 ├── index                         # staging area
+├── wal.log                       # write-ahead log (crash recovery)
 ├── keys/                         # ed25519 keypair
 │   ├── secret.key
 │   └── public.key
+├── refs/heads/                   # branch pointers
+├── authorized_keys               # P2P auth whitelist
 ├── peers.json                    # known P2P peers
 └── tags.json                     # named commit pointers
 ```
@@ -156,9 +197,9 @@ shard verify <commit_id>
 | **Compression** | Zstd or Zlib | Runtime selection; zstd is faster with better ratios |
 | **Hashing** | Blake3 | Fastest cryptographic hash, SIMD-accelerated |
 | **Signatures** | ed25519 | Proven, fast, small signatures (64 bytes) |
-| **Storage** | Sled or SQLite | Sled embedded (zero deps); SQLite for portability |
-| **P2P** | libp2p TCP | Mature, NAT traversal via relay/WebRTC planned |
-| **Wire format** | CBOR | Compact binary, schemaless, native serde |
+| **Storage** | Sled or Flat file | Sled embedded (zero deps); flat file for portability |
+| **P2P** | libp2p TCP+Noise+Yamux | Mature, NAT traversal via relay/WebRTC planned |
+| **Wire format** | JSON | Serde JSON over request-response |
 
 ---
 
@@ -193,10 +234,12 @@ Shard is designed for large artifacts (100 MB – 100 GB). Key performance chara
 - [x] Phase 1: Local Core (init, add, commit, verify, log, checkout, status, config, tag, prune)
 - [x] Phase 2: Basic Network (P2P, pull, share, sync)
 - [x] Phase 3: PubSub & Discovery (Gossipsub, mDNS, Kademlia)
-- [ ] Phase 4: Compression + Indexed Store
-- [ ] Phase 5: Branches & Merge
-- [ ] Phase 6: Push Protocol
-- [ ] Phase 7: Production Hardening (auth, observability, backup)
+- [x] Phase 4: Compression + Indexed Store (zstd/zlib, Rabin CDC, sled, WAL)
+- [x] Phase 5: Branches & Merge (branch create/delete/list, merge commits)
+- [x] Phase 6: Push Protocol (object transfer to peer)
+- [x] Phase 7: Production Hardening (auth, tracing, backup/export/import/restore, Docker)
+- [x] Phase 8: Publishing (crate metadata, crates.io publish-ready, 5-target releases)
+- [ ] Phase 9: Enterprise (CI polish, benchmarks, docs, community templates)
 
 ---
 
