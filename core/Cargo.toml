@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/sandy-sachin7/shard"
 homepage = "https://github.com/sandy-sachin7/shard"
 keywords = ["vcs", "version-control", "mlops", "distributed", "content-addressed"]
-categories = ["version-control", "compression"]
+categories = ["compression"]
 
 [dependencies]
 tokio = { workspace = true }

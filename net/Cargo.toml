@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/sandy-sachin7/shard"
 homepage = "https://github.com/sandy-sachin7/shard"
 keywords = ["vcs", "version-control", "mlops", "distributed", "libp2p"]
-categories = ["network", "version-control"]
+categories = ["network-programming"]
 
 [dependencies]
 tokio = { workspace = true }

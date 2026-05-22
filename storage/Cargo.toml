@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/sandy-sachin7/shard"
 homepage = "https://github.com/sandy-sachin7/shard"
 keywords = ["vcs", "version-control", "mlops", "distributed", "storage"]
-categories = ["database", "version-control"]
+categories = ["database"]
 
 [dependencies]
 anyhow = { workspace = true }

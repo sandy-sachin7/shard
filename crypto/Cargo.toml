@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/sandy-sachin7/shard"
 homepage = "https://github.com/sandy-sachin7/shard"
 keywords = ["vcs", "version-control", "mlops", "distributed", "ed25519"]
-categories = ["cryptography", "version-control"]
+categories = ["cryptography"]
 
 [dependencies]
 ed25519-dalek = { workspace = true }
