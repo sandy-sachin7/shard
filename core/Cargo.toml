@@ -1,6 +1,6 @@
 [package]
 name = "shard-core"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "Core library for shard distributed VCS: chunking, compression, commits, branching, merging, WAL"
 license = "MIT"
@@ -16,9 +16,9 @@ serde_json = { workspace = true }
 blake3 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-shard-crypto = { path = "../crypto", version = "1.0.1" }
-shard-storage = { path = "../storage", version = "1.0.1" }
-shard-net = { path = "../net", version = "1.0.1" }
+shard-crypto = { path = "../crypto", version = "1.0.2" }
+shard-storage = { path = "../storage", version = "1.0.2" }
+shard-net = { path = "../net", version = "1.0.2" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 time = { workspace = true }

@@ -1,21 +1,21 @@
 [package]
 name = "shard-cli"
-version = "1.0.0"
+version = "1.0.2"
 edition = "2021"
 description = "CLI for shard distributed VCS — content-addressed version control for large ML artifacts"
 license = "MIT"
 repository = "https://github.com/sandy-sachin7/shard"
 homepage = "https://github.com/sandy-sachin7/shard"
 keywords = ["vcs", "version-control", "mlops", "distributed", "cli"]
-categories = ["command-line-utilities", "version-control"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "shard"
 path = "src/main.rs"
 
 [dependencies]
-shard-core = { path = "../../core" }
-shard-crypto = { path = "../../crypto" }
+shard-core = { path = "../../core", version = "1.0.2" }
+shard-crypto = { path = "../../crypto", version = "1.0.2" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
