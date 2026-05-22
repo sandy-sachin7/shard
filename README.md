@@ -1,10 +1,23 @@
-# Shard
+<div align="center">
+  <h1>💎 Shard</h1>
+  <p><b>Distributed, content-addressed version control for large ML artifacts</b></p>
+  <p><i>No cloud bills, no central bottlenecks. Local-first, protocol-first, peer-to-peer.</i></p>
 
-**Distributed, content-addressed version control for large ML artifacts — no cloud bills, no central bottlenecks.**
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
+  [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
+  [![CI](https://img.shields.io/github/actions/workflow/status/sandy-sachin7/shard/ci.yml?style=for-the-badge&logo=github)](https://github.com/sandy-sachin7/shard/actions)
+  [![Release](https://img.shields.io/github/v/release/sandy-sachin7/shard?style=for-the-badge)](https://github.com/sandy-sachin7/shard/releases)
+  [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](http://makeapullrequest.com)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![CI](https://github.com/sandy-sachin7/shard/actions/workflows/ci.yml/badge.svg)](https://github.com/sandy-sachin7/shard/actions)
+  <br />
+  <br />
+  <a href="#install"><b>Install</b></a> •
+  <a href="#quick-start"><b>Quick Start</b></a> •
+  <a href="#architecture"><b>Architecture</b></a> •
+  <a href="#commands"><b>Commands</b></a>
+</div>
+
+---
 
 Shard is a protocol-first, local-first, peer-to-peer version control system for ML artifacts — models, datasets, checkpoints. Git-like ergonomics, content-addressed storage, signed commits, and direct P2P transfers.
 

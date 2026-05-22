@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "shard-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "shard-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3046,7 +3046,7 @@ dependencies = [
 
 [[package]]
 name = "shard-crypto"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -3055,7 +3055,7 @@ dependencies = [
 
 [[package]]
 name = "shard-net"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3070,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "shard-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
