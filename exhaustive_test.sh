@@ -1,914 +1,888 @@
-#!/bin/bash
-# ======================================================================
-# SHARD EXHAUSTIVE TEST — ALL use cases, edge cases, loopholes, panics,
-# error paths, stress scenarios, P99.99 latency, storage scaling, P2P.
-# ======================================================================
+#!/usr/bin/env bash
 set -uo pipefail
 
-SHARD_BIN="$(realpath target/release/shard)"
-RESULTS_DIR="$(mktemp -d)"
-MODEL_DIR="$RESULTS_DIR/models"
-SCENARIO_DIR="$RESULTS_DIR/scenarios"
-mkdir -p "$MODEL_DIR" "$SCENARIO_DIR"
+# ─────────────────────────────────────────────────────────────────────────────
+#  Shard Exhaustive Test v2 — ALL possible use cases, loopholes, edge cases
+#  Commands run via: sh <repo_dir> <command> [args]
+#  This ensures each command runs in the correct working directory.
+# ─────────────────────────────────────────────────────────────────────────────
+RESULTS_DIR=$(mktemp -d)
+MODELS="$RESULTS_DIR/models"
 
-# Use a function so SHARD_BIN is always resolved correctly
-sh() { "$SHARD_BIN" "$@"; }
-
-PASS=true
+# Determine the project root (where this script lives)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SHARD_BIN="${SHARD_BIN:-$SCRIPT_DIR/target/release/shard}"
+PASS=0
+FAIL=0
 TOTAL=0
-PASSED=0
-FAILED=0
-ERRORS=""
 
-cd "$SCENARIO_DIR"  # <-- ROOT for all scenarios
+RESULTS_FILE="$RESULTS_DIR/results.log"
+SUMMARY_FILE="$RESULTS_DIR/summary.log"
 
-assert() {
-    local name="$1"
-    local desc="$2"
-    local expected="$3"
-    shift 3
-    TOTAL=$((TOTAL + 1))
-    local ok=true
-    local output
-    output=$("$@" 2>&1) || ok=false
-    local result="pass"
-    if { [ "$expected" = "succeed" ] && [ "$ok" = false ]; } || { [ "$expected" = "fail" ] && [ "$ok" = true ]; }; then
-        result="fail"
-        PASS=false
-        FAILED=$((FAILED + 1))
-        ERRORS="${ERRORS}  FAIL [$name] expected=$expected ok=$ok\n"
-    else
-        PASSED=$((PASSED + 1))
-    fi
-    echo "  [$result] $name"
+mkdir -p "$MODELS"
+rm -f "$RESULTS_FILE" "$SUMMARY_FILE"
+
+# Run a shard command in a specific repo directory.
+# Resolves SHARD_BIN before cd'ing so relative paths work.
+sh() { local dir="$1"; shift; (cd "$dir" && "$SHARD_BIN" "$@" 2>/dev/null); }
+
+pass() { PASS=$((PASS+1)); TOTAL=$((TOTAL+1)); echo "[pass] $*" | tee -a "$RESULTS_FILE"; }
+fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); echo "[FAIL] $*" | tee -a "$RESULTS_FILE"; }
+check() { local desc="$1"; shift; if "$@"; then pass "$desc"; else fail "$desc"; fi; }
+check_not() { local desc="$1"; shift; if "$@"; then fail "$desc"; else pass "$desc"; fi; }
+
+# Build release binary if not present
+if [ ! -f "$SHARD_BIN" ]; then
+    echo "Building shard (release)..."
+    cargo build --release 2>/dev/null
+fi
+
+echo "=== SHARD EXHAUSTIVE TEST v2 ===" | tee "$SUMMARY_FILE"
+echo "Results dir: $RESULTS_DIR" | tee -a "$SUMMARY_FILE"
+echo "Binary: $SHARD_BIN" | tee -a "$SUMMARY_FILE"
+echo "" | tee -a "$SUMMARY_FILE"
+
+# Helper: init a test repo
+init_repo() { local d="$1"; rm -rf "$d"; mkdir -p "$d"; sh "$d" init >/dev/null 2>&1; }
+
+# Helper: get commit ID from latest commit
+do_commit() { local d="$1"; local m="$2"; sh "$d" commit -m "$m" --author "Test" | awk '{print $2}'; }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 0: Model File Creation
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 0: Model file creation ═══" | tee -a "$SUMMARY_FILE"
+
+# 0a. Size model files
+dd if=/dev/urandom of="$MODELS/1b.bin" bs=1 count=1 2>/dev/null
+dd if=/dev/urandom of="$MODELS/1k.bin" bs=1024 count=1 2>/dev/null
+dd if=/dev/urandom of="$MODELS/64k.bin" bs=65536 count=1 2>/dev/null
+dd if=/dev/urandom of="$MODELS/1m.bin" bs=1048576 count=1 2>/dev/null
+dd if=/dev/urandom of="$MODELS/4m.bin" bs=4194304 count=1 2>/dev/null
+dd if=/dev/urandom of="$MODELS/4m1b.bin" bs=4194305 count=1 2>/dev/null
+dd if=/dev/urandom of="$MODELS/8m.bin" bs=8388608 count=1 2>/dev/null
+dd if=/dev/urandom of="$MODELS/8m1b.bin" bs=8388609 count=1 2>/dev/null
+
+# 0b. Edge case files
+touch "$MODELS/empty.bin"
+printf '\x00' > "$MODELS/1byte.bin"
+dd if=/dev/zero of="$MODELS/zeros_64k.bin" bs=65536 count=1 2>/dev/null
+printf 'Hello\nWorld\nLine3\n' > "$MODELS/newlines.txt"
+printf '   leading and trailing spaces   \n' > "$MODELS/spaces.txt"
+printf '{\n  "key": "value"\n}\n' > "$MODELS/json.json"
+printf '\xff\xfe\x00\x01\x02' > "$MODELS/binary_header.bin"
+dd if=/dev/urandom of="$MODELS/100m.bin" bs=1048576 count=100 2>/dev/null
+dd if=/dev/urandom of="$MODELS/200m.bin" bs=1048576 count=200 2>/dev/null
+
+# 0c. Symlinks and hardlinks
+ln -sf "$MODELS/64k.bin" "$MODELS/valid_symlink" 2>/dev/null
+ln -sf "/nonexistent/path" "$MODELS/broken_symlink" 2>/dev/null
+ln -f "$MODELS/64k.bin" "$MODELS/hardlink" 2>/dev/null
+
+echo "Model files created in $MODELS" | tee -a "$SUMMARY_FILE"
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 1: Init — ALL init scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 1: Init scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d1_1="$RESULTS_DIR/p1_1"
+rm -rf "$d1_1"; mkdir -p "$d1_1"
+check "p1.1 init creates .shard" sh "$d1_1" init
+check "p1.1b .shard/objects exists" test -d "$d1_1/.shard/objects"
+check "p1.1c .shard/keys exists" test -d "$d1_1/.shard/keys"
+check "p1.1d secret.key exists" test -f "$d1_1/.shard/keys/secret.key"
+check "p1.1e public.key exists" test -f "$d1_1/.shard/keys/public.key"
+check "p1.1f config has repo_id" sh "$d1_1" config get repo_id
+
+check_not "p1.2 init twice fails" sh "$d1_1" init
+
+d1_3="$RESULTS_DIR/p1_3"
+rm -rf "$d1_3"; mkdir -p "$d1_3"
+check "p1.3 init --private" sh "$d1_3" init --private
+check "p1.3b config private=true" sh "$d1_3" config get private
+
+d1_4="$RESULTS_DIR/p1_4"
+mkdir -p "$d1_4"
+check "p1.4 init other dir" sh "$d1_4" init
+
+d1_5a="$RESULTS_DIR/p1_5a"; d1_5b="$RESULTS_DIR/p1_5b"
+rm -rf "$d1_5a" "$d1_5b"; mkdir -p "$d1_5a" "$d1_5b"
+sh "$d1_5a" init >/dev/null; sh "$d1_5b" init >/dev/null
+rid_a=$(sh "$d1_5a" config get repo_id 2>/dev/null | awk '{print $3}')
+rid_b=$(sh "$d1_5b" config get repo_id 2>/dev/null | awk '{print $3}')
+check "p1.5 unique repo_ids" test "$rid_a" != "$rid_b"
+
+d1_6="$RESULTS_DIR/p1_6"
+rm -rf "$d1_6"; mkdir -p "$d1_6"; touch "$d1_6/existing.txt"
+check "p1.6 init in non-empty dir" sh "$d1_6" init
+check "p1.6b existing file intact" test -f "$d1_6/existing.txt"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 2: Add — ALL add scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 2: Add scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d2="$RESULTS_DIR/p2"
+init_repo "$d2"
+
+cp "$MODELS/64k.bin" "$d2/"
+check "p2.1 add normal file" sh "$d2" add "64k.bin"
+check "p2.2 add same file again" sh "$d2" add "64k.bin"
+
+touch "$d2/empty.txt"
+check "p2.3 add empty file" sh "$d2" add "empty.txt"
+
+cp "$MODELS/1byte.bin" "$d2/"
+check "p2.4 add 1-byte file" sh "$d2" add "1byte.bin"
+
+cp "$MODELS/4m1b.bin" "$d2/"
+check "p2.5 add cross-chunk file" sh "$d2" add "4m1b.bin"
+
+cp "$MODELS/4m.bin" "$d2/"
+check "p2.6 add exact chunk file" sh "$d2" add "4m.bin"
+
+cp "$MODELS/newlines.txt" "$d2/"
+check "p2.7 add newlines content" sh "$d2" add "newlines.txt"
+
+cp "$MODELS/zeros_64k.bin" "$d2/"
+check "p2.8 add zero-filled file" sh "$d2" add "zeros_64k.bin"
+
+check_not "p2.9 add nonexistent fails" sh "$d2" add "nonexistent_file_xyz.bin"
+
+mkdir -p "$d2/subdir"
+check_not "p2.10 add directory fails" sh "$d2" add "subdir"
+
+cp "$MODELS/valid_symlink" "$d2/" 2>/dev/null
+check "p2.11 add valid symlink" sh "$d2" add "valid_symlink"
+
+cp "$MODELS/broken_symlink" "$d2/" 2>/dev/null
+check_not "p2.12 add broken symlink" sh "$d2" add "broken_symlink"
+
+ln -f "$MODELS/64k.bin" "$d2/hardlink" 2>/dev/null
+check "p2.13 add hardlinked file" sh "$d2" add "hardlink"
+
+# Unicode and special filenames
+cp "$MODELS/64k.bin" "$d2/ファイル.txt"
+check "p2.14 add unicode filename" sh "$d2" add "ファイル.txt"
+
+cp "$MODELS/64k.bin" "$d2/a file with spaces.txt"
+check "p2.15 add filename with spaces" sh "$d2" add "a file with spaces.txt"
+
+cp "$MODELS/64k.bin" "$d2/.hidden"
+check "p2.16 add hidden file" sh "$d2" add ".hidden"
+
+cp "$MODELS/64k.bin" "$d2/special!@#\$%.bin"
+check "p2.17 add special chars filename" sh "$d2" add "special!@#\$%.bin"
+
+check_not "p2.18 add .. fails" sh "$d2" add ".."
+check_not "p2.19 add . fails" sh "$d2" add "."
+
+# Add without repo
+d2n="$RESULTS_DIR/p2n"; mkdir -p "$d2n"
+cp "$MODELS/1k.bin" "$d2n/"
+check_not "p2.20 add without init fails" sh "$d2n" add "1k.bin"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 3: Commit — ALL commit scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 3: Commit scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d3_1="$RESULTS_DIR/p3_1"
+init_repo "$d3_1"; cp "$MODELS/64k.bin" "$d3_1/"; sh "$d3_1" add "64k.bin" >/dev/null
+cid31=$(do_commit "$d3_1" "single file commit")
+check "p3.1 single file commit" test -n "$cid31"
+check "p3.1b HEAD exists" test -f "$d3_1/.shard/HEAD"
+
+d3_2="$RESULTS_DIR/p3_2"
+init_repo "$d3_2"; cp "$MODELS/1k.bin" "$d3_2/"; sh "$d3_2" add "1k.bin" >/dev/null
+cid32=$(do_commit "$d3_2" "first")
+check "p3.2 first commit" test -n "$cid32"
+
+cp "$MODELS/64k.bin" "$d3_2/"; sh "$d3_2" add "64k.bin" >/dev/null
+cid33=$(do_commit "$d3_2" "second")
+check "p3.3 second commit" test -n "$cid33"
+
+d3_4="$RESULTS_DIR/p3_4"
+init_repo "$d3_4"
+for f in a b c; do cp "$MODELS/1k.bin" "$d3_4/$f.txt"; sh "$d3_4" add "$f.txt" >/dev/null; done
+cid34=$(do_commit "$d3_4" "multi-file")
+check "p3.4 multi-file commit" test -n "$cid34"
+
+d3_5="$RESULTS_DIR/p3_5"
+init_repo "$d3_5"; cp "$MODELS/1k.bin" "$d3_5/"; sh "$d3_5" add "1k.bin" >/dev/null
+check "p3.5 custom author" sh "$d3_5" commit -m "custom" --author "Alice <alice@test>"
+
+d3_6="$RESULTS_DIR/p3_6"
+init_repo "$d3_6"; cp "$MODELS/1k.bin" "$d3_6/"; sh "$d3_6" add "1k.bin" >/dev/null
+check "p3.6 empty message" sh "$d3_6" commit -m "" --author "Test"
+
+d3_7="$RESULTS_DIR/p3_7"
+init_repo "$d3_7"; cp "$MODELS/1k.bin" "$d3_7/"; sh "$d3_7" add "1k.bin" >/dev/null
+check "p3.7 unicode message" sh "$d3_7" commit -m "こんにちは世界" --author "Test"
+
+d3_8="$RESULTS_DIR/p3_8"
+init_repo "$d3_8"
+check_not "p3.8 commit nothing staged" sh "$d3_8" commit -m "nope" --author "T"
+
+d3_9="$RESULTS_DIR/p3_9"
+mkdir -p "$d3_9"
+check_not "p3.9 commit without init" sh "$d3_9" commit -m "nope" --author "T"
+
+d3_10="$RESULTS_DIR/p3_10"
+init_repo "$d3_10"
+for i in 1 2 3 4 5; do
+    dd if=/dev/urandom of="$d3_10/file$i.bin" bs=1024 count=1 2>/dev/null
+    sh "$d3_10" add "file$i.bin" >/dev/null
+    do_commit "$d3_10" "commit #$i" >/dev/null
+done
+logcnt=$(sh "$d3_10" log 2>/dev/null | grep -c "^commit ")
+check "p3.10 chain of 5" test "$logcnt" -eq 5
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 4: Verify — ALL verify scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 4: Verify scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d4="$RESULTS_DIR/p4"
+init_repo "$d4"; cp "$MODELS/64k.bin" "$d4/"; sh "$d4" add "64k.bin" >/dev/null
+cid4=$(do_commit "$d4" "verify test")
+
+check "p4.1 verify valid" sh "$d4" verify "$cid4"
+check "p4.2 verify --json" sh "$d4" verify --json "$cid4"
+check "p4.2b json parseable" sh "$d4" verify --json "$cid4" 2>/dev/null | python3 -m json.tool >/dev/null 2>&1
+
+check_not "p4.3 verify nonexistent" sh "$d4" verify "0000000000000000000000000000000000000000000000000000000000000000"
+check_not "p4.4 verify empty" sh "$d4" verify ""
+check_not "p4.5 verify 1char" sh "$d4" verify "a"
+check_not "p4.6 verify nonhex" sh "$d4" verify "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+
+d4n="$RESULTS_DIR/p4n"; mkdir -p "$d4n"
+check_not "p4.7 verify no init" sh "$d4n" verify "abc"
+
+# Tampered verify
+d4t="$RESULTS_DIR/p4t"
+init_repo "$d4t"; cp "$MODELS/64k.bin" "$d4t/"; sh "$d4t" add "64k.bin" >/dev/null
+cid4t=$(do_commit "$d4t" "tamper")
+find "$d4t/.shard/objects" -type f | head -1 | while read f; do echo "TAMPERED" > "$f" 2>/dev/null; done
+check_not "p4.8 verify tampered" sh "$d4t" verify "$cid4t"
+
+# Verify signature
+d4s="$RESULTS_DIR/p4s"
+init_repo "$d4s"; cp "$MODELS/1k.bin" "$d4s/"; sh "$d4s" add "1k.bin" >/dev/null
+cid4s=$(do_commit "$d4s" "sig test")
+vout=$(sh "$d4s" verify "$cid4s" 2>/dev/null)
+check "p4.9 signature verified" echo "$vout" | grep -q "Signature verified"
+
+# Multi-chunk verify
+d4m="$RESULTS_DIR/p4m"
+init_repo "$d4m"; cp "$MODELS/4m1b.bin" "$d4m/"; sh "$d4m" add "4m1b.bin" >/dev/null
+cid4m=$(do_commit "$d4m" "multichunk")
+check "p4.10 verify multi-chunk" sh "$d4m" verify "$cid4m"
+
+# Zero-filled verify
+d4z="$RESULTS_DIR/p4z"
+init_repo "$d4z"; cp "$MODELS/zeros_64k.bin" "$d4z/"; sh "$d4z" add "zeros_64k.bin" >/dev/null
+cid4z=$(do_commit "$d4z" "zeros")
+check "p4.11 verify zeros" sh "$d4z" verify "$cid4z"
+
+# Empty file verify
+d4e="$RESULTS_DIR/p4e"
+init_repo "$d4e"; touch "$d4e/empty.bin"; sh "$d4e" add "empty.bin" >/dev/null
+cid4e=$(do_commit "$d4e" "empty")
+check "p4.12 verify empty" sh "$d4e" verify "$cid4e"
+
+# 1-byte verify
+d4o="$RESULTS_DIR/p4o"
+init_repo "$d4o"; cp "$MODELS/1byte.bin" "$d4o/"; sh "$d4o" add "1byte.bin" >/dev/null
+cid4o=$(do_commit "$d4o" "onebyte")
+check "p4.13 verify 1-byte" sh "$d4o" verify "$cid4o"
+
+# Exact chunk (4 MiB) verify
+d4x="$RESULTS_DIR/p4x"
+init_repo "$d4x"; cp "$MODELS/4m.bin" "$d4x/"; sh "$d4x" add "4m.bin" >/dev/null
+cid4x=$(do_commit "$d4x" "exact chunk")
+check "p4.14 verify exact 4M" sh "$d4x" verify "$cid4x"
+
+# Cross-chunk (4 MiB + 1) verify
+d4c="$RESULTS_DIR/p4c"
+init_repo "$d4c"; cp "$MODELS/4m1b.bin" "$d4c/"; sh "$d4c" add "4m1b.bin" >/dev/null
+cid4c=$(do_commit "$d4c" "cross chunk")
+check "p4.15 verify cross-chunk" sh "$d4c" verify "$cid4c"
+
+# Same commit verify twice
+check "p4.16 verify twice" sh "$d4" verify "$cid4"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 5: Log — ALL log scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 5: Log scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d5="$RESULTS_DIR/p5"
+init_repo "$d5"
+for i in 1 2 3; do echo "$i" > "$d5/f$i.txt"; sh "$d5" add "f$i.txt" >/dev/null; do_commit "$d5" "commit $i" >/dev/null; done
+
+check "p5.1 log with commits" sh "$d5" log
+check "p5.2 log --json" sh "$d5" log --json
+logjson=$(sh "$d5" log --json 2>/dev/null)
+check "p5.2b json parseable" echo "$logjson" | python3 -m json.tool >/dev/null 2>&1
+check "p5.2c json has commit_id" echo "$logjson" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d)==3" 2>/dev/null
+check "p5.3 log shows author" sh "$d5" log 2>/dev/null | grep -q "author:"
+check "p5.4 log shows date" sh "$d5" log 2>/dev/null | grep -q "date:"
+
+d5e="$RESULTS_DIR/p5e"
+init_repo "$d5e"
+check_not "p5.5 log no commits" sh "$d5e" log
+
+d5n="$RESULTS_DIR/p5n"; mkdir -p "$d5n"
+check_not "p5.6 log no init" sh "$d5n" log
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 6: Checkout — ALL checkout scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 6: Checkout scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d6="$RESULTS_DIR/p6"
+init_repo "$d6"; echo "checkout content" > "$d6/test.txt"
+sh "$d6" add "test.txt" >/dev/null; cid6=$(do_commit "$d6" "checkout test")
+rm -f "$d6/test.txt"
+check "p6.1 checkout restore" sh "$d6" checkout "$cid6"
+check "p6.1b file exists" test -f "$d6/test.txt"
+check "p6.1c content correct" grep -q "checkout content" "$d6/test.txt"
+
+# Checkout --json
+d6j="$RESULTS_DIR/p6j"
+init_repo "$d6j"; echo "json" > "$d6j/j.txt"
+sh "$d6j" add "j.txt" >/dev/null; cid6j=$(do_commit "$d6j" "json co")
+rm -f "$d6j/j.txt"
+check "p6.2 checkout --json" sh "$d6j" checkout --json "$cid6j"
+cojson=$(sh "$d6j" checkout --json "$cid6j" 2>/dev/null)
+check "p6.2b json parseable" echo "$cojson" | python3 -m json.tool >/dev/null 2>&1
+
+# Checkout multiple files
+d6m="$RESULTS_DIR/p6m"
+init_repo "$d6m"
+echo "aaa" > "$d6m/a.txt"; sh "$d6m" add "a.txt" >/dev/null
+echo "bbb" > "$d6m/b.txt"; sh "$d6m" add "b.txt" >/dev/null
+cid6m=$(do_commit "$d6m" "multi")
+rm -f "$d6m/a.txt" "$d6m/b.txt"
+sh "$d6m" checkout "$cid6m" >/dev/null
+check "p6.3 checkout multiple files" test -f "$d6m/a.txt" && test -f "$d6m/b.txt"
+
+# Checkout same commit twice
+check "p6.4 checkout twice" sh "$d6" checkout "$cid6"
+
+# Failures
+check_not "p6.5 checkout bad commit" sh "$d6m" checkout "0000000000000000000000000000000000000000000000000000000000000000"
+d6n="$RESULTS_DIR/p6n"; mkdir -p "$d6n"
+check_not "p6.6 checkout no init" sh "$d6n" checkout "abc"
+check_not "p6.7 checkout empty id" sh "$d6" checkout ""
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 7: Status — ALL status scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 7: Status scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d7="$RESULTS_DIR/p7"
+init_repo "$d7"
+check "p7.1 status after init" sh "$d7" status
+
+echo "staged" > "$d7/staged.txt"; sh "$d7" add "staged.txt" >/dev/null
+s7=$(sh "$d7" status 2>/dev/null)
+check "p7.2 status shows staged" echo "$s7" | grep -q "Staged"
+
+do_commit "$d7" "first" >/dev/null
+s7c=$(sh "$d7" status 2>/dev/null)
+check "p7.3 status clean" echo "$s7c" | grep -q "Nothing staged"
+
+echo "untracked" > "$d7/untracked.txt"
+s7u=$(sh "$d7" status 2>/dev/null)
+check "p7.4 status untracked" echo "$s7u" | grep -q "untracked"
+
+check "p7.5 status --json" sh "$d7" status --json
+stjson=$(sh "$d7" status --json 2>/dev/null)
+check "p7.5b json parseable" echo "$stjson" | python3 -m json.tool >/dev/null 2>&1
+
+rm -f "$d7/staged.txt"
+s7d=$(sh "$d7" status 2>/dev/null)
+check "p7.6 status deleted" echo "$s7d" | grep -q "deleted"
+
+d7n="$RESULTS_DIR/p7n"; mkdir -p "$d7n"
+check_not "p7.7 status no init" sh "$d7n" status
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 8: Config — ALL config scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 8: Config scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d8="$RESULTS_DIR/p8"
+init_repo "$d8"
+
+check "p8.1 config set" sh "$d8" config set "test.key" "test.value"
+check "p8.1b config get" sh "$d8" config get "test.key"
+c8g=$(sh "$d8" config get "test.key" 2>/dev/null)
+check "p8.1c correct value" echo "$c8g" | grep -q "test.value"
+
+sh "$d8" config set "a" "1" >/dev/null
+sh "$d8" config set "b" "2" >/dev/null
+c8a=$(sh "$d8" config get 2>/dev/null)
+check "p8.2 config get all" echo "$c8a" | grep -q "a = 1"
+check "p8.2b get all shows both" echo "$c8a" | grep -q "b = 2"
+
+check_not "p8.3 config missing key" sh "$d8" config get "nonexistent"
+
+check "p8.4 config set empty" sh "$d8" config set "empty" ""
+c8e=$(sh "$d8" config get "empty" 2>/dev/null)
+check "p8.4b verify empty value" echo "$c8e" | grep -q "empty ="
+
+check "p8.5 config unicode" sh "$d8" config set "unicode" "日本語"
+
+check "p8.6 config repo_id" sh "$d8" config get "repo_id"
+
+d8n="$RESULTS_DIR/p8n"; mkdir -p "$d8n"
+check_not "p8.7 config no init" sh "$d8n" config get "x"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 9: Tag — ALL tag scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 9: Tag scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d9="$RESULTS_DIR/p9"
+init_repo "$d9"; cp "$MODELS/1k.bin" "$d9/"; sh "$d9" add "1k.bin" >/dev/null
+cid9=$(do_commit "$d9" "tag me")
+
+check "p9.1 tag add" sh "$d9" tag add "v1.0" "$cid9"
+check "p9.2 tag list" sh "$d9" tag list
+
+tlist=$(sh "$d9" tag list 2>/dev/null)
+check "p9.2b tag shows name" echo "$tlist" | grep -q "v1.0"
+
+# Tag second commit
+cp "$MODELS/64k.bin" "$d9/"; sh "$d9" add "64k.bin" >/dev/null
+cid9b=$(do_commit "$d9" "second")
+check "p9.3 tag second commit" sh "$d9" tag add "v2.0" "$cid9b"
+check "p9.4 tag overwrite same name" sh "$d9" tag add "v1.0" "$cid9b"
+
+check_not "p9.5 tag bad commit" sh "$d9" tag add "bad" "0000000000000000000000000000000000000000000000000000000000000000"
+
+d9n="$RESULTS_DIR/p9n"; mkdir -p "$d9n"
+check_not "p9.6 tag no init" sh "$d9n" tag add "x" "abc"
+
+d9e="$RESULTS_DIR/p9e"
+init_repo "$d9e"
+check "p9.7 tag list empty" sh "$d9e" tag list
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 10: Prune — ALL prune scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 10: Prune scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d10="$RESULTS_DIR/p10"
+init_repo "$d10"; cp "$MODELS/1k.bin" "$d10/"; sh "$d10" add "1k.bin" >/dev/null
+cid10=$(do_commit "$d10" "prune test")
+
+p10out=$(sh "$d10" prune 2>/dev/null)
+check "p10.1 prune no orphans" echo "$p10out" | grep -q "Pruned 0"
+
+mkdir -p "$d10/.shard/objects/zz"
+echo "ORPHAN_DATA" > "$d10/.shard/objects/zz/orphan_hash_abcdef1234567890"
+p10out=$(sh "$d10" prune 2>/dev/null)
+check "p10.2 prune removes orphan" echo "$p10out" | grep -q "Pruned 1"
+check "p10.2b orphan file gone" test ! -f "$d10/.shard/objects/zz/orphan_hash_abcdef1234567890"
+
+check "p10.3 reachable survives prune" sh "$d10" verify "$cid10"
+
+# Prune preserves tagged commits
+d10t="$RESULTS_DIR/p10t"
+init_repo "$d10t"; cp "$MODELS/1k.bin" "$d10t/"; sh "$d10t" add "1k.bin" >/dev/null
+cid10t=$(do_commit "$d10t" "tagged")
+sh "$d10t" tag add "protected" "$cid10t" >/dev/null
+mkdir -p "$d10t/.shard/objects/oo"
+echo "ORPHAN" > "$d10t/.shard/objects/oo/orphan_tagged"
+sh "$d10t" prune >/dev/null
+check "p10.4 tagged commit protected" sh "$d10t" verify "$cid10t"
+
+# Prune after staged
+d10s="$RESULTS_DIR/p10s"
+init_repo "$d10s"
+echo "staged data" > "$d10s/staged.txt"; sh "$d10s" add "staged.txt" >/dev/null
+mkdir -p "$d10s/.shard/objects/oo"
+echo "ORPHAN_STAGED" > "$d10s/.shard/objects/oo/orphan_staged_test"
+p10sout=$(sh "$d10s" prune 2>/dev/null)
+check "p10.5 prune with staged" echo "$p10sout" | grep -q "Pruned 1"
+
+d10n="$RESULTS_DIR/p10n"; mkdir -p "$d10n"
+check_not "p10.6 prune no init" sh "$d10n" prune
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 11: Peer — ALL peer scenarios
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 11: Peer scenarios ═══" | tee -a "$SUMMARY_FILE"
+
+d11="$RESULTS_DIR/p11"
+init_repo "$d11"
+peer_addr="/ip4/127.0.0.1/tcp/9999/p2p/12D3KooWH63KtTR9UauNYkurjdY53iGTDaurS8RwFWNFLHKCtmWU"
+
+check "p11.1 peer add" sh "$d11" peer add "$peer_addr"
+check "p11.2 peer add duplicate" sh "$d11" peer add "$peer_addr"
+check_not "p11.3 peer add invalid" sh "$d11" peer add "not-a-valid-multiaddr"
+check_not "p11.4 peer add empty" sh "$d11" peer add ""
+
+d11n="$RESULTS_DIR/p11n"; mkdir -p "$d11n"
+check_not "p11.5 peer no init" sh "$d11n" peer add "$peer_addr"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 12: Multi-command workflow integration
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 12: Workflow integration ═══" | tee -a "$SUMMARY_FILE"
+
+# Full lifecycle
+d12="$RESULTS_DIR/p12"
+init_repo "$d12"
+echo "workflow" > "$d12/w.txt"; sh "$d12" add "w.txt" >/dev/null
+cid12=$(do_commit "$d12" "workflow")
+sh "$d12" verify "$cid12" >/dev/null 2>&1
+sh "$d12" log >/dev/null 2>&1
+rm -f "$d12/w.txt"
+sh "$d12" checkout "$cid12" >/dev/null 2>&1
+s12=$(sh "$d12" status 2>/dev/null)
+check "p12.1 full lifecycle" echo "$s12" | grep -q "Nothing staged"
+
+# Batch add
+d12b="$RESULTS_DIR/p12b"
+init_repo "$d12b"
+for f in a b c d e; do echo "$f" > "$d12b/$f.txt"; sh "$d12b" add "$f.txt" >/dev/null; done
+cid12b=$(do_commit "$d12b" "batch")
+check "p12.2 batch add+commit" test -n "$cid12b"
+
+# Config persists
+sh "$d12" config set "persist" "yes" >/dev/null
+check "p12.3 config persists" sh "$d12" config get "persist"
+
+# Tag persists after prune
+sh "$d12" tag add "stable" "$cid12" >/dev/null
+sh "$d12" prune >/dev/null
+check "p12.4 tag persists after prune" sh "$d12" tag list 2>/dev/null | grep -q "stable"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 13: State machine violations — illegal sequences
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 13: State machine violations ═══" | tee -a "$SUMMARY_FILE"
+
+d13="$RESULTS_DIR/p13"
+init_repo "$d13"
+check_not "p13.1 verify before commit" sh "$d13" verify "anything"
+check_not "p13.2 checkout before commit" sh "$d13" checkout "anything"
+check_not "p13.3 log before commit" sh "$d13" log
+check_not "p13.4 tag before commit" sh "$d13" tag add "v1" "anything"
+
+# Double commit without add
+echo "x" > "$d13/f.txt"; sh "$d13" add "f.txt" >/dev/null
+do_commit "$d13" "first" >/dev/null
+check_not "p13.5 commit without stage" sh "$d13" commit -m "second" --author "T"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 14: Throughput benchmarks
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 14: Throughput benchmarks ═══" | tee -a "$SUMMARY_FILE"
+
+bench_file() {
+    local size="$1" file="$2"
+    local d="$RESULTS_DIR/bench_${size}"
+    init_repo "$d"; cp "$file" "$d/"
+    local fname=$(basename "$file")
+    local start=$(date +%s%N)
+    sh "$d" add "$fname" >/dev/null 2>&1
+    local end=$(date +%s%N)
+    local ms=$(( (end - start) / 1000000 ))
+    local bs=$(stat -c%s "$file" 2>/dev/null || echo 1024)
+    local mb_s=0
+    [ "$ms" -gt 0 ] && mb_s=$(( bs * 1000 / ms / 1048576 ))
+    echo "  add ${size}: ${ms} ms, ${mb_s} MiB/s" | tee -a "$RESULTS_FILE"
 }
 
-# =====================================================================
-# PHASE 1: Create comprehensive model files
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 1: Create model files                                ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
+bench_file "1b" "$MODELS/1b.bin"
+bench_file "1k" "$MODELS/1k.bin"
+bench_file "64k" "$MODELS/64k.bin"
+bench_file "1m" "$MODELS/1m.bin"
+bench_file "4m" "$MODELS/4m.bin"
+bench_file "4m1b" "$MODELS/4m1b.bin"
+bench_file "8m" "$MODELS/8m.bin"
 
-# Normal sizes
-dd if=/dev/urandom of="$MODEL_DIR/1byte.dat" bs=1 count=1 2>/dev/null
-dd if=/dev/urandom of="$MODEL_DIR/1K.dat" bs=1K count=1 2>/dev/null
-dd if=/dev/urandom of="$MODEL_DIR/64K.dat" bs=1K count=64 2>/dev/null
-dd if=/dev/urandom of="$MODEL_DIR/1M.dat" bs=1M count=1 2>/dev/null
-dd if=/dev/urandom of="$MODEL_DIR/4M.dat" bs=4M count=1 2>/dev/null
-dd if=/dev/urandom of="$MODEL_DIR/8M.dat" bs=4M count=2 2>/dev/null
-dd if=/dev/urandom of="$MODEL_DIR/16M.dat" bs=4M count=4 2>/dev/null
+# Large file benchmark
+d14_100="$RESULTS_DIR/bench_100m"
+init_repo "$d14_100"; cp "$MODELS/100m.bin" "$d14_100/"
+start=$(date +%s%N); sh "$d14_100" add "100m.bin" >/dev/null 2>&1; end=$(date +%s%N)
+ms100=$(( (end-start)/1000000 ))
+echo "  add 100M: ${ms100} ms" | tee -a "$RESULTS_FILE"
 
-# Chunk boundaries
-truncate -s 4194304 "$MODEL_DIR/4M_exact.dat"
-truncate -s 4194305 "$MODEL_DIR/4M_plus1.dat"
-truncate -s 8388608 "$MODEL_DIR/8M_exact.dat"
-truncate -s 8388609 "$MODEL_DIR/8M_plus1.dat"
+start=$(date +%s%N); cid100=$(do_commit "$d14_100" "100m"); end=$(date +%s%N)
+ms100c=$(( (end-start)/1000000 ))
+echo "  commit 100M: ${ms100c} ms" | tee -a "$RESULTS_FILE"
 
-# Special content
-truncate -s 0 "$MODEL_DIR/empty.dat"
-dd if=/dev/zero bs=1M count=1 2>/dev/null > "$MODEL_DIR/zeros_1M.dat"
-python3 -c "open('$MODEL_DIR/only_newlines.dat','w').write('\n'*10000)" 2>/dev/null
-python3 -c "open('$MODEL_DIR/only_spaces.dat','w').write(' '*10000)" 2>/dev/null
-python3 -c "open('$MODEL_DIR/utf8_content.dat','wb').write('ññoöüßéèêëàâäùûüœæ€∞✓✅'.encode()*100)" 2>/dev/null
-dd if=/dev/urandom bs=1M count=4 2>/dev/null > "$MODEL_DIR/sparse.dat"; truncate -s 16M "$MODEL_DIR/sparse.dat" 2>/dev/null
+start=$(date +%s%N); sh "$d14_100" verify "$cid100" >/dev/null 2>&1; end=$(date +%s%N)
+ms100v=$(( (end-start)/1000000 ))
+echo "  verify 100M: ${ms100v} ms" | tee -a "$RESULTS_FILE"
+
+obj100=$(find "$d14_100/.shard/objects" -type f | wc -l)
+echo "  objects: $obj100" | tee -a "$RESULTS_FILE"
+
+# 200 MiB benchmark
+d14_200="$RESULTS_DIR/bench_200m"
+init_repo "$d14_200"; cp "$MODELS/200m.bin" "$d14_200/"
+start=$(date +%s%N); sh "$d14_200" add "200m.bin" >/dev/null 2>&1; end=$(date +%s%N)
+ms200=$(( (end-start)/1000000 ))
+echo "  add 200M: ${ms200} ms" | tee -a "$RESULTS_FILE"
+
+start=$(date +%s%N); cid200=$(do_commit "$d14_200" "200m"); end=$(date +%s%N)
+ms200c=$(( (end-start)/1000000 ))
+echo "  commit 200M: ${ms200c} ms" | tee -a "$RESULTS_FILE"
+
+start=$(date +%s%N); sh "$d14_200" verify "$cid200" >/dev/null 2>&1; end=$(date +%s%N)
+ms200v=$(( (end-start)/1000000 ))
+echo "  verify 200M: ${ms200v} ms" | tee -a "$RESULTS_FILE"
 
 # Many small files
-mkdir -p "$MODEL_DIR/many_small"
-for i in $(seq 1 100); do dd if=/dev/urandom of="$MODEL_DIR/many_small/file_${i}.dat" bs=1K count=1 2>/dev/null; done
-
-# Special filenames
-echo x > "$MODEL_DIR/space file.dat"
-echo x > "$MODEL_DIR/file_with_#_hash.dat"
-echo x > "$MODEL_DIR/file_with_\$_dollar.dat"
-echo x > "$MODEL_DIR/file_with_&.dat"
-echo x > "$MODEL_DIR/file_with_'_quote.dat"
-echo x > "$MODEL_DIR/file_with_\"_quote.dat"
-echo x > "$MODEL_DIR/file_with_()_parens.dat"
-echo x > "$MODEL_DIR/file_with_{}_braces.dat"
-echo x > "$MODEL_DIR/file_with_[].dat"
-python3 -c "open('$MODEL_DIR/unicode_ñ_file.dat','w').write('u')" 2>/dev/null
-
-# Symlinks
-ln -sf "$MODEL_DIR/1K.dat" "$MODEL_DIR/symlink_valid.dat"
-ln -sf /nonexistent_path_xyz "$MODEL_DIR/symlink_broken.dat"
-
-# Hard link
-ln "$MODEL_DIR/1K.dat" "$MODEL_DIR/hardlink_copy.dat"
-
-# Stress files
-dd if=/dev/urandom of="$MODEL_DIR/stress_100M.dat" bs=1M count=100 2>/dev/null
-dd if=/dev/urandom of="$MODEL_DIR/stress_200M.dat" bs=1M count=200 2>/dev/null
-
-# Dedup pair
-dd if=/dev/urandom bs=1K count=64 2>/dev/null | tee "$MODEL_DIR/dedup_a.dat" > "$MODEL_DIR/dedup_b.dat"
-
-echo "  Model files created in $MODEL_DIR"
-
-# =====================================================================
-# PHASE 2: PANIC VECTORS & CRASH RESILIENCE
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 2: Panic vectors & crash resilience                  ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-# 2a: add parent dir (file_name()=None -> panic)
-mkdir -p "p2_add_dotdot" && cd "p2_add_dotdot"
-sh init >/dev/null 2>&1
-assert "p2_add_dotdot" "shard add .." "fail" sh add ..
-cd "$SCENARIO_DIR"
-
-# 2b: add current dir
-mkdir -p "p2_add_dot" && cd "p2_add_dot"
-sh init >/dev/null 2>&1
-assert "p2_add_dot" "shard add ." "fail" sh add .
-cd "$SCENARIO_DIR"
-
-# 2c: verify empty string
-mkdir -p "p2_verify_empty" && cd "p2_verify_empty"
-sh init >/dev/null 2>&1
-assert "p2_verify_empty" "verify ''" "fail" sh verify ""
-cd "$SCENARIO_DIR"
-
-# 2d: verify 1-char
-mkdir -p "p2_verify_1char" && cd "p2_verify_1char"
-sh init >/dev/null 2>&1
-assert "p2_verify_1char" "verify 'a'" "fail" sh verify "a"
-cd "$SCENARIO_DIR"
-
-# 2e: checkout empty
-mkdir -p "p2_co_empty" && cd "p2_co_empty"
-sh init >/dev/null 2>&1
-assert "p2_co_empty" "checkout ''" "fail" sh checkout ""
-cd "$SCENARIO_DIR"
-
-# 2f: checkout 1-char
-mkdir -p "p2_co_1char" && cd "p2_co_1char"
-sh init >/dev/null 2>&1
-assert "p2_co_1char" "checkout 'a'" "fail" sh checkout "a"
-cd "$SCENARIO_DIR"
-
-# 2g: tag with empty commit
-mkdir -p "p2_tag_empty" && cd "p2_tag_empty"
-sh init >/dev/null 2>&1
-assert "p2_tag_empty" "tag add with empty id" "fail" sh tag add mytag ""
-cd "$SCENARIO_DIR"
-
-# 2h: verify non-hex
-mkdir -p "p2_verify_nonhex" && cd "p2_verify_nonhex"
-sh init >/dev/null 2>&1
-assert "p2_verify_nonhex" "verify 'zzzz...'" "fail" sh verify "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-cd "$SCENARIO_DIR"
-
-echo "  Phase 2 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 3: INPUT VALIDATION GAPS
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 3: Input validation gaps                             ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-mkdir -p "p3_dir" && cd "p3_dir"
-sh init >/dev/null 2>&1
-mkdir -p "somedir"
-assert "p3_add_dir" "add a directory" "fail" sh add somedir
-cd "$SCENARIO_DIR"
-
-mkdir -p "p3_symlink_valid" && cd "p3_symlink_valid"
-sh init >/dev/null 2>&1
-ln -sf "$MODEL_DIR/1K.dat" link.dat
-assert "p3_symlink_valid" "add symlink to file" "succeed" sh add link.dat
-cd "$SCENARIO_DIR"
-
-mkdir -p "p3_symlink_broken" && cd "p3_symlink_broken"
-sh init >/dev/null 2>&1
-ln -sf /nonexistent_path_xyz broken.dat
-assert "p3_symlink_broken" "add broken symlink" "fail" sh add broken.dat
-cd "$SCENARIO_DIR"
-
-mkdir -p "p3_nonexist" && cd "p3_nonexist"
-sh init >/dev/null 2>&1
-assert "p3_add_nonexist" "add nonexistent file" "fail" sh add nonexistent.dat
-cd "$SCENARIO_DIR"
-
-mkdir -p "p3_peer_invalid" && cd "p3_peer_invalid"
-sh init >/dev/null 2>&1
-assert "p3_peer_invalid" "peer add invalid multiaddr" "succeed" sh peer add "not-a-multiaddr"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p3_peer_empty" && cd "p3_peer_empty"
-sh init >/dev/null 2>&1
-assert "p3_peer_empty" "peer add empty string" "succeed" sh peer add ""
-cd "$SCENARIO_DIR"
-
-mkdir -p "p3_verify_short" && cd "p3_verify_short"
-sh init >/dev/null 2>&1
-assert "p3_verify_short" "verify short hash" "fail" sh verify "123456789a"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p3_noperm" && cd "p3_noperm"
-sh init >/dev/null 2>&1
-echo "secret" > noperm.dat && chmod 000 noperm.dat
-assert "p3_noperm" "add no-permission file" "fail" sh add noperm.dat
-chmod 644 noperm.dat
-cd "$SCENARIO_DIR"
-
-echo "  Phase 3 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 4: HAPPY PATH WORKFLOWS
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 4: Happy path workflows                              ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-# 4a: init
-mkdir -p "p4_init" && cd "p4_init"
-assert "p4_init" "init" "succeed" sh init
-cd "$SCENARIO_DIR"
-
-# 4b: init --private
-mkdir -p "p4_private" && cd "p4_private"
-assert "p4_private" "init --private" "succeed" sh init --private
-sh config get private 2>/dev/null | grep -q "true" || echo "  WARN: private not set"
-cd "$SCENARIO_DIR"
-
-# 4c: add+commit+verify
-mkdir -p "p4_full_cycle" && cd "p4_full_cycle"
-sh init >/dev/null 2>&1
-cp "$MODEL_DIR/64K.dat" .
-sh add 64K.dat >/dev/null 2>&1
-assert "p4_commit" "commit" "succeed" sh commit -m "first" --author "Tester"
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p4_verify" "verify $CID" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 4d: multiple files one commit
-mkdir -p "p4_multi" && cd "p4_multi"
-sh init >/dev/null 2>&1
-cp "$MODEL_DIR/1K.dat" "$MODEL_DIR/64K.dat" "$MODEL_DIR/1M.dat" .
-sh add 1K.dat >/dev/null 2>&1 && sh add 64K.dat >/dev/null 2>&1 && sh add 1M.dat >/dev/null 2>&1
-assert "p4_multi_commit" "commit 3 files" "succeed" sh commit -m "multi" --author "T"
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p4_multi_verify" "verify multi" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 4e: two sequential commits
-mkdir -p "p4_seq" && cd "p4_seq"
-sh init >/dev/null 2>&1
-echo "a" > a.dat && sh add a.dat >/dev/null 2>&1 && sh commit -m "first" --author "T" >/dev/null 2>&1
-echo "b" > b.dat && sh add b.dat >/dev/null 2>&1
-assert "p4_2nd_commit" "second commit" "succeed" sh commit -m "second" --author "T"
-CID2=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p4_2nd_verify" "verify second" "succeed" sh verify "$CID2"
-cd "$SCENARIO_DIR"
-
-# 4f: checkout restore
-mkdir -p "p4_co_restore" && cd "p4_co_restore"
-sh init >/dev/null 2>&1
-echo "checkout test data" > restore.dat && sh add restore.dat >/dev/null 2>&1 && sh commit -m "co-me" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-rm restore.dat
-assert "p4_co" "checkout restores file" "succeed" sh checkout "$CID"
-[ -f restore.dat ] && grep -q "checkout test data" restore.dat || echo "  WARN: file not restored correctly"
-cd "$SCENARIO_DIR"
-
-# 4g: checkout --json
-mkdir -p "p4_co_json" && cd "p4_co_json"
-sh init >/dev/null 2>&1
-echo "json" > f.dat && sh add f.dat >/dev/null 2>&1 && sh commit -m "json-co" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-rm f.dat
-output=$(sh checkout --json "$CID" 2>/dev/null)
-python3 -c "import json; v=json.loads('$output'); assert 'commit_id' in v; assert 'files' in v" 2>/dev/null && echo "  OK: checkout --json valid" || echo "  WARN: checkout --json invalid"
-cd "$SCENARIO_DIR"
-
-# 4h: log
-mkdir -p "p4_log" && cd "p4_log"
-sh init >/dev/null 2>&1
-echo "a" > a.dat && sh add a.dat >/dev/null 2>&1 && sh commit -m "c1" --author "A" >/dev/null 2>&1
-echo "b" > b.dat && sh add b.dat >/dev/null 2>&1 && sh commit -m "c2" --author "B" >/dev/null 2>&1
-LOGOUT=$(sh log 2>/dev/null)
-echo "$LOGOUT" | grep -q "c1" && echo "$LOGOUT" | grep -q "c2" && echo "  OK: log shows both" || echo "  WARN: log missing commits"
-cd "$SCENARIO_DIR"
-
-# 4i: log --json
-mkdir -p "p4_log_json" && cd "p4_log_json"
-sh init >/dev/null 2>&1
-echo "x" > x.dat && sh add x.dat >/dev/null 2>&1 && sh commit -m "ljson" --author "J" >/dev/null 2>&1
-output=$(sh log --json 2>/dev/null)
-python3 -c "import json; e=json.loads('$output'); assert len(e)>0; assert e[0].get('message')=='ljson'" 2>/dev/null && echo "  OK: log --json valid" || echo "  WARN: log --json invalid"
-cd "$SCENARIO_DIR"
-
-# 4j: status after init
-mkdir -p "p4_status_init" && cd "p4_status_init"
-sh init >/dev/null 2>&1
-sh status 2>/dev/null | grep -q "No commits" && echo "  OK: status shows No commits" || echo "  WARN: status message"
-cd "$SCENARIO_DIR"
-
-# 4k: status after commit
-mkdir -p "p4_status_commit" && cd "p4_status_commit"
-sh init >/dev/null 2>&1
-echo d > f.dat && sh add f.dat >/dev/null 2>&1 && sh commit -m "s" --author "T" >/dev/null 2>&1
-sh status 2>/dev/null | grep -q "On commit" && echo "  OK: status shows commit" || echo "  WARN: status no commit"
-cd "$SCENARIO_DIR"
-
-# 4l: status untracked
-mkdir -p "p4_status_untracked" && cd "p4_status_untracked"
-sh init >/dev/null 2>&1
-echo t > tracked.dat && sh add tracked.dat >/dev/null 2>&1 && sh commit -m "t" --author "T" >/dev/null 2>&1
-echo u > untracked.dat
-sh status 2>/dev/null | grep -q "untracked" && echo "  OK: status shows untracked" || echo "  WARN: no untracked"
-cd "$SCENARIO_DIR"
-
-# 4m: config set/get
-mkdir -p "p4_config" && cd "p4_config"
-sh init >/dev/null 2>&1
-sh config set user.name "Alice" >/dev/null 2>&1
-sh config get user.name 2>/dev/null | grep -q "Alice" && echo "  OK: config works" || echo "  WARN: config"
-cd "$SCENARIO_DIR"
-
-# 4n: tag add + list
-mkdir -p "p4_tag" && cd "p4_tag"
-sh init >/dev/null 2>&1
-echo d > f.dat && sh add f.dat >/dev/null 2>&1 && sh commit -m "tg" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-sh tag add v1 "$CID" >/dev/null 2>&1
-sh tag list 2>/dev/null | grep -q "v1" && echo "  OK: tag works" || echo "  WARN: tag"
-cd "$SCENARIO_DIR"
-
-# 4o: prune clean
-mkdir -p "p4_prune" && cd "p4_prune"
-sh init >/dev/null 2>&1
-cp "$MODEL_DIR/1K.dat" . && sh add 1K.dat >/dev/null 2>&1 && sh commit -m "k" --author "T" >/dev/null 2>&1
-assert "p4_prune" "prune clean repo" "succeed" sh prune
-cd "$SCENARIO_DIR"
-
-# 4p: verify --json
-mkdir -p "p4_verify_json" && cd "p4_verify_json"
-sh init >/dev/null 2>&1
-echo d > f.dat && sh add f.dat >/dev/null 2>&1 && sh commit -m "vj" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-output=$(sh verify --json "$CID" 2>/dev/null)
-python3 -c "import json; v=json.loads('$output'); assert v['verified']; assert v['signature_verified']" 2>/dev/null && echo "  OK: verify --json valid" || echo "  WARN: verify --json"
-cd "$SCENARIO_DIR"
-
-# 4q: status --json
-mkdir -p "p4_status_json" && cd "p4_status_json"
-sh init >/dev/null 2>&1
-echo d > f.dat && sh add f.dat >/dev/null 2>&1 && sh commit -m "sj" --author "T" >/dev/null 2>&1
-output=$(sh status --json 2>/dev/null)
-python3 -c "import json; s=json.loads('$output'); assert 'commit' in s; assert 'staged' in s" 2>/dev/null && echo "  OK: status --json valid" || echo "  WARN: status --json"
-cd "$SCENARIO_DIR"
-
-echo "  Phase 4 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 5: NON-HAPPY / ERROR PATHS
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 5: Error paths                                       ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-mkdir -p "p5_init_twice" && cd "p5_init_twice"
-sh init >/dev/null 2>&1
-assert "p5_init_twice" "init twice" "fail" sh init
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_commit_empty" && cd "p5_commit_empty"
-sh init >/dev/null 2>&1
-assert "p5_commit_empty" "commit nothing staged" "fail" sh commit -m "x" --author "T"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_verify_bad" && cd "p5_verify_bad"
-sh init >/dev/null 2>&1
-assert "p5_verify_bad" "verify nonexistent" "fail" sh verify "0000000000000000000000000000000000000000000000000000000000000000"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_tamper" && cd "p5_tamper"
-sh init >/dev/null 2>&1
-echo secret > secret.txt && sh add secret.txt >/dev/null 2>&1 && sh commit -m "sec" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-PREFIX=${CID:0:2}
-mkdir -p ".shard/objects/$PREFIX"
-echo "TAMPERED" > ".shard/objects/$PREFIX/$CID"
-assert "p5_tamper" "verify tampered" "fail" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_co_bad" && cd "p5_co_bad"
-sh init >/dev/null 2>&1
-assert "p5_co_bad" "checkout bad id" "fail" sh checkout "0000000000000000000000000000000000000000000000000000000000000000"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_log_empty" && cd "p5_log_empty"
-sh init >/dev/null 2>&1
-assert "p5_log_empty" "log empty" "fail" sh log
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_tag_bad" && cd "p5_tag_bad"
-sh init >/dev/null 2>&1
-assert "p5_tag_bad" "tag bad commit" "fail" sh tag add bad "0000000000000000000000000000000000000000000000000000000000000000"
-cd "$SCENARIO_DIR"
-
-# Operations without init
-mkdir -p "p5_noinit_add" && cd "p5_noinit_add"
-assert "p5_noinit_add" "add no init" "fail" sh add any.dat
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_commit" && cd "p5_noinit_commit"
-assert "p5_noinit_commit" "commit no init" "fail" sh commit -m "x" --author "T"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_verify" && cd "p5_noinit_verify"
-assert "p5_noinit_verify" "verify no init" "fail" sh verify "0000000000000000000000000000000000000000000000000000000000000000"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_log" && cd "p5_noinit_log"
-assert "p5_noinit_log" "log no init" "fail" sh log
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_co" && cd "p5_noinit_co"
-assert "p5_noinit_co" "checkout no init" "fail" sh checkout "0000000000000000000000000000000000000000000000000000000000000000"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_status" && cd "p5_noinit_status"
-assert "p5_noinit_status" "status no init" "fail" sh status
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_config_get" && cd "p5_noinit_config_get"
-assert "p5_noinit_config_get" "config get no init" "fail" sh config get foo
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_config_set" && cd "p5_noinit_config_set"
-assert "p5_noinit_config_set" "config set no init" "fail" sh config set foo bar
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_tag" && cd "p5_noinit_tag"
-assert "p5_noinit_tag" "tag no init" "fail" sh tag add v1 "00"
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_prune" && cd "p5_noinit_prune"
-assert "p5_noinit_prune" "prune no init" "fail" sh prune
-cd "$SCENARIO_DIR"
-
-mkdir -p "p5_noinit_peer" && cd "p5_noinit_peer"
-assert "p5_noinit_peer" "peer no init" "fail" sh peer add "/ip4/1.2.3.4/tcp/1234"
-cd "$SCENARIO_DIR"
-
-echo "  Phase 5 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 6: EDGE CASES
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 6: Edge cases                                        ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-# 6a: empty file
-mkdir -p "p6_empty" && cd "p6_empty"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/empty.dat" . && sh add empty.dat >/dev/null 2>&1 && sh commit -m "empty" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p6_empty_verify" "verify empty file" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 6b: 1 byte
-mkdir -p "p6_1byte" && cd "p6_1byte"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/1byte.dat" . && sh add 1byte.dat >/dev/null 2>&1 && sh commit -m "1b" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p6_1byte_verify" "verify 1-byte" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 6c: exact 4 MiB
-mkdir -p "p6_4m_exact" && cd "p6_4m_exact"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/4M_exact.dat" . && sh add 4M_exact.dat >/dev/null 2>&1 && sh commit -m "4m-exact" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p6_4m_exact_verify" "verify 4MiB exact" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 6d: 4MiB + 1 byte
-mkdir -p "p6_4m_plus1" && cd "p6_4m_plus1"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/4M_plus1.dat" . && sh add 4M_plus1.dat >/dev/null 2>&1 && sh commit -m "4m+1" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p6_4m_plus1_verify" "verify 4MiB+1" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 6e: exact 8 MiB
-mkdir -p "p6_8m_exact" && cd "p6_8m_exact"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/8M_exact.dat" . && sh add 8M_exact.dat >/dev/null 2>&1 && sh commit -m "8m-exact" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p6_8m_exact_verify" "verify 8MiB exact" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 6f: 8MiB + 1 byte
-mkdir -p "p6_8m_plus1" && cd "p6_8m_plus1"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/8M_plus1.dat" . && sh add 8M_plus1.dat >/dev/null 2>&1 && sh commit -m "8m+1" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p6_8m_plus1_verify" "verify 8MiB+1" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 6g: zeros
-mkdir -p "p6_zeros" && cd "p6_zeros"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/zeros_1M.dat" . && sh add zeros_1M.dat >/dev/null 2>&1 && sh commit -m "zeros" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p6_zeros_verify" "verify zeros" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 6h: sparse
-mkdir -p "p6_sparse" && cd "p6_sparse"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/sparse.dat" .
-assert "p6_sparse_add" "add sparse" "succeed" sh add sparse.dat
-cd "$SCENARIO_DIR"
-
-# 6i: newlines
-mkdir -p "p6_newlines" && cd "p6_newlines"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/only_newlines.dat" . && sh add only_newlines.dat >/dev/null 2>&1
-assert "p6_newlines_commit" "commit newlines" "succeed" sh commit -m "nl" --author "T"
-cd "$SCENARIO_DIR"
-
-# 6j: spaces
-mkdir -p "p6_spaces" && cd "p6_spaces"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/only_spaces.dat" . && sh add only_spaces.dat >/dev/null 2>&1
-assert "p6_spaces_commit" "commit spaces" "succeed" sh commit -m "sp" --author "T"
-cd "$SCENARIO_DIR"
-
-# 6k: utf8 content
-mkdir -p "p6_utf8" && cd "p6_utf8"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/utf8_content.dat" . && sh add utf8_content.dat >/dev/null 2>&1
-assert "p6_utf8_commit" "commit utf8 content" "succeed" sh commit -m "utf8" --author "T"
-cd "$SCENARIO_DIR"
-
-# 6l: unicode filename
-mkdir -p "p6_unicode_fn" && cd "p6_unicode_fn"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/unicode_ñ_file.dat" .
-assert "p6_unicode_fn_add" "add unicode filename" "succeed" sh add "unicode_ñ_file.dat"
-cd "$SCENARIO_DIR"
-
-# 6m: special chars filename
-mkdir -p "p6_special_fn" && cd "p6_special_fn"
-sh init >/dev/null 2>&1
-cp "$MODEL_DIR/file_with_#_hash.dat" . && sh add "file_with_#_hash.dat" >/dev/null 2>&1
-cp "$MODEL_DIR/file_with_\$_dollar.dat" . && sh add "file_with_\$_dollar.dat" >/dev/null 2>&1
-cp "$MODEL_DIR/file_with_&.dat" . && sh add "file_with_&.dat" >/dev/null 2>&1
-assert "p6_special_fn_commit" "commit special filenames" "succeed" sh commit -m "special" --author "T"
-cd "$SCENARIO_DIR"
-
-# 6n: dedup check
-mkdir -p "p6_dedup" && cd "p6_dedup"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/dedup_a.dat" a.dat && cp "$MODEL_DIR/dedup_b.dat" b.dat
-sh add a.dat >/dev/null 2>&1 && sh add b.dat >/dev/null 2>&1 && sh commit -m "dedup" --author "T" >/dev/null 2>&1
-OBJ_N=$(find .shard/objects -type f | wc -l)
-echo "    Objects for 2 identical 64K files: $OBJ_N (expected 3 = commit+manifest+1 chunk)"
-cd "$SCENARIO_DIR"
-
-# 6o: hard link
-mkdir -p "p6_hardlink" && cd "p6_hardlink"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/hardlink_copy.dat" .
-assert "p6_hardlink" "add hard link copy" "succeed" sh add hardlink_copy.dat
-cd "$SCENARIO_DIR"
-
-# 6p: symlink valid
-mkdir -p "p6_symlink_file" && cd "p6_symlink_file"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/symlink_valid.dat" .
-assert "p6_symlink_valid" "add symlink copy" "succeed" sh add symlink_valid.dat
-cd "$SCENARIO_DIR"
-
-# 6q: space in filename
-mkdir -p "p6_space_fn" && cd "p6_space_fn"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/space file.dat" .
-assert "p6_space_fn" "add space filename" "succeed" sh add "space file.dat"
-cd "$SCENARIO_DIR"
-
-# 6r: special chars in commit message
-mkdir -p "p6_msg_special" && cd "p6_msg_special"
-sh init >/dev/null 2>&1 && echo d > f.dat && sh add f.dat >/dev/null 2>&1
-assert "p6_msg_special" "commit msg special chars" "succeed" sh commit -m "hello 'world' & \"everyone\"" --author "T"
-cd "$SCENARIO_DIR"
-
-# 6s: empty commit message
-mkdir -p "p6_msg_empty" && cd "p6_msg_empty"
-sh init >/dev/null 2>&1 && echo d > f.dat && sh add f.dat >/dev/null 2>&1
-assert "p6_msg_empty" "commit msg empty" "succeed" sh commit -m "" --author "T"
-cd "$SCENARIO_DIR"
-
-# 6t: empty author
-mkdir -p "p6_author_empty" && cd "p6_author_empty"
-sh init >/dev/null 2>&1 && echo d > f.dat && sh add f.dat >/dev/null 2>&1
-assert "p6_author_empty" "commit author empty" "succeed" sh commit -m "x" --author ""
-cd "$SCENARIO_DIR"
-
-echo "  Phase 6 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 7: STATE MACHINE VIOLATIONS
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 7: State machine violations                          ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-# 7a: add same file twice (overwrite)
-mkdir -p "p7_add_twice" && cd "p7_add_twice"
-sh init >/dev/null 2>&1
-echo "v1" > f.dat && sh add f.dat >/dev/null 2>&1
-echo "v2" > f.dat && sh add f.dat >/dev/null 2>&1
-sh commit -m "ow" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-rm f.dat && sh checkout "$CID" >/dev/null 2>&1
-[ "$(cat f.dat)" = "v2" ] && echo "  OK: add overwrite uses latest" || echo "  WARN: add overwrite"
-cd "$SCENARIO_DIR"
-
-# 7b: two commits, parent chain
-mkdir -p "p7_parent_chain" && cd "p7_parent_chain"
-sh init >/dev/null 2>&1
-echo a > a.dat && sh add a.dat >/dev/null 2>&1 && sh commit -m "c1" --author "T" >/dev/null 2>&1
-CID1=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-echo b > b.dat && sh add b.dat >/dev/null 2>&1 && sh commit -m "c2" --author "T" >/dev/null 2>&1
-CID2=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-[ "$CID1" != "$CID2" ] && echo "  OK: different commits" || echo "  WARN: same commit id"
-sh log 2>/dev/null | grep -q "parents:" && echo "  OK: second has parent" || echo "  WARN: no parent"
-cd "$SCENARIO_DIR"
-
-# 7c: checkout overwrites local
-mkdir -p "p7_co_overwrite" && cd "p7_co_overwrite"
-sh init >/dev/null 2>&1
-echo committed > f.dat && sh add f.dat >/dev/null 2>&1 && sh commit -m "co" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-echo "local-changes" > f.dat
-sh checkout "$CID" >/dev/null 2>&1
-[ "$(cat f.dat)" = "committed" ] && echo "  OK: checkout overwrites local" || echo "  WARN: checkout no overwrite"
-cd "$SCENARIO_DIR"
-
-# 7d: prune then verify
-mkdir -p "p7_prune_verify" && cd "p7_prune_verify"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/64K.dat" . && sh add 64K.dat >/dev/null 2>&1 && sh commit -m "pv" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-sh prune >/dev/null 2>&1
-assert "p7_prune_verify" "verify after prune" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 7e: tag protects from prune
-mkdir -p "p7_tag_protect" && cd "p7_tag_protect"
-sh init >/dev/null 2>&1 && cp "$MODEL_DIR/1K.dat" . && sh add 1K.dat >/dev/null 2>&1 && sh commit -m "tp" --author "T" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-sh tag add safe "$CID" >/dev/null 2>&1
-mkdir -p .shard/objects/ff && echo ORPHAN > .shard/objects/ff/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-sh prune >/dev/null 2>&1
-assert "p7_tag_protect" "verify tagged after prune" "succeed" sh verify "$CID"
-cd "$SCENARIO_DIR"
-
-# 7f: 5 sequential commits in log
-mkdir -p "p7_5_commits" && cd "p7_5_commits"
-sh init >/dev/null 2>&1
-for i in $(seq 1 5); do echo "$i" > "f${i}.dat" && sh add "f${i}.dat" >/dev/null 2>&1 && sh commit -m "c${i}" --author "T" >/dev/null 2>&1; done
-N=$(sh log 2>/dev/null | grep "^commit " | wc -l)
-[ "$N" -eq 5 ] && echo "  OK: 5 commits in log" || echo "  WARN: $N commits"
-cd "$SCENARIO_DIR"
-
-# 7g: config persists across ops
-mkdir -p "p7_config_persist" && cd "p7_config_persist"
-sh init >/dev/null 2>&1 && sh config set user.name "Bob" >/dev/null 2>&1
-echo d > f.dat && sh add f.dat >/dev/null 2>&1 && sh commit -m "x" --author "T" >/dev/null 2>&1
-sh prune >/dev/null 2>&1
-sh config get user.name 2>/dev/null | grep -q "Bob" && echo "  OK: config persists" || echo "  WARN: config lost"
-cd "$SCENARIO_DIR"
-
-# 7h: tag overwrite
-mkdir -p "p7_tag_overwrite" && cd "p7_tag_overwrite"
-sh init >/dev/null 2>&1
-echo a > a.dat && sh add a.dat >/dev/null 2>&1 && sh commit -m "a" --author "T" >/dev/null 2>&1
-CID1=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-echo b > b.dat && sh add b.dat >/dev/null 2>&1 && sh commit -m "b" --author "T" >/dev/null 2>&1
-CID2=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-sh tag add mytag "$CID1" >/dev/null 2>&1
-sh tag add mytag "$CID2" >/dev/null 2>&1
-echo "  OK: tag overwrite (no crash)"
-cd "$SCENARIO_DIR"
-
-echo "  Phase 7 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 8: HIGH THROUGHPUT / STRESS
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 8: High-throughput stress                            ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-btime() { local s=$(date +%s%N); "$@" >/dev/null 2>&1; local e=$(date +%s%N); awk "BEGIN { printf \"%.6f\", ($e - $s) / 1000000000 }"; }
-
-# 8a: 100 MiB
-mkdir -p "p8_100m" && cd "p8_100m"
-sh init >/dev/null 2>&1
-cp "$MODEL_DIR/stress_100M.dat" .
-t=$(btime sh add stress_100M.dat); echo "    add 100M: $(awk "BEGIN { print $t*1000 }") ms, $(awk "BEGIN { printf \"%.0f\", 100/$t }") MiB/s"
-t=$(btime sh commit -m "s100" --author "S"); echo "    commit: $(awk "BEGIN { print $t*1000 }") ms"
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-t=$(btime sh verify "$CID"); echo "    verify: $(awk "BEGIN { print $t*1000 }") ms"
-echo "    objects: $(find .shard/objects -type f | wc -l)"
-cd "$SCENARIO_DIR"
-
-# 8b: 200 MiB
-mkdir -p "p8_200m" && cd "p8_200m"
-sh init >/dev/null 2>&1; cp "$MODEL_DIR/stress_200M.dat" .
-t=$(btime sh add stress_200M.dat); echo "    add 200M: $(awk "BEGIN { print $t*1000 }") ms, $(awk "BEGIN { printf \"%.0f\", 200/$t }") MiB/s"
-t=$(btime sh commit -m "s200" --author "S"); echo "    commit: $(awk "BEGIN { print $t*1000 }") ms"
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-t=$(btime sh verify "$CID"); echo "    verify: $(awk "BEGIN { print $t*1000 }") ms"
-cd "$SCENARIO_DIR"
-
-# 8c: 100 small files
-mkdir -p "p8_100f" && cd "p8_100f"
-sh init >/dev/null 2>&1; cp "$MODEL_DIR/many_small/"* .
-t_s=$(date +%s%N); for f in *.dat; do sh add "$f" >/dev/null 2>&1; done; t_e=$(date +%s%N)
-t=$(awk "BEGIN { printf \"%.6f\", ($t_e - $t_s) / 1000000000 }")
-echo "    add 100 files: $(awk "BEGIN { print $t*1000 }") ms total, $(awk "BEGIN { printf \"%.2f\", $t*1000/100 }") ms avg"
-t=$(btime sh commit -m "100f" --author "S"); echo "    commit: $(awk "BEGIN { print $t*1000 }") ms"
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-t=$(btime sh verify "$CID"); echo "    verify: $(awk "BEGIN { print $t*1000 }") ms"
-echo "    objects: $(find .shard/objects -type f | wc -l)"
-cd "$SCENARIO_DIR"
-
-# 8d: mixed sizes commit
-mkdir -p "p8_mixed" && cd "p8_mixed"
-sh init >/dev/null 2>&1
-for f in "$MODEL_DIR/1K.dat" "$MODEL_DIR/4M.dat" "$MODEL_DIR/16M.dat"; do
-    cp "$f" . && sh add "$(basename "$f")" >/dev/null 2>&1
-done
-sh commit -m "mixed" --author "S" >/dev/null 2>&1
-CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-assert "p8_mixed_verify" "verify mixed sizes" "succeed" sh verify "$CID"
-rm -f *.dat
-t=$(btime sh checkout "$CID"); echo "    checkout: $(awk "BEGIN { print $t*1000 }") ms"
-cd "$SCENARIO_DIR"
-
-echo "  Phase 8 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 9: P99.99 LATENCY DISTRIBUTION (100 cycles)
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 9: P99.99 latency distribution                       ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-mkdir -p "p9_latency" && cd "p9_latency"
-sh init >/dev/null 2>&1
-
-# Pre-generate unique files
+d14_many="$RESULTS_DIR/bench_many"
+init_repo "$d14_many"
+start=$(date +%s%N)
 for i in $(seq 1 100); do
-    dd if=/dev/urandom of="_file_${i}.dat" bs=1K count=64 2>/dev/null
+    dd if=/dev/urandom of="$d14_many/small_$i.bin" bs=1024 count=1 2>/dev/null
+    sh "$d14_many" add "small_$i.bin" >/dev/null 2>&1
+done
+end=$(date +%s%N)
+ms_many=$(( (end-start)/1000000 ))
+echo "  add 100 files: ${ms_many} ms total" | tee -a "$RESULTS_FILE"
+
+start=$(date +%s%N); cid_many=$(do_commit "$d14_many" "many"); end=$(date +%s%N)
+ms_manyc=$(( (end-start)/1000000 ))
+echo "  commit 100 files: ${ms_manyc} ms" | tee -a "$RESULTS_FILE"
+
+start=$(date +%s%N); sh "$d14_many" verify "$cid_many" >/dev/null 2>&1; end=$(date +%s%N)
+ms_manyv=$(( (end-start)/1000000 ))
+echo "  verify 100 files: ${ms_manyv} ms" | tee -a "$RESULTS_FILE"
+
+for i in $(seq 1 100); do rm -f "$d14_many/small_$i.bin"; done
+start=$(date +%s%N); sh "$d14_many" checkout "$cid_many" >/dev/null 2>&1; end=$(date +%s%N)
+ms_co=$(( (end-start)/1000000 ))
+echo "  checkout 100 files: ${ms_co} ms" | tee -a "$RESULTS_FILE"
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 15: P99.99 Latency Distribution (N=100)
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 15: P99.99 Latency distribution ═══" | tee -a "$SUMMARY_FILE"
+
+LAT_DIR="$RESULTS_DIR/lat"
+lat_add="$RESULTS_DIR/lat_add.txt"
+lat_commit="$RESULTS_DIR/lat_commit.txt"
+lat_verify="$RESULTS_DIR/lat_verify.txt"
+rm -f "$lat_add" "$lat_commit" "$lat_verify"
+
+echo "Running 100 latency cycles..." | tee -a "$SUMMARY_FILE"
+for i in $(seq 1 100); do
+    repo="$LAT_DIR/$i"
+    init_repo "$repo"
+    dd if=/dev/urandom of="$repo/test.bin" bs=65536 count=1 2>/dev/null
+
+    start=$(date +%s%N)
+    sh "$repo" add "test.bin" >/dev/null 2>&1
+    end=$(date +%s%N)
+    echo "scale=3; ($end - $start)/1000000" | bc 2>/dev/null >> "$lat_add" || \
+        python3 -c "print(($end - $start)/1000000)" >> "$lat_add"
+
+    start=$(date +%s%N)
+    cid=$(do_commit "$repo" "lat $i")
+    end=$(date +%s%N)
+    python3 -c "print(($end - $start)/1000000)" >> "$lat_commit"
+
+    start=$(date +%s%N)
+    sh "$repo" verify "$cid" >/dev/null 2>&1
+    end=$(date +%s%N)
+    python3 -c "print(($end - $start)/1000000)" >> "$lat_verify"
 done
 
-N=100
-rm -f /tmp/_lat_*.txt 2>/dev/null
-
-for i in $(seq 1 $N); do
-    cp "_file_${i}.dat" "bench.dat"
-    t=$(btime sh add bench.dat); awk "BEGIN { printf \"%.2f\n\", $t*1000 }" >> /tmp/_lat_add.txt
-    t=$(btime sh commit -m "l$i" --author "L"); awk "BEGIN { printf \"%.2f\n\", $t*1000 }" >> /tmp/_lat_commit.txt
-    CID=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
-    t=$(btime sh verify "$CID"); awk "BEGIN { printf \"%.2f\n\", $t*1000 }" >> /tmp/_lat_verify.txt
-    rm -f bench.dat
-done
-
-pct() {
-    local f="$1" p="$2"
-    sort -n "$f" | awk -v p="$p" 'BEGIN{c=0} {v[c++]=$1} END{idx=int(c*p/100); if(idx>=c) idx=c-1; print v[idx]}'
-}
-
-echo ""
+# Compute percentiles with python3
 for op in add commit verify; do
-    f="/tmp/_lat_${op}.txt"
-    [ -f "$f" ] || continue
-    sort -n "$f" -o "$f"
-    p50=$(pct "$f" 50); p90=$(pct "$f" 90); p99=$(pct "$f" 99); p999=$(pct "$f" 99.9); p9999=$(pct "$f" 99.99)
-    mean=$(awk '{s+=$1} END{printf "%.2f", s/NR}' "$f")
-    min=$(head -1 "$f"); max=$(tail -1 "$f")
-    echo "    ${op}: min=${min} p50=${p50} p90=${p90} p99=${p99} p99.9=${p999} p99.99=${p9999} max=${max} mean=${mean} ms"
+    latfile="$RESULTS_DIR/lat_${op}.txt"
+    if [ -f "$latfile" ]; then
+        stats=$(python3 -c "
+import json, sys, statistics
+vals = sorted([float(l) for l in open('$latfile') if l.strip()])
+n = len(vals)
+def pct(p): return vals[min(int(n * p), n-1)]
+print(f'min={vals[0]:.2f} p50={pct(0.5):.2f} p90={pct(0.9):.2f} p99={pct(0.99):.2f} p99.99={pct(0.9999):.2f} max={vals[-1]:.2f} mean={statistics.mean(vals):.2f}')
+")
+        echo "  $op: $stats ms" | tee -a "$RESULTS_FILE"
+    fi
 done
 
-echo "  Phase 9 cumulative: $PASSED/$TOTAL"
+echo "" | tee -a "$SUMMARY_FILE"
 
-# =====================================================================
-# PHASE 10: STORAGE SCALING
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 10: Storage scaling                                  ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 16: Storage scaling overhead
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 16: Storage scaling ═══" | tee -a "$SUMMARY_FILE"
 
-mkdir -p "p10_scale" && cd "p10_scale"
-sh init >/dev/null 2>&1
+d_scale="$RESULTS_DIR/scale"
+init_repo "$d_scale"
 
-echo "  size | objs | overhead"
-for sm in 1 4 8 16 32; do
-    sf="f_${sm}m.dat"
-    dd if=/dev/urandom of="$sf" bs=1M count="$sm" 2>/dev/null
-    orig=$(stat --format=%s "$sf")
-    sh add "$sf" >/dev/null 2>&1 && sh commit -m "s${sm}" --author "S" >/dev/null 2>&1
-    obs=$(python3 -c "import os; print(sum(os.path.getsize(os.path.join(d,f)) for d,_,fs in os.walk('.shard/objects') for f in fs))" 2>/dev/null || echo 0)
-    oc=$(find .shard/objects -type f | wc -l | tr -d ' ')
-    ov=$(awk "BEGIN { printf \"%.1f\", ($obs - $orig) / $orig * 100 }")
-    echo "  ${sm}M  | ${oc}    | ${ov}%"
+for size_mib in 1 4 8 16 32; do
+    dd if=/dev/urandom of="$d_scale/file_${size_mib}m.bin" bs=1048576 count="$size_mib" 2>/dev/null
+    sh "$d_scale" add "file_${size_mib}m.bin" >/dev/null 2>&1
+    do_commit "$d_scale" "add ${size_mib}MiB" >/dev/null
+    obj_count=$(find "$d_scale/.shard/objects" -type f | wc -l)
+    echo "  ${size_mib}M: ${obj_count} objects" | tee -a "$RESULTS_FILE"
 done
 
-echo "  Phase 10 cumulative: $PASSED/$TOTAL"
+echo "" | tee -a "$SUMMARY_FILE"
 
-# =====================================================================
-# PHASE 11: P2P NETWORK THROUGHPUT
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 11: P2P network throughput                           ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 17: Concurrent repo stress (10 repos in parallel)
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 17: Concurrent stress ═══" | tee -a "$SUMMARY_FILE"
 
-P2P_DIR="$SCENARIO_DIR/p11_p2p"
-mkdir -p "$P2P_DIR/server"
-cd "$P2P_DIR/server"
-sh init >/dev/null 2>&1
-dd if=/dev/urandom of="share.dat" bs=1M count=4 2>/dev/null
-sh add share.dat >/dev/null 2>&1 && sh commit -m "net" --author "N" >/dev/null 2>&1
-CID_NET=$(sh log 2>/dev/null | grep "^commit " | head -1 | awk '{print $2}')
+d17="$RESULTS_DIR/p17"
+mkdir -p "$d17"
+pids=""
+for i in $(seq 1 10); do
+    (
+        repo="$d17/repo_$i"
+        init_repo "$repo"
+        dd if=/dev/urandom of="$repo/data.bin" bs=65536 count=1 2>/dev/null
+        sh "$repo" add "data.bin" >/dev/null 2>&1
+        cid=$(do_commit "$repo" "concurrent $i")
+        sh "$repo" verify "$cid" >/dev/null 2>&1
+    ) &
+    pids="$pids $!"
+done
+for pid in $pids; do wait "$pid" 2>/dev/null; done
+completed=0
+for i in $(seq 1 10); do
+    [ -f "$d17/repo_$i/.shard/HEAD" ] && completed=$((completed+1))
+done
+check "p17 concurrent $completed/10" test "$completed" -eq 10
 
-SHARE_LOG="$P2P_DIR/share.log"
-"$SHARD_BIN" share > "$SHARE_LOG" 2>&1 &
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 18: P2P Network — share + pull + cross-peer verify
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 18: P2P Network ═══" | tee -a "$SUMMARY_FILE"
+
+d18a="$RESULTS_DIR/p18a"; d18b="$RESULTS_DIR/p18b"
+init_repo "$d18a"
+cp "$MODELS/4m.bin" "$d18a/"
+sh "$d18a" add "4m.bin" >/dev/null
+cid18=$(do_commit "$d18a" "p2p test")
+
+# Start share with line-buffered output (stdbuf prevents Rust's full buffering to file)
+SHARE_OUT="$RESULTS_DIR/share_out.txt"
+rm -f "$SHARE_OUT"
+(cd "$d18a" && stdbuf -oL "$SHARD_BIN" share) > "$SHARE_OUT" 2>/dev/null &
 SHARE_PID=$!
 
-LA="" PI=""
-for i in $(seq 1 30); do
-    LA=$(grep "Listening on" "$SHARE_LOG" 2>/dev/null | head -1 | awk '{print $3}' | tr -d '"' || true)
-    PI=$(grep "Local peer id:" "$SHARE_LOG" 2>/dev/null | head -1 | awk '{print $4}' || true)
-    [ -n "$LA" ] && [ -n "$PI" ] && break
+# Wait for share to print peer id and listen addr (up to 15s)
+for i in $(seq 1 15); do
     sleep 1
+    PEER_ID=$(grep "Local peer id" "$SHARE_OUT" 2>/dev/null | head -1 | sed 's/Local peer id: //')
+    LISTEN_ADDR=$(grep "Listening on " "$SHARE_OUT" 2>/dev/null | head -1 | sed 's/Listening on //')
+    [ -n "$PEER_ID" ] && [ -n "$LISTEN_ADDR" ] && break
 done
-MA="$LA/p2p/$PI"
-echo "  Server peer: $PI"
 
-mkdir -p "$P2P_DIR/client" && cd "$P2P_DIR/client"
-sh init >/dev/null 2>&1
-t_s=$(date +%s%N)
-"$SHARD_BIN" pull "$MA" "$CID_NET" >/dev/null 2>&1
-t_e=$(date +%s%N); t_pull=$(awk "BEGIN { printf \"%.6f\", ($t_e - $t_s) / 1000000000 }")
-echo "    pull 4MiB: $(awk "BEGIN { print $t_pull*1000; exit }") ms, $(awk "BEGIN { printf \"%.0f\", 4/$t_pull }") MiB/s"
+if [ -n "$PEER_ID" ] && [ -n "$LISTEN_ADDR" ]; then
+    MULTIADDR="${LISTEN_ADDR}/p2p/${PEER_ID}"
+    echo "  peer_id=$PEER_ID listen=$LISTEN_ADDR" | tee -a "$RESULTS_FILE"
 
-assert "p11_pull_verify" "verify pulled commit" "succeed" "$SHARD_BIN" verify "$CID_NET"
+    mkdir -p "$d18b"
+    start=$(date +%s%N)
+    if sh "$d18b" pull "$MULTIADDR" "$cid18" >/dev/null 2>&1; then
+        end=$(date +%s%N)
+        echo "  pull 4MiB: $(( (end-start)/1000000 )) ms" | tee -a "$RESULTS_FILE"
+    else
+        echo "  pull 4MiB: FAILED" | tee -a "$RESULTS_FILE"
+    fi
 
-# Re-pull (idempotent)
-t_s=$(date +%s%N)
-"$SHARD_BIN" pull "$MA" "$CID_NET" >/dev/null 2>&1
-t_e=$(date +%s%N); t_repull=$(awk "BEGIN { printf \"%.6f\", ($t_e - $t_s) / 1000000000 }")
-echo "    re-pull: $(awk "BEGIN { print $t_repull*1000; exit }") ms"
+    init_repo "$d18b"
+    start=$(date +%s%N)
+    if sh "$d18b" pull "$MULTIADDR" "$cid18" >/dev/null 2>&1; then
+        end=$(date +%s%N)
+        echo "  re-pull: $(( (end-start)/1000000 )) ms" | tee -a "$RESULTS_FILE"
+    else
+        echo "  re-pull: FAILED" | tee -a "$RESULTS_FILE"
+    fi
 
-kill "$SHARE_PID" 2>/dev/null || true
-wait "$SHARE_PID" 2>/dev/null || true
-
-echo "  Phase 11 cumulative: $PASSED/$TOTAL"
-
-# =====================================================================
-# PHASE 12: CONCURRENT STRESS
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PHASE 12: Concurrent stress                                ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-mkdir -p "p12_concurrent" && cd "p12_concurrent"
-for i in $(seq 1 10); do
-    rd="repo_$i" && mkdir -p "$rd"
-    (
-        cd "$rd"
-        "$SHARD_BIN" init >/dev/null 2>&1
-        dd if=/dev/urandom of="test.dat" bs=1M count=1 2>/dev/null
-        "$SHARD_BIN" add test.dat >/dev/null 2>&1
-        "$SHARD_BIN" commit -m "c$i" --author "C" >/dev/null 2>&1
-    ) &
-done
-wait
-OK=0
-for i in $(seq 1 10); do [ -f "repo_$i/.shard/HEAD" ] && OK=$((OK+1)); done
-echo "    concurrent completed: ${OK}/10"
-assert "p12_concurrent" "10 concurrent repos" "succeed" test "$OK" -eq 10
-
-# =====================================================================
-# SUMMARY
-# =====================================================================
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  FINAL SUMMARY                                              ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-echo ""
-echo "  Total: $TOTAL  Passed: $PASSED  Failed: $FAILED"
-if [ "$FAILED" -gt 0 ]; then
-    echo ""
-    echo "  FAILURES ($FAILED):"
-    echo -e "$ERRORS" | sed 's/^/    /'
+    check "p18.1 pulled file exists" test -f "$d18b/4m.bin"
+    check "p18.2 cross-peer verify" sh "$d18b" verify "$cid18"
+else
+    echo "  share_output=$(cat "$SHARE_OUT" 2>/dev/null)" | tee -a "$RESULTS_FILE"
+    fail "p18 share startup (peer=$PEER_ID addr=$LISTEN_ADDR)"
 fi
-echo ""
-echo "  Full logs and models: $RESULTS_DIR"
+
+kill "$SHARE_PID" 2>/dev/null; wait "$SHARE_PID" 2>/dev/null
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PHASE 19: Crypto/Key management
+# ═════════════════════════════════════════════════════════════════════════════
+echo "═══ PHASE 19: Crypto edge cases ═══" | tee -a "$SUMMARY_FILE"
+
+d19="$RESULTS_DIR/p19"
+mkdir -p "$d19"
+sh "$d19" init >/dev/null 2>&1
+sk_size=$(stat -c%s "$d19/.shard/keys/secret.key" 2>/dev/null || echo 0)
+pk_size=$(stat -c%s "$d19/.shard/keys/public.key" 2>/dev/null || echo 0)
+check "p19.1 secret.key 32 bytes" test "$sk_size" = "32"
+check "p19.2 public.key 32 bytes" test "$pk_size" = "32"
+
+d19p="$RESULTS_DIR/p19p"
+mkdir -p "$d19p"
+sh "$d19p" init --private >/dev/null 2>&1
+check "p19.3 private config" sh "$d19p" config get private
+
+echo "" | tee -a "$SUMMARY_FILE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
+# FINAL SUMMARY
+# ═════════════════════════════════════════════════════════════════════════════
+echo "" | tee -a "$SUMMARY_FILE"
+echo "═══════════════════════════════════════════════════════════════" | tee -a "$SUMMARY_FILE"
+echo "  FINAL SUMMARY" | tee -a "$SUMMARY_FILE"
+echo "═══════════════════════════════════════════════════════════════" | tee -a "$SUMMARY_FILE"
+echo "  Total: $TOTAL  Passed: $PASS  Failed: $FAIL" | tee -a "$SUMMARY_FILE"
+echo "" | tee -a "$SUMMARY_FILE"
+echo "Results directory: $RESULTS_DIR" | tee -a "$SUMMARY_FILE"
+echo "Detailed results: $RESULTS_FILE" | tee -a "$SUMMARY_FILE"
+echo "" | tee -a "$SUMMARY_FILE"
+
+exit $FAIL

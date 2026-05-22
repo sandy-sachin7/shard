@@ -705,6 +705,11 @@ pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
+    // Validate multiaddr format
+    if multiaddr.is_empty() || multiaddr.parse::<shard_net::libp2p::Multiaddr>().is_err() {
+        anyhow::bail!("Invalid multiaddr: {}", multiaddr);
+    }
+
     let peers_path = shard_dir.join("peers.json");
     let mut peers: Vec<String> = if peers_path.exists() {
         let data = fs::read(&peers_path)?;
