@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  node-a:
+    build: .
+    hostname: node-a
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Node A ==="
+        shard init
+        echo "test content from A" > /data/file-a.txt
+        shard add /data/file-a.txt
+        shard commit -m "initial commit from A"
+        shard share
+    volumes:
+      - shard-data-a:/data
+
+  node-b:
+    build: .
+    hostname: node-b
+    depends_on:
+      - node-a
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        sleep 2
+        echo "=== Node B ==="
+        shard init
+        echo "test content from B" > /data/file-b.txt
+        shard add /data/file-b.txt
+        shard commit -m "initial commit from B"
+        shard share
+    volumes:
+      - shard-data-b:/data
+
+  node-c:
+    build: .
+    hostname: node-c
+    depends_on:
+      - node-a
+      - node-b
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        sleep 4
+        echo "=== Node C ==="
+        shard init
+        shard peer add /dns/node-a/tcp/9090/p2p/QmPeerA
+        shard pull /dns/node-a/tcp/9090/p2p/QmPeerA <commit_id>
+        echo "Pull complete"
+    volumes:
+      - shard-data-c:/data
+
+volumes:
+  shard-data-a:
+  shard-data-b:
+  shard-data-c:
