@@ -32,15 +32,10 @@ pub fn init(path: &Path) -> Result<()> {
     let keys = KeyPair::generate();
     keys.save(&shard_dir.join("keys"))?;
 
-    // Generate a unique repo identity for gossipsub topic hash
+    // Generate a deterministic repo identity from the public key
+    // (same key = same repo_id, so clones share the gossipsub topic)
     let pubkey = fs::read(shard_dir.join("keys/public.key"))?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let repo_id = blake3::hash(&[&pubkey[..], &now.to_le_bytes()[..]].concat())
-        .to_hex()
-        .to_string();
+    let repo_id = blake3::hash(&pubkey).to_hex().to_string();
     let mut config = load_config(&shard_dir)?;
     config.insert("repo_id".to_string(), repo_id);
     save_config(&shard_dir, &config)?;
@@ -1069,6 +1064,15 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
 
     let commit: Commit = serde_json::from_slice(&commit_data)?;
     println!("Got commit: {}", commit.message);
+
+    // Set repo_id from commit's public key so clones share the gossipsub topic
+    if let Some(pk_hex) = &commit.public_key {
+        let pk_bytes = hex::decode(pk_hex)?;
+        let repo_id = blake3::hash(&pk_bytes).to_hex().to_string();
+        let mut config = load_config(&shard_dir)?;
+        config.insert("repo_id".to_string(), repo_id);
+        save_config(&shard_dir, &config)?;
+    }
 
     // 2. Fetch all manifests in parallel
     let manifest_requests: Vec<(String, shard_net::protocol::ShardRequest)> = commit
