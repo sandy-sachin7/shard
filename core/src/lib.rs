@@ -52,22 +52,30 @@ pub fn init(path: &Path, backend: &str, compression_algo: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn add(path: &Path, file_path: &Path) -> Result<()> {
-    let shard_dir = path.join(".shard");
-    if !shard_dir.exists() {
-        anyhow::bail!("Not a Shard repository");
-    }
+fn relative_path(repo_root: &Path, file_path: &Path) -> String {
+    let repo = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let file = file_path
+        .canonicalize()
+        .unwrap_or_else(|_| file_path.to_path_buf());
+    file.strip_prefix(&repo)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| {
+            file_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
+}
 
-    let config = load_config(&shard_dir)?;
-    let compression: Compression = config
-        .get("compression")
-        .map(|s| s.as_str())
-        .unwrap_or("zstd")
-        .parse()?;
-
-    let store = Store::open(&shard_dir)?;
-    let mut index = Index::load(&shard_dir.join("index"))?;
-
+fn add_file(
+    repo_root: &Path,
+    file_path: &Path,
+    store: &Store,
+    index: &mut Index,
+    compression: &Compression,
+) -> Result<()> {
     let file = fs::File::open(file_path)?;
     let mut chunker = Chunker::new(file);
     let mut chunk_hashes = Vec::new();
@@ -86,23 +94,56 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         total_size += chunk.data.len() as u64;
     }
 
-    let filename = file_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("Invalid file path: {}", file_path.display()))?
-        .to_string();
+    let name = relative_path(repo_root, file_path);
     let manifest = FileManifest {
-        name: filename.clone(),
+        name: name.clone(),
         size: total_size,
         chunks: chunk_hashes,
         content_type: None,
         compression: compression.as_str().to_string(),
     };
 
-    index.files.insert(filename.clone(), manifest);
-    index.save(&shard_dir.join("index"))?;
+    index.files.insert(name.clone(), manifest);
+    println!("Added {} ({})", name, total_size);
+    Ok(())
+}
 
-    println!("Added {} ({})", filename, total_size);
+pub fn add(path: &Path, file_path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let config = load_config(&shard_dir)?;
+    let compression: Compression = config
+        .get("compression")
+        .map(|s| s.as_str())
+        .unwrap_or("zstd")
+        .parse()?;
+
+    let store = Store::open(&shard_dir)?;
+    let mut index = Index::load(&shard_dir.join("index"))?;
+
+    if file_path.is_dir() {
+        for entry in walkdir::WalkDir::new(file_path)
+            .into_iter()
+            .filter_entry(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| !s.starts_with('.'))
+                    .unwrap_or(false)
+            })
+        {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                add_file(path, entry.path(), &store, &mut index, &compression)?;
+            }
+        }
+    } else {
+        add_file(path, file_path, &store, &mut index, &compression)?;
+    }
+
+    index.save(&shard_dir.join("index"))?;
     Ok(())
 }
 
