@@ -2,15 +2,21 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 use std::io::Read;
 
+/// A chunk produced by the chunker: Blake3 content hash, raw bytes, and byte offset in the original file.
 #[derive(Debug, Clone)]
 pub struct Chunk {
+    /// Blake3 hash of the original (uncompressed) data.
     pub hash: blake3::Hash,
+    /// Raw (uncompressed) byte content of the chunk.
     pub data: Vec<u8>,
+    /// Byte offset of this chunk in the original file, used for ordering.
     pub offset: u64,
 }
 
 // ── Fixed-size chunker ─────────────────────────────────────────────────────
 
+/// Chunker that emits chunks of a fixed byte size.
+/// Panics if `chunk_size` is zero.
 pub struct FixedChunker {
     reader: Box<dyn Read + Send>,
     offset: u64,
@@ -180,13 +186,19 @@ impl RabinChunker {
 
 // ── Unified chunker API ────────────────────────────────────────────────────
 
+/// Chunker mode selected at init time — either fixed-size or content-defined (Rabin).
+/// Deserialized from `.shard/config.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkerMode {
+    /// Emit chunks of exactly `chunk_size` bytes.
     Fixed { chunk_size: u64 },
+    /// Emit variable-size chunks via buzhash rolling hash, with min/avg/max bounds.
     Rabin { min: u64, avg: u64, max: u64 },
 }
 
 impl ChunkerMode {
+    /// Parse a `ChunkerMode` from the repository config JSON.
+    /// Defaults to `Fixed { chunk_size: 4_194_304 }` if `chunker_mode` is absent.
     pub fn from_config(config: &BTreeMap<String, String>) -> Self {
         match config.get("chunker_mode").map(|s| s.as_str()) {
             Some("rabin") => ChunkerMode::Rabin {
@@ -213,16 +225,19 @@ impl ChunkerMode {
     }
 }
 
+/// Unified chunker interface — dispatches to either [`FixedChunker`] or [`RabinChunker`].
 pub enum Chunker {
     Fixed(FixedChunker),
     Rabin(RabinChunker),
 }
 
 impl Chunker {
+    /// Create a new fixed-size chunker reading from `reader`.
     pub fn new_fixed(reader: Box<dyn Read + Send>, chunk_size: u64) -> Self {
         Chunker::Fixed(FixedChunker::new(reader, chunk_size as usize))
     }
 
+    /// Create a new Rabin content-defined chunker reading from `reader`.
     pub fn new_rabin(reader: Box<dyn Read + Send>, min: u64, avg: u64, max: u64) -> Self {
         Chunker::Rabin(RabinChunker::new(
             reader,

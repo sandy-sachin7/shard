@@ -32,7 +32,7 @@ pub fn resolve_head(shard_dir: &Path) -> Result<(Option<String>, Option<String>)
     }
 }
 
-/// Set HEAD to point to a branch ("ref: refs/heads/<branch>").
+/// Set HEAD to point to a branch (`ref: refs/heads/<branch>`).
 pub fn set_head_branch(shard_dir: &Path, branch: &str) -> Result<()> {
     fs::write(
         shard_dir.join("HEAD"),

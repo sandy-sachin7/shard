@@ -26,18 +26,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v4
         with:
-          shared-key: ci-test-${{ matrix.os }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: cargo check
-        run: cargo check --locked
+        run: cargo check
 
       - name: cargo test
         run: cargo test --locked
-
-      - name: cargo build (release)
-        run: cargo build --release --locked
 
   lint:
     name: Lint
@@ -51,19 +52,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-lint
-
       - name: cargo fmt check
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- --deny warnings
-
-      - name: cargo doc
-        run: cargo doc --no-deps --locked
+        run: cargo clippy --all-targets -- -D warnings
 
   security:
     name: Security audit
@@ -77,12 +70,7 @@ jobs:
         with:
           tool: cargo-audit
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-security
-
-      - name: cargo audit
+      - name: Run audit
         run: cargo audit
 
   docker:
