@@ -60,6 +60,14 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Merge a branch into the current branch
+    Merge {
+        branch: String,
+        #[arg(short, long)]
+        message: String,
+        #[arg(long, default_value = "User <user@example.com>")]
+        author: String,
+    },
     /// Checkout a branch or commit
     Checkout {
         target: String,
@@ -186,6 +194,14 @@ async fn main() -> Result<()> {
         Commands::Log { json } => {
             let current_dir = env::current_dir()?;
             shard_core::log_cmd(&current_dir, *json)?;
+        }
+        Commands::Merge {
+            branch,
+            message,
+            author,
+        } => {
+            let current_dir = env::current_dir()?;
+            shard_core::merge(&current_dir, branch, message, author)?;
         }
         Commands::Checkout { target, json } => {
             let current_dir = env::current_dir()?;

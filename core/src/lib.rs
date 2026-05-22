@@ -790,6 +790,110 @@ pub fn branch_list(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+
+    let store = Store::open(&shard_dir)?;
+
+    // Resolve current HEAD
+    let (current_branch, current_id) = branch::resolve_head(&shard_dir)?;
+    let current_id =
+        current_id.ok_or_else(|| anyhow::anyhow!("No commits yet — nothing to merge into"))?;
+
+    // Resolve source branch
+    let source_id = branch::resolve_rev(&shard_dir, branch)?;
+    if source_id == current_id {
+        anyhow::bail!("Already up to date — source is the same commit as HEAD");
+    }
+
+    // Load both commits
+    let current_commit = load_commit(&store, &current_id)?;
+    let source_commit = load_commit(&store, &source_id)?;
+
+    // Load manifests from both sides
+    let mut merged_manifests: std::collections::HashMap<String, (String, Vec<String>)> =
+        std::collections::HashMap::new();
+
+    for manifest_id in &current_commit.manifests {
+        let data = store.get_chunk(manifest_id)?;
+        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        merged_manifests.insert(manifest.name.clone(), (manifest.name, manifest.chunks));
+    }
+
+    for manifest_id in &source_commit.manifests {
+        let data = store.get_chunk(manifest_id)?;
+        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        merged_manifests.insert(manifest.name.clone(), (manifest.name, manifest.chunks));
+    }
+
+    // Store merged manifests
+    let mut merged_manifest_ids = Vec::new();
+    for (name, chunks) in merged_manifests.values() {
+        let compression = Compression::None;
+        let manifest = FileManifest {
+            name: name.clone(),
+            size: 0,
+            chunks: chunks.clone(),
+            content_type: None,
+            compression: compression.as_str().to_string(),
+        };
+        let json = serde_json::to_vec(&manifest)?;
+        let hash = blake3::hash(&json);
+        store.put_chunk(&crate::chunker::Chunk {
+            hash,
+            data: json,
+            offset: 0,
+        })?;
+        merged_manifest_ids.push(hash.to_hex().to_string());
+    }
+    merged_manifest_ids.sort();
+
+    // Create merge commit
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let keys = KeyPair::load(&shard_dir.join("keys"))?;
+    let public_key_hex = hex::encode(keys.verifying_key.to_bytes());
+    let parents = vec![current_id.clone(), source_id.clone()];
+    let mut commit = Commit {
+        commit_id: String::new(),
+        parents,
+        manifests: merged_manifest_ids,
+        author: author.to_string(),
+        message: message.to_string(),
+        timestamp,
+        public_key: Some(public_key_hex),
+        signature: None,
+    };
+
+    let signing_key = keys.signing_key;
+    let json_unsigned = serde_json::to_vec(&commit)?;
+    let signature = signing_key.sign(&json_unsigned);
+    commit.signature = Some(hex::encode(signature.to_bytes()));
+
+    let json_final = serde_json::to_vec(&commit)?;
+    let hash = blake3::hash(&json_final);
+    store.put_chunk(&crate::chunker::Chunk {
+        hash,
+        data: json_final,
+        offset: 0,
+    })?;
+
+    let merge_commit_id = hash.to_hex().to_string();
+
+    // Update HEAD and branch ref
+    if let Some(ref branch_name) = current_branch {
+        branch::update_branch_ref(&shard_dir, branch_name, &merge_commit_id)?;
+        branch::set_head_branch(&shard_dir, branch_name)?;
+    } else {
+        branch::set_head_commit(&shard_dir, &merge_commit_id)?;
+    }
+
+    println!("Merge commit {} ({})", merge_commit_id, message);
+    Ok(())
+}
+
 pub fn tag_list(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
