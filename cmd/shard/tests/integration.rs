@@ -375,7 +375,7 @@ fn test_status_after_commit() {
     let output = shard(&["status"], &dir).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("On commit"));
+    assert!(stdout.contains("On branch:"));
     assert!(stdout.contains("Nothing staged"));
 }
 

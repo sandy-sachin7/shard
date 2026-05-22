@@ -1,3 +1,4 @@
+pub mod branch;
 pub mod chunker;
 pub mod commit;
 pub mod compression;
@@ -35,6 +36,8 @@ pub fn init(
     }
     fs::create_dir_all(shard_dir.join("objects"))?;
     fs::create_dir_all(shard_dir.join("keys"))?;
+    fs::create_dir_all(shard_dir.join("refs").join("heads"))?;
+    branch::set_head_branch(&shard_dir, "main")?;
 
     let keys = KeyPair::generate();
     keys.save(&shard_dir.join("keys"))?;
@@ -236,11 +239,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 
     // WAL: back up pre-commit state
     let wal = wal::Wal::new(&shard_dir);
-    let head_backup = if head_path.exists() {
-        Some(fs::read_to_string(&head_path)?)
-    } else {
-        None
-    };
+    let head_backup = fs::read_to_string(&head_path).ok();
     let index_backup = fs::read(shard_dir.join("index"))?;
     wal.append(&wal::WalEntry::CommitBegin {
         head_backup,
@@ -264,9 +263,9 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 
     // 2. Get parent
     let mut parents = Vec::new();
-    if head_path.exists() {
-        let head = fs::read_to_string(&head_path)?;
-        parents.push(head.trim().to_string());
+    let (current_branch, parent_id) = branch::resolve_head(&shard_dir)?;
+    if let Some(pid) = parent_id {
+        parents.push(pid);
     }
 
     // 3. Create commit
@@ -300,9 +299,14 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     };
     store.put_chunk(&chunk)?;
 
-    // 6. Update HEAD
+    // 6. Update HEAD and branch ref
     let commit_id = hash.to_hex().to_string();
-    fs::write(&head_path, &commit_id)?;
+    if let Some(ref branch_name) = current_branch {
+        branch::update_branch_ref(&shard_dir, branch_name, &commit_id)?;
+        branch::set_head_branch(&shard_dir, branch_name)?;
+    } else {
+        fs::write(&head_path, &commit_id)?;
+    }
 
     // 7. Clear index
     index.files.clear();
@@ -442,17 +446,12 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
 
     let store = Store::open(&shard_dir)?;
 
-    let head_path = shard_dir.join("HEAD");
-    if !head_path.exists() {
-        anyhow::bail!("No commits yet");
-    }
-
-    let head = fs::read_to_string(&head_path)?;
-    let head = head.trim();
+    let (_, head_commit) = branch::resolve_head(&shard_dir)?;
+    let head = head_commit.ok_or_else(|| anyhow::anyhow!("No commits yet"))?;
 
     let mut entries: Vec<LogEntry> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut stack = vec![head.to_string()];
+    let mut stack = vec![head];
 
     while let Some(cid) = stack.pop() {
         if !seen.insert(cid.clone()) {
@@ -493,14 +492,26 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn checkout(path: &Path, commit_id: &str, json: bool) -> Result<()> {
+pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("Not a Shard repository");
     }
 
     let store = Store::open(&shard_dir)?;
-    let commit = load_commit(&store, commit_id)?;
+
+    // Resolve target: branch name or commit id
+    let branch_path = shard_dir.join("refs").join("heads").join(target);
+    let commit_id = if branch_path.exists() {
+        let id = fs::read_to_string(&branch_path)?.trim().to_string();
+        branch::set_head_branch(&shard_dir, target)?;
+        id
+    } else {
+        branch::set_head_commit(&shard_dir, target)?;
+        target.to_string()
+    };
+
+    let commit = load_commit(&store, &commit_id)?;
     let mut files = Vec::new();
 
     for manifest_id in &commit.manifests {
@@ -551,13 +562,16 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         anyhow::bail!("Not a Shard repository");
     }
 
-    let head_path = shard_dir.join("HEAD");
+    let (current_branch, head_commit) = branch::resolve_head(&shard_dir)?;
     let mut commit_id: Option<String> = None;
-    if head_path.exists() {
-        let head = fs::read_to_string(&head_path)?;
-        commit_id = Some(head.trim().to_string());
+    if let Some(cid) = head_commit {
+        commit_id = Some(cid);
         if !json {
-            println!("On commit: {}", commit_id.as_ref().unwrap());
+            if let Some(ref branch) = current_branch {
+                println!("On branch: {}", branch);
+            } else {
+                println!("HEAD detached at {}", commit_id.as_ref().unwrap());
+            }
         }
     } else if !json {
         println!("No commits yet.");
@@ -724,6 +738,58 @@ pub fn tag_add(path: &Path, name: &str, commit_id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn branch_create(path: &Path, name: &str, commit_id: Option<&str>) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    let id = match commit_id {
+        Some(cid) => cid.to_string(),
+        None => {
+            let (_, head) = branch::resolve_head(&shard_dir)?;
+            head.ok_or_else(|| anyhow::anyhow!("No commits yet — cannot create branch"))?
+        }
+    };
+    // Verify commit exists
+    let store = Store::open(&shard_dir)?;
+    load_commit(&store, &id)?;
+    branch::create_branch(&shard_dir, name, &id)
+}
+
+pub fn branch_delete(path: &Path, name: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    branch::delete_branch(&shard_dir, name)
+}
+
+pub fn branch_list(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("Not a Shard repository");
+    }
+    let (current, branches) = branch::list_branches(&shard_dir)?;
+    if branches.is_empty() {
+        println!("No branches.");
+        return Ok(());
+    }
+    for (name, commit_id) in &branches {
+        let prefix = if current.as_deref() == Some(name) {
+            "* "
+        } else {
+            "  "
+        };
+        println!(
+            "{}{} ({})",
+            prefix,
+            name,
+            &commit_id[..8.min(commit_id.len())]
+        );
+    }
+    Ok(())
+}
+
 pub fn tag_list(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
@@ -785,17 +851,27 @@ pub fn prune(path: &Path) -> Result<()> {
     let store = Store::open(&shard_dir)?;
     let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // 1. Walk from HEAD commit
-    let head_path = shard_dir.join("HEAD");
-    if head_path.exists() {
-        let head = fs::read_to_string(&head_path)?;
-        let head = head.trim().to_string();
+    // 1. Walk from HEAD commit (and all branch tips)
+    let (_, head_commit) = branch::resolve_head(&shard_dir)?;
+    if let Some(ref head) = head_commit {
         collect_reachable(
             &store,
-            &head,
+            head,
             &mut std::collections::HashSet::new(),
             &mut reachable,
         )?;
+    }
+
+    // Also walk from all branch refs (in case HEAD is detached from any branch)
+    if let Ok(branches) = branch::list_branches(&shard_dir) {
+        for (_, commit_id) in branches.1 {
+            collect_reachable(
+                &store,
+                &commit_id,
+                &mut std::collections::HashSet::new(),
+                &mut reachable,
+            )?;
+        }
     }
 
     // 2. Walk from tags
@@ -945,17 +1021,14 @@ pub async fn sync(path: &Path) -> Result<()> {
         }
     }
 
-    let head_path = shard_dir.join("HEAD");
+    let head_commit = branch::resolve_head(&shard_dir)?.1;
 
     // Initial announce (may fail with InsufficientPeers if no peers yet)
-    if head_path.exists() {
-        if let Ok(head) = fs::read_to_string(&head_path) {
-            let head = head.trim().to_string();
-            let msg = format!("announce:{}", head);
-            match node.publish(&topic, msg.as_bytes()) {
-                Ok(_) => println!("Announced commit {} on sync topic", head),
-                Err(e) => eprintln!("Initial announce (will retry): {}", e),
-            }
+    if let Some(ref head) = head_commit {
+        let msg = format!("announce:{}", head);
+        match node.publish(&topic, msg.as_bytes()) {
+            Ok(_) => println!("Announced commit {} on sync topic", head),
+            Err(e) => eprintln!("Initial announce (will retry): {}", e),
         }
     } else {
         println!("No commits to announce");
@@ -979,14 +1052,11 @@ pub async fn sync(path: &Path) -> Result<()> {
                 break Ok(());
             }
             _ = interval.tick() => {
-                if head_path.exists() {
-                    if let Ok(head) = fs::read_to_string(&head_path) {
-                        let head = head.trim().to_string();
-                        let msg = format!("announce:{}", head);
-                        match node.publish(&topic, msg.as_bytes()) {
-                            Ok(_) => println!("Re-announced commit {} on sync topic", head),
-                            Err(e) => eprintln!("Re-announce failed: {}", e),
-                        }
+                if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
+                    let msg = format!("announce:{}", head);
+                    match node.publish(&topic, msg.as_bytes()) {
+                        Ok(_) => println!("Re-announced commit {} on sync topic", head),
+                        Err(e) => eprintln!("Re-announce failed: {}", e),
                     }
                 }
             }
@@ -1045,14 +1115,10 @@ pub async fn sync(path: &Path) -> Result<()> {
                                 let peer = propagation_source;
                                 let commit_id_owned = commit_id.to_string();
                                 // Reply with our HEAD if different (triggers peer to pull from us)
-                                if head_path.exists() {
-                                    if let Ok(head) = fs::read_to_string(&head_path) {
-                                        let head = head.trim().to_string();
-                                        if head != commit_id_owned {
-                                            let msg = format!("announce:{}", head);
-                                            let _ = node.publish(&topic, msg.as_bytes());
-                                        }
-                                    }
+                                let our_head = branch::resolve_head(&shard_dir)?.1.unwrap_or_default();
+                                if our_head != commit_id_owned {
+                                    let msg = format!("announce:{}", our_head);
+                                    let _ = node.publish(&topic, msg.as_bytes());
                                 }
                                 if let Some(addrs) = address_book.get(&peer) {
                                     if let Some(addr) = addrs.first() {
@@ -1130,12 +1196,9 @@ pub async fn sync(path: &Path) -> Result<()> {
                             .gossipsub
                             .add_explicit_peer(&peer_id);
                         // Announce HEAD to the newly connected peer
-                        if head_path.exists() {
-                            if let Ok(head) = fs::read_to_string(&head_path) {
-                                let head = head.trim().to_string();
-                                let msg = format!("announce:{}", head);
-                                let _ = node.publish(&topic, msg.as_bytes());
-                            }
+                        if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
+                            let msg = format!("announce:{}", head);
+                            let _ = node.publish(&topic, msg.as_bytes());
                         }
                     }
                     shard_net::libp2p::swarm::SwarmEvent::IncomingConnection {

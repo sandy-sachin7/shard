@@ -64,7 +64,9 @@ const GEAR: [u32; 256] = {
     let mut state: u64 = 42;
     let mut i = 0;
     while i < 256 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         table[i] = (state >> 32) as u32;
         i += 1;
     }

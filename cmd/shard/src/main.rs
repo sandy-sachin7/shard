@@ -15,19 +15,14 @@ struct Cli {
 enum Commands {
     /// Initialize a new Shard repository
     Init {
-        /// Initialize as a private repository
         #[arg(long)]
         private: bool,
-        /// Storage backend (flat, sled)
         #[arg(long, default_value = "flat")]
         db: String,
-        /// Compression algorithm (none, zstd, zlib)
         #[arg(long, default_value = "zstd")]
         compression: String,
-        /// Chunking mode (fixed, rabin)
         #[arg(long, default_value = "fixed")]
         chunker: String,
-        /// Chunk size in bytes (default 4194304)
         #[arg(long)]
         chunk_size: Option<u64>,
     },
@@ -46,6 +41,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Manage branches
+    Branch {
+        #[command(subcommand)]
+        command: BranchCommands,
+    },
     /// Manage peers
     Peer {
         #[command(subcommand)]
@@ -60,9 +60,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Checkout files from a commit
+    /// Checkout a branch or commit
     Checkout {
-        commit_id: String,
+        target: String,
         #[arg(long)]
         json: bool,
     },
@@ -87,6 +87,20 @@ enum Commands {
     Recover,
     /// Sync with peers via pubsub announcements
     Sync,
+}
+
+#[derive(Subcommand)]
+enum BranchCommands {
+    /// Create a new branch
+    Create {
+        name: String,
+        /// Commit id to point to (defaults to HEAD)
+        commit_id: Option<String>,
+    },
+    /// Delete a branch
+    Delete { name: String },
+    /// List all branches
+    List,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +155,20 @@ async fn main() -> Result<()> {
             let current_dir = env::current_dir()?;
             shard_core::verify(&current_dir, commit_id, *json)?;
         }
+        Commands::Branch { command } => match command {
+            BranchCommands::Create { name, commit_id } => {
+                let current_dir = env::current_dir()?;
+                shard_core::branch_create(&current_dir, name, commit_id.as_deref())?;
+            }
+            BranchCommands::Delete { name } => {
+                let current_dir = env::current_dir()?;
+                shard_core::branch_delete(&current_dir, name)?;
+            }
+            BranchCommands::List => {
+                let current_dir = env::current_dir()?;
+                shard_core::branch_list(&current_dir)?;
+            }
+        },
         Commands::Peer { command } => match command {
             PeerCommands::Add { multiaddr } => {
                 let current_dir = env::current_dir()?;
@@ -159,9 +187,9 @@ async fn main() -> Result<()> {
             let current_dir = env::current_dir()?;
             shard_core::log_cmd(&current_dir, *json)?;
         }
-        Commands::Checkout { commit_id, json } => {
+        Commands::Checkout { target, json } => {
             let current_dir = env::current_dir()?;
-            shard_core::checkout(&current_dir, commit_id, *json)?;
+            shard_core::checkout(&current_dir, target, *json)?;
         }
         Commands::Status { json } => {
             let current_dir = env::current_dir()?;
