@@ -95,15 +95,9 @@ CONTENT=$(cat small.txt)
 [ "$CONTENT" = "Small file" ] || { echo "  FAIL: content mismatch. Got '$CONTENT'"; exit 1; }
 echo "  file materialization OK"
 
-# Verify content integrity directly (shard verify uses local key for sig check,
-# which won't match the remote author's key — will be addressed in Phase 4)
-# Instead, verify the pull stored the commit correctly
-PREFIX="${COMMIT_ID:0:2}"
-if [ ! -f ".shard/objects/$PREFIX/$COMMIT_ID" ]; then
-    echo "  FAIL: commit object not stored"
-    exit 1
-fi
-echo "  pulled object storage OK"
+# Verify the pulled commit (cross-peer — uses public_key embedded in commit)
+"$SHARD_BIN" verify "$COMMIT_ID" | grep -q "Verification successful"
+echo "  pulled commit verify OK"
 
 # Pull the large file commit
 "$SHARD_BIN" pull "$MULTIADDR" "$COMMIT_ID_2"
@@ -114,12 +108,8 @@ PULLED_HASH=$(sha256sum large.bin | awk '{print $1}')
 [ "$PULLED_HASH" = "$EXPECTED_HASH" ] || { echo "  FAIL: large file hash mismatch"; exit 1; }
 echo "  large file sha256 match OK"
 
-PREFIX2="${COMMIT_ID_2:0:2}"
-if [ ! -f ".shard/objects/$PREFIX2/$COMMIT_ID_2" ]; then
-    echo "  FAIL: large commit object not stored"
-    exit 1
-fi
-echo "  large pulled object storage OK"
+"$SHARD_BIN" verify "$COMMIT_ID_2" | grep -q "Verification successful"
+echo "  large pulled commit verify OK"
 
 # ── All tests passed ──
 echo ""
