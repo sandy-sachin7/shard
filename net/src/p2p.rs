@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
+use tracing::{error, info};
 
 use crate::protocol::{ShardRequest, ShardResponse};
 use anyhow::Result;
@@ -41,7 +42,7 @@ impl Node {
             )?
             .with_behaviour(|key| {
                 let local_peer_id = PeerId::from(key.public());
-                println!("Local peer id: {local_peer_id}");
+                info!("Local peer id: {local_peer_id}");
                 let _ = std::io::stdout().flush();
 
                 // Gossipsub
@@ -161,19 +162,19 @@ impl Node {
         loop {
             tokio::select! {
                 _ = signal::ctrl_c() => {
-                    println!("\nShutting down...");
+                    info!("\nShutting down...");
                     let _ = std::io::stdout().flush();
                     return;
                 }
                 event = self.swarm.select_next_some() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
-                            println!("Listening on {address:?}");
+                            info!("Listening on {address:?}");
                             let _ = std::io::stdout().flush();
                         }
                         SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                             for (peer_id, multiaddr) in list {
-                                println!("mDNS discovered: {peer_id} {multiaddr}");
+                                info!("mDNS discovered: {peer_id} {multiaddr}");
                                 self.swarm
                                     .behaviour_mut()
                                     .gossipsub
@@ -186,7 +187,7 @@ impl Node {
                         }
                         SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                             for (peer_id, _multiaddr) in list {
-                                println!("mDNS expired: {peer_id}");
+                                info!("mDNS expired: {peer_id}");
                                 self.swarm
                                     .behaviour_mut()
                                     .gossipsub
@@ -199,33 +200,33 @@ impl Node {
                             request_response::Message::Request {
                                 request, channel, ..
                             } => {
-                                println!("Received request from {}", peer);
+                                info!("Received request from {}", peer);
                                 self.serve_request(&mut provider, request, channel);
                             }
                             request_response::Message::Response { .. } => {
-                                println!("Received Response from {}", peer);
+                                info!("Received Response from {}", peer);
                             }
                         },
                         SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
                             request_response::Event::OutboundFailure { peer, error, .. },
                         )) => {
-                            println!("Outbound failure to {}: {:?}", peer, error);
+                            info!("Outbound failure to {}: {:?}", peer, error);
                         }
                         SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
                             request_response::Event::InboundFailure { peer, error, .. },
                         )) => {
-                            println!("Inbound failure from {}: {:?}", peer, error);
+                            info!("Inbound failure from {}: {:?}", peer, error);
                         }
                         SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
                             request_response::Event::ResponseSent { peer, .. },
                         )) => {
-                            println!("Response sent to {}", peer);
+                            info!("Response sent to {}", peer);
                         }
                         SwarmEvent::Behaviour(ShardBehaviourEvent::Identify(event)) => {
-                            println!("Identify event: {:?}", event);
+                            info!("Identify event: {:?}", event);
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                            println!("Connection established with {}", peer_id);
+                            info!("Connection established with {}", peer_id);
                             self.swarm
                                 .behaviour_mut()
                                 .gossipsub
@@ -236,13 +237,13 @@ impl Node {
                             send_back_addr,
                             ..
                         } => {
-                            println!(
+                            info!(
                                 "Incoming connection from {} to {}",
                                 send_back_addr, local_addr
                             );
                         }
                         e => {
-                            println!("Event: {:?}", e);
+                            info!("Event: {:?}", e);
                         }
                     }
                 }
@@ -318,13 +319,13 @@ impl Node {
                     anyhow::bail!("Outbound failure to {}: {:?}", peer, error);
                 }
                 SwarmEvent::ConnectionClosed { peer_id, cause, .. } if peer_id == peer => {
-                    eprintln!("Connection closed to {}: {:?}", peer_id, cause);
+                    error!("Connection closed to {}: {:?}", peer_id, cause);
                     let _ = self.swarm.dial(multiaddr.clone());
                 }
                 SwarmEvent::OutgoingConnectionError {
                     peer_id: Some(p), ..
                 } if p == peer => {
-                    eprintln!("Outgoing connection error: {:?}", p);
+                    error!("Outgoing connection error: {:?}", p);
                     let _ = self.swarm.dial(multiaddr.clone());
                 }
                 _ => {}
@@ -379,13 +380,13 @@ impl Node {
                     anyhow::bail!("Outbound failure to {}: {:?}", peer, error);
                 }
                 SwarmEvent::ConnectionClosed { peer_id, cause, .. } if peer_id == peer => {
-                    eprintln!("Connection closed to {}: {:?}", peer_id, cause);
+                    error!("Connection closed to {}: {:?}", peer_id, cause);
                     let _ = self.swarm.dial(multiaddr.clone());
                 }
                 SwarmEvent::OutgoingConnectionError {
                     peer_id: Some(p), ..
                 } if p == peer => {
-                    eprintln!("Outgoing connection error: {:?}", p);
+                    error!("Outgoing connection error: {:?}", p);
                     let _ = self.swarm.dial(multiaddr.clone());
                 }
                 SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -505,7 +506,7 @@ impl Node {
         loop {
             match self.swarm.select_next_some().await {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
-                    println!("Connection established with {}", peer);
+                    info!("Connection established with {}", peer);
                     return Ok(());
                 }
                 SwarmEvent::OutgoingConnectionError {
@@ -528,7 +529,7 @@ impl Node {
                     }
                 }
                 SwarmEvent::Behaviour(ShardBehaviourEvent::Identify(event)) => {
-                    println!("Identify event: {:?}", event);
+                    info!("Identify event: {:?}", event);
                 }
                 _ => {}
             }

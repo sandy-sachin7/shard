@@ -19,3 +19,4 @@ time = { workspace = true }
 walkdir = { workspace = true }
 zstd = { version = "0.13", default-features = false }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+tracing = "0.1.44"
