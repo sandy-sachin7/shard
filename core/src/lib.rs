@@ -1059,8 +1059,62 @@ fn load_peers(shard_dir: &Path) -> Result<Vec<String>> {
     }
 }
 
+fn authorized_keys_path(shard_dir: &Path) -> std::path::PathBuf {
+    shard_dir.join("authorized_keys")
+}
+
+fn load_authorized_keys(shard_dir: &Path) -> Result<Vec<ed25519_dalek::VerifyingKey>> {
+    let path = authorized_keys_path(shard_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path)?;
+    let mut keys = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bytes = hex::decode(line)?;
+        let arr: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid public key length in authorized_keys"))?;
+        keys.push(ed25519_dalek::VerifyingKey::from_bytes(&arr)?);
+    }
+    Ok(keys)
+}
+
+pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> {
+    // Validate the key
+    let bytes = hex::decode(public_key_hex)?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Public key must be 32 bytes (64 hex chars)"))?;
+    let _pk = ed25519_dalek::VerifyingKey::from_bytes(&arr)?;
+
+    let path = authorized_keys_path(shard_dir);
+    let mut content = if path.exists() {
+        fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    // Check if key already exists
+    if content.lines().any(|l| l.trim() == public_key_hex) {
+        println!("Key already authorized");
+        return Ok(());
+    }
+    content.push_str(public_key_hex);
+    content.push('\n');
+    fs::write(&path, content)?;
+    println!("Authorized key added");
+    Ok(())
+}
+
 struct RepoProvider {
     store: Store,
+    shard_dir: std::path::PathBuf,
 }
 
 impl shard_net::p2p::ShardContentProvider for RepoProvider {
@@ -1083,6 +1137,36 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
                 offset: 0,
             })
             .is_ok()
+    }
+    fn verify_auth(&self, public_key: &[u8], nonce: &[u8], signature: &[u8]) -> bool {
+        use ed25519_dalek::Verifier;
+        let pk_bytes: [u8; 32] = match public_key.try_into() {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let pk = match ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes) {
+            Ok(k) => k,
+            Err(_) => return false,
+        };
+        let sig_bytes: [u8; 64] = match signature.try_into() {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        if pk.verify(nonce, &sig).is_err() {
+            return false;
+        }
+        // Check authorized_keys if the file exists
+        if let Ok(keys) = load_authorized_keys(&self.shard_dir) {
+            if !keys.is_empty() {
+                return keys.contains(&pk);
+            }
+        }
+        true
+    }
+    fn repo_public_key(&self) -> Option<Vec<u8>> {
+        let keys = shard_crypto::KeyPair::load(&self.shard_dir.join("keys")).ok()?;
+        Some(keys.verifying_key.to_bytes().to_vec())
     }
 }
 
@@ -1108,7 +1192,10 @@ pub async fn share(path: &Path) -> Result<()> {
     // For now, we just start the node to prove connectivity.
     println!("Sharing repository...");
     let store = Store::open(&shard_dir)?;
-    let provider = RepoProvider { store };
+    let provider = RepoProvider {
+        store,
+        shard_dir: shard_dir.clone(),
+    };
     node.run(provider).await;
 
     Ok(())
@@ -1156,7 +1243,10 @@ pub async fn sync(path: &Path) -> Result<()> {
     let _ = std::io::stdout().flush();
 
     let store = Store::open(&shard_dir)?;
-    let mut provider = RepoProvider { store };
+    let mut provider = RepoProvider {
+        store,
+        shard_dir: shard_dir.clone(),
+    };
 
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     let mut address_book: HashMap<shard_net::libp2p::PeerId, Vec<shard_net::libp2p::Multiaddr>> =
@@ -1263,7 +1353,7 @@ pub async fn sync(path: &Path) -> Result<()> {
                         } = message
                         {
                             println!("Received request from {}", peer);
-                            node.serve_request(&mut provider, request, channel);
+                            node.serve_request(&peer, &mut provider, request, channel);
                         } else {
                             println!("Received Response from {}", peer);
                         }

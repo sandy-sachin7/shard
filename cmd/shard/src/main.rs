@@ -132,7 +132,12 @@ enum ConfigCommands {
 #[derive(Subcommand)]
 enum PeerCommands {
     /// Add a peer
-    Add { multiaddr: String },
+    Add {
+        multiaddr: String,
+        /// ed25519 public key (64 hex chars) to authorize
+        #[arg(long)]
+        public_key: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -187,9 +192,16 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Peer { command } => match command {
-            PeerCommands::Add { multiaddr } => {
+            PeerCommands::Add {
+                multiaddr,
+                public_key,
+            } => {
                 let current_dir = env::current_dir()?;
                 shard_core::peer_add(&current_dir, multiaddr)?;
+                if let Some(pk) = public_key {
+                    let shard_dir = current_dir.join(".shard");
+                    shard_core::add_authorized_key(&shard_dir, pk)?;
+                }
             }
         },
         Commands::Share => {

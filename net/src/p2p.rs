@@ -5,6 +5,7 @@ use tracing::{error, info};
 
 use crate::protocol::{ShardRequest, ShardResponse};
 use anyhow::Result;
+use ed25519_dalek::Signer;
 use futures::StreamExt;
 use libp2p::{
     gossipsub,
@@ -28,6 +29,8 @@ pub struct ShardBehaviour {
 
 pub struct Node {
     pub swarm: Swarm<ShardBehaviour>,
+    /// Pending auth challenges: (public_key, nonce) indexed by peer_id.
+    pending_auth: HashMap<libp2p::PeerId, (Vec<u8>, Vec<u8>)>,
 }
 
 impl Node {
@@ -89,8 +92,10 @@ impl Node {
                 config.with_idle_connection_timeout(Duration::from_secs(120))
             })
             .build();
-
-        Ok(Self { swarm })
+        Ok(Self {
+            swarm,
+            pending_auth: HashMap::new(),
+        })
     }
 }
 
@@ -98,12 +103,17 @@ pub trait ShardContentProvider {
     fn get_manifest(&self, id: &str) -> Option<Vec<u8>>;
     fn get_chunk(&self, id: &str) -> Option<Vec<u8>>;
     fn put_chunk(&mut self, id: &str, data: &[u8]) -> bool;
+    /// Verify that `signature` over the nonce was produced by the holder of `public_key`.
+    fn verify_auth(&self, public_key: &[u8], nonce: &[u8], signature: &[u8]) -> bool;
+    /// Return the repo's public key (if auth is required for this repo).
+    fn repo_public_key(&self) -> Option<Vec<u8>>;
 }
 
 impl Node {
     /// Serve a content request through the given response channel.
     pub fn serve_request(
         &mut self,
+        peer: &libp2p::PeerId,
         provider: &mut impl ShardContentProvider,
         request: ShardRequest,
         channel: request_response::ResponseChannel<ShardResponse>,
@@ -147,6 +157,40 @@ impl Node {
                         ShardResponse::PutAck
                     } else {
                         ShardResponse::NotFound
+                    },
+                );
+            }
+            ShardRequest::Authenticate { public_key } => {
+                let nonce = blake3::hash(&[peer.to_bytes(), public_key.clone()].concat());
+                let nonce_bytes = nonce.as_bytes().to_vec();
+                self.pending_auth
+                    .insert(*peer, (public_key, nonce_bytes.clone()));
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, ShardResponse::AuthChallenge { nonce: nonce_bytes });
+            }
+            ShardRequest::AuthAnswer { signature } => {
+                let result = self
+                    .pending_auth
+                    .get(peer)
+                    .and_then(|(pk, nonce)| {
+                        let verified = provider.verify_auth(pk, nonce, &signature);
+                        if verified {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    })
+                    .is_some();
+                self.pending_auth.remove(peer);
+                let _ = self.swarm.behaviour_mut().request_response.send_response(
+                    channel,
+                    if result {
+                        ShardResponse::AuthGranted
+                    } else {
+                        ShardResponse::AuthDenied
                     },
                 );
             }
@@ -201,7 +245,7 @@ impl Node {
                                 request, channel, ..
                             } => {
                                 info!("Received request from {}", peer);
-                                self.serve_request(&mut provider, request, channel);
+                                self.serve_request(&peer, &mut provider, request, channel);
                             }
                             request_response::Message::Response { .. } => {
                                 info!("Received Response from {}", peer);
@@ -309,6 +353,89 @@ impl Node {
                                     ShardResponse::NotFound => anyhow::bail!("Peer rejected chunk"),
                                     _ => anyhow::bail!("Unexpected response to put"),
                                 };
+                            }
+                        }
+                    }
+                }
+                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                    request_response::Event::OutboundFailure { peer, error, .. },
+                )) => {
+                    anyhow::bail!("Outbound failure to {}: {:?}", peer, error);
+                }
+                SwarmEvent::ConnectionClosed { peer_id, cause, .. } if peer_id == peer => {
+                    error!("Connection closed to {}: {:?}", peer_id, cause);
+                    let _ = self.swarm.dial(multiaddr.clone());
+                }
+                SwarmEvent::OutgoingConnectionError {
+                    peer_id: Some(p), ..
+                } if p == peer => {
+                    error!("Outgoing connection error: {:?}", p);
+                    let _ = self.swarm.dial(multiaddr.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Perform full authentication handshake with the peer.
+    /// Sends public_key, receives nonce challenge, signs, sends signature.
+    pub async fn request_authenticate(
+        &mut self,
+        multiaddr: &libp2p::Multiaddr,
+        peer: PeerId,
+        public_key: Vec<u8>,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<()> {
+        self.swarm.add_peer_address(peer, multiaddr.clone());
+        self.swarm.dial(multiaddr.clone())?;
+
+        let mut state = 0u8;
+        let mut request_id = None;
+
+        loop {
+            match self.swarm.select_next_some().await {
+                SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
+                    let rid = self.swarm.behaviour_mut().request_response.send_request(
+                        &peer,
+                        ShardRequest::Authenticate {
+                            public_key: public_key.clone(),
+                        },
+                    );
+                    request_id = Some(rid);
+                    state = 1;
+                }
+                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                    request_response::Event::Message { message, .. },
+                )) => {
+                    if let Some(rid) = &request_id {
+                        if let request_response::Message::Response {
+                            request_id: actual_rid,
+                            response,
+                        } = message
+                        {
+                            if *rid == actual_rid {
+                                match (state, response) {
+                                    (1, ShardResponse::AuthChallenge { nonce }) => {
+                                        let signature = signing_key.sign(&nonce);
+                                        let rid2 = self
+                                            .swarm
+                                            .behaviour_mut()
+                                            .request_response
+                                            .send_request(
+                                                &peer,
+                                                ShardRequest::AuthAnswer {
+                                                    signature: signature.to_bytes().to_vec(),
+                                                },
+                                            );
+                                        request_id = Some(rid2);
+                                        state = 2;
+                                    }
+                                    (2, ShardResponse::AuthGranted) => return Ok(()),
+                                    (2, ShardResponse::AuthDenied) => {
+                                        anyhow::bail!("Authentication denied by peer")
+                                    }
+                                    _ => anyhow::bail!("Unexpected auth response"),
+                                }
                             }
                         }
                     }
