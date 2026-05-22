@@ -22,3 +22,7 @@ tempfile = "3.8"
 walkdir = "2.4"
 time = "0.3"
 tar = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,6 +1,6 @@
 [package]
 name = "shard-cli"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "CLI for shard distributed VCS — content-addressed version control for large ML artifacts"
 license = "MIT"
