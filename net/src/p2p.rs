@@ -13,6 +13,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
+use tokio::signal;
 
 #[derive(NetworkBehaviour)]
 pub struct ShardBehaviour {
@@ -146,83 +147,92 @@ impl Node {
 
     pub async fn run(&mut self, provider: impl ShardContentProvider) {
         loop {
-            match self.swarm.select_next_some().await {
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Listening on {address:?}");
+            tokio::select! {
+                _ = signal::ctrl_c() => {
+                    println!("\nShutting down...");
                     let _ = std::io::stdout().flush();
+                    return;
                 }
-                SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
-                    for (peer_id, multiaddr) in list {
-                        println!("mDNS discovered: {peer_id} {multiaddr}");
-                        self.swarm
-                            .behaviour_mut()
-                            .gossipsub
-                            .add_explicit_peer(&peer_id);
-                        self.swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, multiaddr);
+                event = self.swarm.select_next_some() => {
+                    match event {
+                        SwarmEvent::NewListenAddr { address, .. } => {
+                            println!("Listening on {address:?}");
+                            let _ = std::io::stdout().flush();
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                            for (peer_id, multiaddr) in list {
+                                println!("mDNS discovered: {peer_id} {multiaddr}");
+                                self.swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .add_explicit_peer(&peer_id);
+                                self.swarm
+                                    .behaviour_mut()
+                                    .kademlia
+                                    .add_address(&peer_id, multiaddr);
+                            }
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                            for (peer_id, _multiaddr) in list {
+                                println!("mDNS expired: {peer_id}");
+                                self.swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .remove_explicit_peer(&peer_id);
+                            }
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                            request_response::Event::Message { peer, message },
+                        )) => match message {
+                            request_response::Message::Request {
+                                request, channel, ..
+                            } => {
+                                println!("Received request from {}", peer);
+                                self.serve_request(&provider, request, channel);
+                            }
+                            request_response::Message::Response { .. } => {
+                                println!("Received Response from {}", peer);
+                            }
+                        },
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                            request_response::Event::OutboundFailure { peer, error, .. },
+                        )) => {
+                            println!("Outbound failure to {}: {:?}", peer, error);
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                            request_response::Event::InboundFailure { peer, error, .. },
+                        )) => {
+                            println!("Inbound failure from {}: {:?}", peer, error);
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                            request_response::Event::ResponseSent { peer, .. },
+                        )) => {
+                            println!("Response sent to {}", peer);
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::Identify(event)) => {
+                            println!("Identify event: {:?}", event);
+                        }
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                            println!("Connection established with {}", peer_id);
+                            self.swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .add_explicit_peer(&peer_id);
+                        }
+                        SwarmEvent::IncomingConnection {
+                            local_addr,
+                            send_back_addr,
+                            ..
+                        } => {
+                            println!(
+                                "Incoming connection from {} to {}",
+                                send_back_addr, local_addr
+                            );
+                        }
+                        e => {
+                            println!("Event: {:?}", e);
+                        }
                     }
-                }
-                SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS expired: {peer_id}");
-                        self.swarm
-                            .behaviour_mut()
-                            .gossipsub
-                            .remove_explicit_peer(&peer_id);
-                    }
-                }
-                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
-                    request_response::Event::Message { peer, message },
-                )) => match message {
-                    request_response::Message::Request {
-                        request, channel, ..
-                    } => {
-                        println!("Received request from {}", peer);
-                        self.serve_request(&provider, request, channel);
-                    }
-                    request_response::Message::Response { .. } => {
-                        println!("Received Response from {}", peer);
-                    }
-                },
-                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
-                    request_response::Event::OutboundFailure { peer, error, .. },
-                )) => {
-                    println!("Outbound failure to {}: {:?}", peer, error);
-                }
-                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
-                    request_response::Event::InboundFailure { peer, error, .. },
-                )) => {
-                    println!("Inbound failure from {}: {:?}", peer, error);
-                }
-                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
-                    request_response::Event::ResponseSent { peer, .. },
-                )) => {
-                    println!("Response sent to {}", peer);
-                }
-                SwarmEvent::Behaviour(ShardBehaviourEvent::Identify(event)) => {
-                    println!("Identify event: {:?}", event);
-                }
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    println!("Connection established with {}", peer_id);
-                    self.swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .add_explicit_peer(&peer_id);
-                }
-                SwarmEvent::IncomingConnection {
-                    local_addr,
-                    send_back_addr,
-                    ..
-                } => {
-                    println!(
-                        "Incoming connection from {} to {}",
-                        send_back_addr, local_addr
-                    );
-                }
-                e => {
-                    println!("Event: {:?}", e);
                 }
             }
         }

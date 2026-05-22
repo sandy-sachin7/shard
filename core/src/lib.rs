@@ -820,6 +820,10 @@ pub async fn sync(path: &Path) -> Result<()> {
 
     loop {
         tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nSync shutting down...");
+                break Ok(());
+            }
             _ = interval.tick() => {
                 if head_path.exists() {
                     if let Ok(head) = fs::read_to_string(&head_path) {
