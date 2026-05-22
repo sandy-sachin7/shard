@@ -16,7 +16,7 @@ impl Store {
 
     pub fn put_chunk(&self, chunk: &Chunk) -> Result<()> {
         let hash_hex = chunk.hash.to_hex().to_string();
-        let prefix = &hash_hex[..2];
+        let prefix = hash_hex.get(..2).unwrap_or("xx");
         let filename = &hash_hex;
 
         let dir = self.root.join("objects").join(prefix);
@@ -31,6 +31,9 @@ impl Store {
     }
 
     pub fn get_chunk(&self, hash_hex: &str) -> Result<Vec<u8>> {
+        if hash_hex.len() < 2 {
+            anyhow::bail!("Invalid hash: {}", hash_hex);
+        }
         let prefix = &hash_hex[..2];
         let filename = hash_hex;
         let path = self.root.join("objects").join(prefix).join(filename);

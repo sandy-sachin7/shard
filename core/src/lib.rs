@@ -66,7 +66,11 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         total_size += chunk.data.len() as u64;
     }
 
-    let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
+    let filename = file_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid file path: {}", file_path.display()))?
+        .to_string();
     let manifest = FileManifest {
         name: filename.clone(),
         size: total_size,
@@ -169,6 +173,9 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
 
     let store = Store::new(&shard_dir);
 
+    if commit_id.len() < 2 {
+        anyhow::bail!("Commit ID too short: {}", commit_id);
+    }
     let prefix = &commit_id[..2];
     let obj_path = shard_dir.join("objects").join(prefix).join(commit_id);
 
@@ -247,6 +254,9 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
 }
 
 fn load_commit(shard_dir: &Path, commit_id: &str) -> Result<Commit> {
+    if commit_id.len() < 2 {
+        anyhow::bail!("Commit ID too short: {}", commit_id);
+    }
     let prefix = &commit_id[..2];
     let path = shard_dir.join("objects").join(prefix).join(commit_id);
     let data = fs::read(path)?;
