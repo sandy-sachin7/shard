@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "cmd/shard",
+    "cmd/shard-cli",
     "core",
     "net",
     "crypto",

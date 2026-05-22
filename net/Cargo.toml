@@ -2,6 +2,12 @@
 name = "shard-net"
 version = "0.1.0"
 edition = "2021"
+description = "libp2p networking for shard distributed VCS (TCP/Noise/Yamux, mDNS, Kademlia, Gossipsub)"
+license = "MIT"
+repository = "https://github.com/sandy-sachin7/shard"
+homepage = "https://github.com/sandy-sachin7/shard"
+keywords = ["vcs", "version-control", "mlops", "distributed", "libp2p"]
+categories = ["network", "version-control"]
 
 [dependencies]
 tokio = { workspace = true }

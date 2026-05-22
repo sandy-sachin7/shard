@@ -2,7 +2,12 @@
 name = "shard-storage"
 version = "0.1.0"
 edition = "2021"
-description = "Storage backends for shard (sled, sqlite, flat)"
+description = "Storage backends for shard distributed VCS (sled, flat file)"
+license = "MIT"
+repository = "https://github.com/sandy-sachin7/shard"
+homepage = "https://github.com/sandy-sachin7/shard"
+keywords = ["vcs", "version-control", "mlops", "distributed", "storage"]
+categories = ["database", "version-control"]
 
 [dependencies]
 anyhow = { workspace = true }

@@ -4,7 +4,7 @@
 
 | Crate | Path | Description |
 |-------|------|-------------|
-| `shard` (bin) | `cmd/shard/` | CLI entrypoint (clap derive) |
+| `shard-cli` (bin) | `cmd/shard-cli/` | CLI entrypoint (clap derive, artifact: `shard`) |
 | `shard-core` | `core/` | Chunker, store, manifest, index, commit DAG, top-level API (init/add/commit/verify/share/pull) |
 | `shard-net` | `net/` | libp2p node (TCP+Noise+Yamux), protocol messages, mDNS+Kademlia+Gossipsub+Identify |
 | `shard-crypto` | `crypto/` | ed25519 key generation, save/load (`secret.key` + `public.key`) |
@@ -15,7 +15,7 @@
 ```sh
 cargo build              # build workspace
 cargo test               # run all tests (only chunker unit tests exist)
-cargo install --path cmd/shard  # install shard binary
+cargo install --path cmd/shard-cli  # install shard binary
 ```
 
 No `tests/` integration tests exist yet. No CI workflows, no rustfmt/clippy configs.

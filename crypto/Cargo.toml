@@ -2,6 +2,12 @@
 name = "shard-crypto"
 version = "0.1.0"
 edition = "2021"
+description = "Ed25519 key generation, signing, and verification for shard distributed VCS"
+license = "MIT"
+repository = "https://github.com/sandy-sachin7/shard"
+homepage = "https://github.com/sandy-sachin7/shard"
+keywords = ["vcs", "version-control", "mlops", "distributed", "ed25519"]
+categories = ["cryptography", "version-control"]
 
 [dependencies]
 ed25519-dalek = { workspace = true }

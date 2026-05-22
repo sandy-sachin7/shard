@@ -2,13 +2,13 @@ FROM rust:alpine AS builder
 RUN apk add --no-cache musl-dev pkgconfig
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY cmd/shard/Cargo.toml cmd/shard/
+COPY cmd/shard-cli/Cargo.toml cmd/shard-cli/
 COPY core/Cargo.toml core/
 COPY net/Cargo.toml net/
 COPY crypto/Cargo.toml crypto/
 COPY storage/Cargo.toml storage/
-RUN mkdir -p cmd/shard/src core/src net/src crypto/src storage/src && \
-    echo "fn main() {}" > cmd/shard/src/main.rs && \
+RUN mkdir -p cmd/shard-cli/src core/src net/src crypto/src storage/src && \
+    echo "fn main() {}" > cmd/shard-cli/src/main.rs && \
     touch core/src/lib.rs net/src/lib.rs crypto/src/lib.rs storage/src/lib.rs && \
     cargo build --release 2>/dev/null || true
 COPY cmd/ cmd/
