@@ -13,11 +13,13 @@ cargo test
 
 ## What We Need Help With
 
-- **New storage backends**: SQLite, S3-compatible object stores
-- **Chunker algorithms**: CDC variants (Rabin, Buzhash, FastCDC)
+- **New storage backends**: S3-compatible object stores, SQLite
 - **Network transport**: WebRTC, QUIC, relay nodes for NAT traversal
-- **Packaging**: Homebrew, Scoop, Nix, Docker
+- **Symmetric encryption**: private repos with age/NaCl encryption at rest
+- **Multi-user ACLs**: per-key access levels (read-only, read-write, admin)
+- **Packaging**: Homebrew, Scoop, Nix, RPM, Deb
 - **Documentation**: clearer error messages, more examples, protocol spec
+- **Benchmarks**: cross-version benchmark tracking for chunker, compression, pull throughput
 
 ## Pull Request Process
 

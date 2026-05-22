@@ -16,7 +16,9 @@ We will respond within 48 hours and coordinate a fix before public disclosure.
 
 ## Security features
 
-- **Signed commits**: every commit is ed25519-signed for provenance
-- **Peer identity**: libp2p Noise handshake with ed25519 keys
-- **Content verification**: Blake3 hash verification on every chunk
-- **No telemetry**: zero data transmitted outside the P2P network
+- **Signed commits**: every commit is ed25519-signed for provenance with embedded public key
+- **Peer authentication**: optional challenge-response ed25519 auth via `authorized_keys` file; whitelist only peers whose public keys are on file
+- **Peer identity**: libp2p Noise handshake with ed25519 keys for transport-level encryption
+- **Content verification**: Blake3 hash verification on every chunk read/write with optional decompress→rehash detection
+- **No telemetry**: zero data transmitted outside the P2P network; no external telemetry, analytics, or phone-home
+- **Local-first by default**: `--private` flag disables P2P sharing at init time; private repos never announce on the network

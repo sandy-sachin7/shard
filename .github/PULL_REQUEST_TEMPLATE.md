@@ -9,11 +9,11 @@ Closes #...
 ## Checklist
 
 - [ ] `cargo fmt --check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
-- [ ] `cargo audit` passes
+- [ ] `cargo clippy --all-targets -- -D warnings` passes
+- [ ] `cargo test --locked` passes (all 47 integration + unit tests)
+- [ ] `cargo audit` passes (if dependencies changed)
 - [ ] Added tests for new functionality
-- [ ] Updated README if user-facing behavior changed
+- [ ] Updated README / CHANGELOG if user-facing behavior changed
 
 ## Type of change
 
@@ -22,3 +22,4 @@ Closes #...
 - [ ] Performance improvement
 - [ ] Documentation
 - [ ] Infrastructure (CI, config, etc.)
+- [ ] Crates.io publishing (metadata, workspace changes)
