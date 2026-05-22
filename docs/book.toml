@@ -1,0 +1,14 @@
+[book]
+authors = ["Shard Contributors"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Shard Documentation"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+mathjax-support = false
+git-repository-url = "https://github.com/sandy-sachin7/shard"
+edit-url-template = "https://github.com/sandy-sachin7/shard/edit/main/docs/{path}"
