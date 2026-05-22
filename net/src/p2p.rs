@@ -98,6 +98,47 @@ pub trait ShardContentProvider {
 }
 
 impl Node {
+    /// Serve a content request through the given response channel.
+    pub fn serve_request(
+        &mut self,
+        provider: &impl ShardContentProvider,
+        request: ShardRequest,
+        channel: request_response::ResponseChannel<ShardResponse>,
+    ) {
+        match request {
+            ShardRequest::GetManifest(id) => {
+                if let Some(data) = provider.get_manifest(&id) {
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, ShardResponse::Manifest(data));
+                } else {
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, ShardResponse::NotFound);
+                }
+            }
+            ShardRequest::GetChunk(id) => {
+                if let Some(data) = provider.get_chunk(&id) {
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, ShardResponse::Chunk(data));
+                } else {
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, ShardResponse::NotFound);
+                }
+            }
+        }
+    }
+
     pub async fn listen(&mut self, addr: &str) -> Result<()> {
         self.swarm.listen_on(addr.parse()?)?;
         Ok(())
@@ -137,40 +178,10 @@ impl Node {
                 )) => match message {
                     request_response::Message::Request {
                         request, channel, ..
-                    } => match request {
-                        ShardRequest::GetManifest(id) => {
-                            println!("Received GetManifest({}) from {}", id, peer);
-                            if let Some(data) = provider.get_manifest(&id) {
-                                let _ = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .request_response
-                                    .send_response(channel, ShardResponse::Manifest(data));
-                            } else {
-                                let _ = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .request_response
-                                    .send_response(channel, ShardResponse::NotFound);
-                            }
-                        }
-                        ShardRequest::GetChunk(id) => {
-                            println!("Received GetChunk({}) from {}", id, peer);
-                            if let Some(data) = provider.get_chunk(&id) {
-                                let _ = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .request_response
-                                    .send_response(channel, ShardResponse::Chunk(data));
-                            } else {
-                                let _ = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .request_response
-                                    .send_response(channel, ShardResponse::NotFound);
-                            }
-                        }
-                    },
+                    } => {
+                        println!("Received request from {}", peer);
+                        self.serve_request(&provider, request, channel);
+                    }
                     request_response::Message::Response { .. } => {
                         println!("Received Response from {}", peer);
                     }

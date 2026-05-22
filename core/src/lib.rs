@@ -14,7 +14,6 @@ use ed25519_dalek::{Signer, Verifier};
 use serde::Serialize;
 use shard_crypto::KeyPair;
 use shard_net::libp2p::futures::StreamExt;
-use shard_net::p2p::ShardContentProvider;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -914,43 +913,17 @@ pub async fn sync(path: &Path) -> Result<()> {
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
                         shard_net::p2p::ShardBehaviourEvent::RequestResponse(
-                            shard_net::libp2p::request_response::Event::Message { peer: _, message },
+                            shard_net::libp2p::request_response::Event::Message { peer, message },
                         ),
                     ) => {
                         if let shard_net::libp2p::request_response::Message::Request {
-                            request,
-                            channel,
-                            ..
+                            request, channel, ..
                         } = message
                         {
-                            match request {
-                                shard_net::protocol::ShardRequest::GetManifest(id) => {
-                                    if let Some(data) = provider.get_manifest(&id) {
-                                        let _ = node.swarm.behaviour_mut().request_response.send_response(
-                                            channel,
-                                            shard_net::protocol::ShardResponse::Manifest(data),
-                                        );
-                                    } else {
-                                        let _ = node.swarm.behaviour_mut().request_response.send_response(
-                                            channel,
-                                            shard_net::protocol::ShardResponse::NotFound,
-                                        );
-                                    }
-                                }
-                                shard_net::protocol::ShardRequest::GetChunk(id) => {
-                                    if let Some(data) = provider.get_chunk(&id) {
-                                        let _ = node.swarm.behaviour_mut().request_response.send_response(
-                                            channel,
-                                            shard_net::protocol::ShardResponse::Chunk(data),
-                                        );
-                                    } else {
-                                        let _ = node.swarm.behaviour_mut().request_response.send_response(
-                                            channel,
-                                            shard_net::protocol::ShardResponse::NotFound,
-                                        );
-                                    }
-                                }
-                            }
+                            println!("Received request from {}", peer);
+                            node.serve_request(&provider, request, channel);
+                        } else {
+                            println!("Received Response from {}", peer);
                         }
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
