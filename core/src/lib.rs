@@ -379,8 +379,13 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     };
     store.put_chunk(&chunk)?;
 
-    // 6. Update HEAD and branch ref
+    // 6. Cycle detection: verify no parent chain already contains this commit
     let commit_id = hash.to_hex().to_string();
+    if has_dag_cycle(&store, &commit.parents, &commit_id)? {
+        anyhow::bail!("Cycle detected: commit {} is already an ancestor of one or more parents", commit_id);
+    }
+
+    // 7. Update HEAD and branch ref
     if let Some(ref branch_name) = current_branch {
         branch::update_branch_ref(&shard_dir, branch_name, &commit_id)?;
         branch::set_head_branch(&shard_dir, branch_name)?;
@@ -412,6 +417,13 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     let store = Store::open(&shard_dir)?;
     let cipher = maybe_load_cipher(&shard_dir)?;
     let commit_data = store.get_chunk(commit_id)?;
+
+    // Self-verify: stored blob hash must equal commit_id (M5)
+    let stored_hash = blake3::hash(&commit_data);
+    if stored_hash.to_hex().to_string() != commit_id {
+        anyhow::bail!("commit object hash mismatch: stored content does not match its hash — data may be corrupted");
+    }
+
     let commit: Commit = metadata::deserialize(&commit_data)?;
 
     let mut sig_verified = false;
@@ -545,6 +557,27 @@ fn load_commit(store: &Store, commit_id: &str) -> Result<Commit> {
     let mut commit: Commit = metadata::deserialize(&data)?;
     commit.commit_id = commit_id.to_string();
     Ok(commit)
+}
+
+fn has_dag_cycle(store: &Store, parents: &[String], commit_id: &str) -> Result<bool> {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack: Vec<String> = parents.to_vec();
+    while let Some(cid) = stack.pop() {
+        if cid == commit_id {
+            return Ok(true);
+        }
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
+        if let Ok(data) = store.get_chunk(&cid) {
+            if let Ok(commit) = metadata::deserialize::<Commit>(&data) {
+                for p in &commit.parents {
+                    stack.push(p.clone());
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Serialize)]
@@ -1213,6 +1246,11 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
     })?;
 
     let merge_commit_id = hash.to_hex().to_string();
+
+    // Cycle detection on merge
+    if has_dag_cycle(&store, &commit.parents, &merge_commit_id)? {
+        anyhow::bail!("Cycle detected in merge: commit {} is already an ancestor of one or more parents", merge_commit_id);
+    }
 
     // Update HEAD and branch ref
     if let Some(ref branch_name) = current_branch {
