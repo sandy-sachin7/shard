@@ -104,7 +104,7 @@ For a 10GB Llama checkpoint with 500MB changed:
 - HF CLI: uploads 10GB
 - Shard: uploads ~500MB via CDC + ~40MB for commit metadata
 
-- **Chunking throughput**: ~1 GB/s (fixed), ~500 MB/s (Rabin CDC)
+- **Chunking throughput**: ~500 MB/s (fixed, including zstd compression)
 - **Compression**: Zstd level 3 — ~500 MB/s compress, ~2 GB/s decompress
 - **Parallel pulls**: concurrent chunk requests — saturates available bandwidth
 - **Memory**: bounded by configurable concurrency cap, not artifact size

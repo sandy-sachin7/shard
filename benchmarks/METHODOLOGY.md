@@ -35,7 +35,7 @@ These are the operations that dominate real workloads. A 10GB model checkpoint s
 echo "1.2 * 10 = 12 seconds"
 ```
 
-**Note**: Linear extrapolation is approximate. At larger sizes, RAM cache effects diminish and真实 performance may be slightly lower.
+**Note**: Linear extrapolation is approximate. At larger sizes, RAM cache effects diminish and real performance may be slightly lower.
 
 ---
 

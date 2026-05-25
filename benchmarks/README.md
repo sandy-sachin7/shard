@@ -19,36 +19,36 @@ Reproducible performance benchmarks for Shard operations.
 
 | Operation | Description |
 |-----------|-------------|
-| `shard add` | Chunking + hashing + compression + storing a file |
+| `shard add` | Chunking (4MiB fixed) + compression (zstd) + hashing (blake3) + local store |
 | `shard commit` | Creating signed commit manifest |
 
-## Extrapolating to 10GB
+## Example Results (1GB random data)
 
+```
+  Operation                  Time (seconds)
+  ----------------------------------------
+  shard add                            2.08
+  shard commit                         0.02
+  ----------------------------------------
+  TOTAL (add + commit)                 2.10
+
+  Local throughput: 487.62 MB/s
+```
+
+To run yourself:
 ```bash
-# Run 1GB benchmark
 ./benchmark.sh 1024
-
-# Multiply the TOTAL by 10 to get projected 10GB time
-# e.g., if TOTAL = 4 sec → projected 10GB ≈ 40 sec
 ```
 
-## Comparing with Git LFS
+## Scope
 
-```bash
-# Setup
-git lfs install
-git lfs track "*.bin"
+This benchmark measures **local** operations only. It does NOT measure:
+- P2P network transfer (see `p2p_bench.sh`)
+- Git LFS push times (includes network upload to remote server)
 
-# Time a 1GB push
-dd if=/dev/urandom of=test.bin bs=1M count=1024
-git add test.bin
-time git commit -m "bench"
-
-# Multiply by 10 for 10GB comparison
-```
+The chunking + compression throughput (~500 MB/s) is the core metric here. This is what dominates when adding large ML artifacts.
 
 ## Requirements
 
 - `shard` CLI in PATH (or set `SHARD_BIN` environment variable)
-- `bc` for floating-point arithmetic
-- `numfmt` for human-readable file sizes
+- `python3` for nanosecond-precision timing
