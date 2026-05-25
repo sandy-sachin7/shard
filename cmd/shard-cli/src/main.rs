@@ -45,6 +45,15 @@ enum Commands {
         #[command(subcommand)]
         command: BranchCommands,
     },
+    /// Show differences between commits
+    Diff {
+        /// First commit to compare (required)
+        commit_a: String,
+        /// Second commit to compare (defaults to HEAD if omitted)
+        commit_b: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage peers
     Peer {
         #[command(subcommand)]
@@ -264,6 +273,14 @@ async fn main() -> Result<()> {
                 shard_core::branch_list(&current_dir)?;
             }
         },
+        Commands::Diff {
+            commit_a,
+            commit_b,
+            json,
+        } => {
+            let current_dir = env::current_dir()?;
+            shard_core::diff(&current_dir, commit_a, commit_b.as_deref(), *json)?;
+        }
         Commands::Key { command } => match command {
             KeyCommands::Rotate => {
                 let current_dir = env::current_dir()?;

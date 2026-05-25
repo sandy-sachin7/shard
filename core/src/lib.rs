@@ -20,6 +20,7 @@ use ed25519_dalek::{Signer, Verifier};
 use serde::Serialize;
 use shard_crypto::KeyPair;
 use shard_net::libp2p::futures::StreamExt;
+use similar::TextDiff;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -534,6 +535,168 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
             }
             info!("");
         }
+    }
+
+    Ok(())
+}
+
+fn reconstruct_file(
+    store: &Store,
+    manifest: &FileManifest,
+    cipher: Option<&encryption::RepoCipher>,
+) -> Result<Vec<u8>> {
+    let compression: Compression = manifest.compression.parse()?;
+    let mut data = Vec::new();
+    for chunk_id in &manifest.chunks {
+        let chunk_data = store.get_chunk(chunk_id)?;
+        let decrypted = match cipher {
+            Some(c) => c.decrypt(&chunk_data)?,
+            None => chunk_data,
+        };
+        let decompressed = compression.decompress(&decrypted)?;
+        data.extend_from_slice(&decompressed);
+    }
+    Ok(data)
+}
+
+pub fn diff(path: &Path, commit_a: &str, commit_b: Option<&str>, json: bool) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository (run `shard init` first)");
+    }
+
+    let store = Store::open(&shard_dir)?;
+    let cipher = maybe_load_cipher(&shard_dir)?;
+
+    let cid_b = match commit_b {
+        Some(c) => branch::resolve_rev(&shard_dir, c)?,
+        None => {
+            let (_, head) = branch::resolve_head(&shard_dir)?;
+            head.ok_or_else(|| anyhow::anyhow!("no commits yet"))?
+        }
+    };
+    let cid_a = branch::resolve_rev(&shard_dir, commit_a)?;
+
+    let commit1 = load_commit(&store, &cid_a)?;
+    let commit2 = load_commit(&store, &cid_b)?;
+
+    let mut files1: HashMap<String, FileManifest> = HashMap::new();
+    for mid in &commit1.manifests {
+        let data = store.get_chunk(mid)?;
+        let m: FileManifest = serde_json::from_slice(&data)?;
+        files1.insert(m.name.clone(), m);
+    }
+
+    let mut files2: HashMap<String, FileManifest> = HashMap::new();
+    for mid in &commit2.manifests {
+        let data = store.get_chunk(mid)?;
+        let m: FileManifest = serde_json::from_slice(&data)?;
+        files2.insert(m.name.clone(), m);
+    }
+
+    let mut all_names: Vec<&String> = files1.keys().chain(files2.keys()).collect();
+    all_names.sort();
+    all_names.dedup();
+
+    let mut changes: Vec<serde_json::Value> = Vec::new();
+    let mut diff_found = false;
+
+    for name in all_names {
+        match (files1.get(name), files2.get(name)) {
+            (None, Some(manifest)) => {
+                let content = reconstruct_file(&store, manifest, cipher.as_ref())?;
+                let text = String::from_utf8_lossy(&content);
+                diff_found = true;
+                if json {
+                    changes.push(serde_json::json!({
+                        "type": "added",
+                        "file": name,
+                        "lines": text.lines().collect::<Vec<_>>(),
+                    }));
+                } else {
+                    info!("--- /dev/null");
+                    info!("+++ b/{}", name);
+                    let lines: Vec<&str> = text.lines().collect();
+                    info!("@@ -0,0 +1,{} @@", lines.len());
+                    for line in &lines {
+                        info!("+{}", line);
+                    }
+                }
+            }
+            (Some(manifest), None) => {
+                let content = reconstruct_file(&store, manifest, cipher.as_ref())?;
+                let text = String::from_utf8_lossy(&content);
+                diff_found = true;
+                if json {
+                    changes.push(serde_json::json!({
+                        "type": "removed",
+                        "file": name,
+                        "lines": text.lines().collect::<Vec<_>>(),
+                    }));
+                } else {
+                    info!("--- a/{}", name);
+                    info!("+++ /dev/null");
+                    let lines: Vec<&str> = text.lines().collect();
+                    info!("@@ -1,{} +0,0 @@", lines.len());
+                    for line in &lines {
+                        info!("-{}", line);
+                    }
+                }
+            }
+            (Some(ma), Some(mb)) => {
+                if ma.chunks == mb.chunks {
+                    continue;
+                }
+                let content_a = reconstruct_file(&store, ma, cipher.as_ref())?;
+                let content_b = reconstruct_file(&store, mb, cipher.as_ref())?;
+                diff_found = true;
+                if json {
+                    let text_a = String::from_utf8_lossy(&content_a);
+                    let text_b = String::from_utf8_lossy(&content_b);
+                    changes.push(serde_json::json!({
+                        "type": "modified",
+                        "file": name,
+                        "old_lines": text_a.lines().collect::<Vec<_>>(),
+                        "new_lines": text_b.lines().collect::<Vec<_>>(),
+                    }));
+                } else {
+                    let text_a = String::from_utf8_lossy(&content_a);
+                    let text_b = String::from_utf8_lossy(&content_b);
+                    let diff = TextDiff::from_lines(text_a.as_ref(), text_b.as_ref());
+                    let mut buf: Vec<u8> = Vec::new();
+                    diff.unified_diff()
+                        .header(&format!("a/{}", name), &format!("b/{}", name))
+                        .to_writer(&mut buf)
+                        .map_err(|e| anyhow::anyhow!("diff output error: {}", e))?;
+                    let output = String::from_utf8_lossy(&buf);
+                    for line in output.lines() {
+                        info!("{}", line);
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    if !diff_found {
+        if json {
+            info!(
+                "{}",
+                serde_json::to_string(
+                    &serde_json::json!({"changes": changes, "message": "no differences"})
+                )?
+            );
+        } else {
+            info!("No differences between the commits.");
+        }
+        return Ok(());
+    }
+
+    if json {
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"changes": changes}))?
+        );
     }
 
     Ok(())
