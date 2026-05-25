@@ -1,19 +1,17 @@
 # Changelog
 
-## v2.1.1
+## v2.1.0
 
 ### Bug fixes
 
-- **Build fixes**: Fixed PyO3 forward compatibility for Python 3.14, corrected PyO3 0.22 API module signature, and resolved Docker workspace build errors.
-- **Python API**: Fixed kwargs parsing for required vs optional arguments in `shard-py`.
-- **Crate metadata**: Removed invalid `.` character in `shard-py` library name.
+- **Build fixes**: Resolved Docker workspace build errors and PyO3 compatibility.
+- **File exclusion**: Implemented `.shardignore` pattern matching, fixed logic to correctly allow tracking of hidden files.
 
-## v2.1.0
+### Infrastructure
 
-### Features
+- **Dockerfile**: Added `tests/` workspace member to multi-stage build.
+- **Flaky test**: `test_sync_auto_pull` ignored due to P2P race condition.
 
-- **Python bindings**: Added `shard-py` (via PyO3) for native integration into Jupyter notebooks and ML training scripts.
-- **File exclusion**: Implemented `.shardignore` pattern matching, and fixed logic to correctly allow tracking of hidden files.
 ## v2.0.0
 
 ### Bug fixes
