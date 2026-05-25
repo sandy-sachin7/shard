@@ -23,3 +23,6 @@ tracing = "0.1.44"
 blake3.workspace = true
 ed25519-dalek.workspace = true
 
+[dev-dependencies]
+ciborium = { workspace = true }
+

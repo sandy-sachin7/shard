@@ -51,3 +51,62 @@ impl KeyPair {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_keypair_generate_roundtrip() {
+        let kp = KeyPair::generate();
+        let dir = tempdir().unwrap();
+        kp.save(dir.path()).unwrap();
+
+        let loaded = KeyPair::load(dir.path()).unwrap();
+        assert_eq!(
+            kp.verifying_key.to_bytes(),
+            loaded.verifying_key.to_bytes()
+        );
+        // Verify signing consistency
+        use ed25519_dalek::Signer;
+        let sig = kp.signing_key.sign(b"test message");
+        use ed25519_dalek::Verifier;
+        assert!(loaded.verifying_key.verify(b"test message", &sig).is_ok());
+    }
+
+    #[test]
+    fn test_keypair_generates_unique_keys() {
+        let kp1 = KeyPair::generate();
+        let kp2 = KeyPair::generate();
+        assert_ne!(
+            kp1.verifying_key.to_bytes(),
+            kp2.verifying_key.to_bytes()
+        );
+    }
+
+    #[test]
+    fn test_keypair_sign_verify() {
+        let kp = KeyPair::generate();
+        use ed25519_dalek::{Signer, Verifier};
+        let data = b"important data to sign";
+        let sig = kp.signing_key.sign(data);
+        assert!(kp.verifying_key.verify(data, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_keypair_wrong_key_rejects() {
+        let kp1 = KeyPair::generate();
+        let kp2 = KeyPair::generate();
+        use ed25519_dalek::{Signer, Verifier};
+        let sig = kp1.signing_key.sign(b"data");
+        assert!(kp2.verifying_key.verify(b"data", &sig).is_err());
+    }
+
+    #[test]
+    fn test_keypair_load_nonexistent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = KeyPair::load(dir.path());
+        assert!(result.is_err());
+    }
+}

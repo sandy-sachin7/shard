@@ -44,6 +44,102 @@ pub enum ShardResponse {
     AuthChallenge { nonce: Vec<u8> },
     /// Peer accepted our authentication.
     AuthGranted,
-    /// Peer rejected our authentication.
+    /// Peer denied our authentication.
     AuthDenied,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_piece_roundtrip() {
+        let piece = ChunkPiece {
+            hash: "abc123".into(),
+            offset: 42,
+            size: 100,
+            data: b"chunk data".to_vec(),
+        };
+        let json = serde_json::to_vec(&piece).unwrap();
+        let piece2: ChunkPiece = serde_json::from_slice(&json).unwrap();
+        assert_eq!(piece, piece2);
+    }
+
+    #[test]
+    fn test_shard_request_roundtrip() {
+        let cases = vec![
+            ShardRequest::GetManifest("man1".into()),
+            ShardRequest::GetChunk("chunk1".into()),
+            ShardRequest::PutChunk(ChunkPiece {
+                hash: "h".into(),
+                offset: 0,
+                size: 5,
+                data: b"hello".to_vec(),
+            }),
+            ShardRequest::Authenticate {
+                public_key: vec![1, 2, 3],
+            },
+            ShardRequest::AuthAnswer {
+                signature: vec![4, 5, 6],
+            },
+        ];
+        for req in cases {
+            let json = serde_json::to_vec(&req).unwrap();
+            let req2: ShardRequest = serde_json::from_slice(&json).unwrap();
+            assert_eq!(req, req2);
+        }
+    }
+
+    #[test]
+    fn test_shard_response_roundtrip() {
+        let cases = vec![
+            ShardResponse::Manifest(b"manifest bytes".to_vec()),
+            ShardResponse::Chunk(ChunkPiece {
+                hash: "h".into(),
+                offset: 99,
+                size: 3,
+                data: b"foo".to_vec(),
+            }),
+            ShardResponse::NotFound,
+            ShardResponse::PutAck,
+            ShardResponse::AuthChallenge {
+                nonce: vec![7, 8, 9],
+            },
+            ShardResponse::AuthGranted,
+            ShardResponse::AuthDenied,
+        ];
+        for resp in cases {
+            let json = serde_json::to_vec(&resp).unwrap();
+            let resp2: ShardResponse = serde_json::from_slice(&json).unwrap();
+            assert_eq!(resp, resp2);
+        }
+    }
+
+    #[test]
+    fn test_chunk_piece_cbor_roundtrip() {
+        let piece = ChunkPiece {
+            hash: "cbor_hash".into(),
+            offset: 123,
+            size: 456,
+            data: b"cbor data".to_vec(),
+        };
+        let mut out = Vec::new();
+        ciborium::into_writer(&piece, &mut out).unwrap();
+        let piece2: ChunkPiece = ciborium::from_reader(&out[..]).unwrap();
+        assert_eq!(piece, piece2);
+    }
+
+    #[test]
+    fn test_shard_request_cbor_roundtrip() {
+        let req = ShardRequest::PutChunk(ChunkPiece {
+            hash: "cbor_hash".into(),
+            offset: 0,
+            size: 1,
+            data: vec![42],
+        });
+        let mut out = Vec::new();
+        ciborium::into_writer(&req, &mut out).unwrap();
+        let req2: ShardRequest = ciborium::from_reader(&out[..]).unwrap();
+        assert_eq!(req, req2);
+    }
 }

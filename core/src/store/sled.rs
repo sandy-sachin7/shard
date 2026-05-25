@@ -32,7 +32,6 @@ impl SledStore {
         self.backend.contains(hash_hex.as_bytes()).unwrap_or(false)
     }
 
-    /// Returns (hash, hash) pairs since sled is key-based.
     pub fn iter_chunks(&self) -> Result<Vec<(String, String)>> {
         let results = self.backend.iter_prefix(b"")?;
         Ok(results
@@ -47,5 +46,67 @@ impl SledStore {
     pub fn delete_chunk(&self, hash_hex: &str, _full_path: Option<&str>) -> Result<()> {
         self.backend.delete(hash_hex.as_bytes())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunker::Chunk;
+    use tempfile::tempdir;
+
+    fn fake_chunk(data: &[u8]) -> Chunk {
+        Chunk {
+            hash: blake3::hash(data),
+            data: data.to_vec(),
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn test_sled_put_get_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = SledStore::new(dir.path()).unwrap();
+        let chunk = fake_chunk(b"sled test data");
+        store.put_chunk(&chunk).unwrap();
+        let hash_hex = chunk.hash.to_hex().to_string();
+        assert!(store.has_chunk(&hash_hex));
+        let retrieved = store.get_chunk(&hash_hex).unwrap();
+        assert_eq!(retrieved, b"sled test data");
+    }
+
+    #[test]
+    fn test_sled_get_nonexistent() {
+        let dir = tempdir().unwrap();
+        let store = SledStore::new(dir.path()).unwrap();
+        let result = store.get_chunk("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sled_delete_chunk() {
+        let dir = tempdir().unwrap();
+        let store = SledStore::new(dir.path()).unwrap();
+        let chunk = fake_chunk(b"sled delete");
+        store.put_chunk(&chunk).unwrap();
+        let hash_hex = chunk.hash.to_hex().to_string();
+        assert!(store.has_chunk(&hash_hex));
+        store.delete_chunk(&hash_hex, None).unwrap();
+        assert!(!store.has_chunk(&hash_hex));
+    }
+
+    #[test]
+    fn test_sled_iter_chunks() {
+        let dir = tempdir().unwrap();
+        let store = SledStore::new(dir.path()).unwrap();
+        let chunks = vec![
+            fake_chunk(b"sled a"),
+            fake_chunk(b"sled b"),
+        ];
+        for c in &chunks {
+            store.put_chunk(c).unwrap();
+        }
+        let entries = store.iter_chunks().unwrap();
+        assert_eq!(entries.len(), 2);
     }
 }

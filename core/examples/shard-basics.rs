@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
 
     // 1. Initialize
     println!("\n1. Initializing repository...");
-    shard_core::init(repo, "flat", "zstd", "fixed", None, false)?;
+    shard_core::init(repo, "flat", "zstd", "fixed", None, false, false)?;
     println!("   Done.");
 
     // 2. Create a file

@@ -119,3 +119,111 @@ pub fn resolve_rev(shard_dir: &Path, name: &str) -> Result<String> {
     // Treat as bare commit id
     Ok(name.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn init_shard(dir: &Path) {
+        fs::create_dir_all(dir.join("refs/heads")).unwrap();
+        set_head_branch(dir, "main").unwrap();
+    }
+
+    #[test]
+    fn test_resolve_head_empty() {
+        let dir = tempdir().unwrap();
+        let (branch, commit) = resolve_head(dir.path()).unwrap();
+
+        assert!(branch.is_none());
+        assert!(commit.is_none());
+    }
+
+    #[test]
+    fn test_set_head_branch_and_resolve() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("refs/heads")).unwrap();
+        set_head_branch(dir.path(), "main").unwrap();
+        update_branch_ref(dir.path(), "main", "abc123").unwrap();
+        let (branch, commit) = resolve_head(dir.path()).unwrap();
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(commit.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_resolve_head_detached() {
+        let dir = tempdir().unwrap();
+        set_head_commit(dir.path(), "detachedhash").unwrap();
+        let (branch, commit) = resolve_head(dir.path()).unwrap();
+        assert!(branch.is_none());
+        assert_eq!(commit.as_deref(), Some("detachedhash"));
+    }
+
+    #[test]
+    fn test_resolve_rev_branch() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("refs/heads")).unwrap();
+        update_branch_ref(dir.path(), "feature", "featurehash").unwrap();
+        let result = resolve_rev(dir.path(), "feature").unwrap();
+        assert_eq!(result, "featurehash");
+    }
+
+    #[test]
+    fn test_resolve_rev_commit_id() {
+        let dir = tempdir().unwrap();
+        let result = resolve_rev(dir.path(), "abc123").unwrap();
+        assert_eq!(result, "abc123");
+    }
+
+    #[test]
+    fn test_create_and_delete_branch() {
+        let dir = tempdir().unwrap();
+        let shard = dir.path();
+        init_shard(shard);
+        // Set a HEAD commit so branch deletion doesn't fail
+        update_branch_ref(shard, "main", "somecommit").unwrap();
+
+        create_branch(shard, "test-branch", "testcommit").unwrap();
+        // Creating duplicate should fail
+        assert!(create_branch(shard, "test-branch", "other").is_err());
+
+        delete_branch(shard, "test-branch").unwrap();
+        // Deleting non-existent should fail
+        assert!(delete_branch(shard, "nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_delete_current_branch_fails() {
+        let dir = tempdir().unwrap();
+        let shard = dir.path();
+        init_shard(shard);
+        update_branch_ref(shard, "main", "commit1").unwrap();
+        let result = delete_branch(shard, "main");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("currently checked out"));
+    }
+
+    #[test]
+    fn test_list_branches() {
+        let dir = tempdir().unwrap();
+        let shard = dir.path();
+        init_shard(shard);
+        update_branch_ref(shard, "main", "hash1").unwrap();
+        update_branch_ref(shard, "dev", "hash2").unwrap();
+
+        let (current, branches) = list_branches(shard).unwrap();
+        assert_eq!(current.as_deref(), Some("main"));
+        assert!(branches.iter().any(|(n, _)| n == "main"));
+        assert!(branches.iter().any(|(n, _)| n == "dev"));
+    }
+
+    #[test]
+    fn test_resolve_head_branch_no_commits() {
+        let dir = tempdir().unwrap();
+        let shard = dir.path();
+        set_head_branch(shard, "main").unwrap();
+        let (branch, commit) = resolve_head(shard).unwrap();
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert!(commit.is_none());
+    }
+}

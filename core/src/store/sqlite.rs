@@ -48,3 +48,65 @@ impl SqliteStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunker::Chunk;
+    use tempfile::tempdir;
+
+    fn fake_chunk(data: &[u8]) -> Chunk {
+        Chunk {
+            hash: blake3::hash(data),
+            data: data.to_vec(),
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn test_sqlite_put_get_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::new(dir.path()).unwrap();
+        let chunk = fake_chunk(b"sqlite test data");
+        store.put_chunk(&chunk).unwrap();
+        let hash_hex = chunk.hash.to_hex().to_string();
+        assert!(store.has_chunk(&hash_hex));
+        let retrieved = store.get_chunk(&hash_hex).unwrap();
+        assert_eq!(retrieved, b"sqlite test data");
+    }
+
+    #[test]
+    fn test_sqlite_get_nonexistent() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::new(dir.path()).unwrap();
+        let result = store.get_chunk("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sqlite_delete_chunk() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::new(dir.path()).unwrap();
+        let chunk = fake_chunk(b"sqlite delete");
+        store.put_chunk(&chunk).unwrap();
+        let hash_hex = chunk.hash.to_hex().to_string();
+        assert!(store.has_chunk(&hash_hex));
+        store.delete_chunk(&hash_hex, None).unwrap();
+        assert!(!store.has_chunk(&hash_hex));
+    }
+
+    #[test]
+    fn test_sqlite_iter_chunks() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::new(dir.path()).unwrap();
+        let chunks = vec![
+            fake_chunk(b"sqlite a"),
+            fake_chunk(b"sqlite b"),
+        ];
+        for c in &chunks {
+            store.put_chunk(c).unwrap();
+        }
+        let entries = store.iter_chunks().unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+}

@@ -1,4 +1,3 @@
-use crate::chunker::Chunk;
 use anyhow::Result;
 use std::fs;
 use std::io::{BufRead, Write};
@@ -26,7 +25,6 @@ impl FlatStore {
         self.root.join("objects")
     }
 
-    /// Append a single hash to the index file.
     fn append_index(&self, hash_hex: &str) -> Result<()> {
         let path = self.index_path();
         let mut file = fs::OpenOptions::new()
@@ -37,7 +35,6 @@ impl FlatStore {
         Ok(())
     }
 
-    /// Do a full filesystem scan of objects/ and rewrite the index.
     fn scan_and_index(&self) -> Result<Vec<(String, String)>> {
         let objects_dir = self.objects_dir();
         let mut entries = Vec::new();
@@ -56,7 +53,6 @@ impl FlatStore {
                 }
             }
         }
-        // Persist the index
         let path = self.index_path();
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -69,21 +65,17 @@ impl FlatStore {
         Ok(entries)
     }
 
-    pub fn put_chunk(&self, chunk: &Chunk) -> Result<()> {
+    pub fn put_chunk(&self, chunk: &crate::chunker::Chunk) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
         let hash_hex = chunk.hash.to_hex().to_string();
         let prefix = hash_hex.get(..2).unwrap_or("xx");
-
         let dir = self.objects_dir().join(prefix);
         fs::create_dir_all(&dir)?;
-
         let path = dir.join(&hash_hex);
         if !path.exists() {
             fs::write(path, &chunk.data)?;
         }
-
         self.append_index(&hash_hex)?;
-
         Ok(())
     }
 
@@ -108,8 +100,6 @@ impl FlatStore {
             .exists()
     }
 
-    /// Returns (hash, full_relative_path) for all stored chunks.
-    /// Uses the index file when available; falls back to filesystem scan.
     pub fn iter_chunks(&self) -> Result<Vec<(String, String)>> {
         let _guard = self.lock.lock().unwrap();
         let idx_path = self.index_path();
@@ -123,8 +113,6 @@ impl FlatStore {
                     entries.push((h.clone(), format!("{}/{}", prefix, h)));
                 }
             }
-            // Verify index covers all objects on disk. If the index has fewer entries
-            // than the filesystem, fall back to a full scan (handles side-band writes).
             let file_count = count_object_files(&self.objects_dir());
             if entries.len() >= file_count {
                 return Ok(entries);
@@ -146,7 +134,6 @@ impl FlatStore {
         if path.exists() {
             fs::remove_file(path)?;
         }
-        // Rewrite index without the deleted hash
         let idx_path = self.index_path();
         if idx_path.exists() {
             let entries: Vec<String> = {
@@ -171,7 +158,6 @@ impl FlatStore {
     }
 }
 
-/// Count object files on disk by scanning prefix directories.
 fn count_object_files(objects_dir: &Path) -> usize {
     let mut count = 0;
     if let Ok(dir) = fs::read_dir(objects_dir) {
@@ -184,4 +170,96 @@ fn count_object_files(objects_dir: &Path) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunker::Chunk;
+    use tempfile::tempdir;
+
+    fn fake_chunk(data: &[u8]) -> Chunk {
+        let hash = blake3::hash(data);
+        Chunk {
+            hash,
+            data: data.to_vec(),
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn test_flat_put_get_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = FlatStore::new(dir.path());
+        let chunk = fake_chunk(b"hello flat store");
+        store.put_chunk(&chunk).unwrap();
+        let hash_hex = chunk.hash.to_hex().to_string();
+        assert!(store.has_chunk(&hash_hex));
+        let retrieved = store.get_chunk(&hash_hex).unwrap();
+        assert_eq!(retrieved, b"hello flat store");
+    }
+
+    #[test]
+    fn test_flat_get_nonexistent() {
+        let dir = tempdir().unwrap();
+        let store = FlatStore::new(dir.path());
+        let result = store.get_chunk("abcdef");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_flat_has_nonexistent() {
+        let dir = tempdir().unwrap();
+        let store = FlatStore::new(dir.path());
+        assert!(!store.has_chunk("ab"));
+        assert!(!store.has_chunk(""));
+    }
+
+    #[test]
+    fn test_flat_delete_chunk() {
+        let dir = tempdir().unwrap();
+        let store = FlatStore::new(dir.path());
+        let chunk = fake_chunk(b"delete me");
+        store.put_chunk(&chunk).unwrap();
+        let hash_hex = chunk.hash.to_hex().to_string();
+        assert!(store.has_chunk(&hash_hex));
+        store.delete_chunk(&hash_hex, None).unwrap();
+        assert!(!store.has_chunk(&hash_hex));
+    }
+
+    #[test]
+    fn test_flat_iter_chunks() {
+        let dir = tempdir().unwrap();
+        let store = FlatStore::new(dir.path());
+        let chunks = vec![
+            fake_chunk(b"chunk a"),
+            fake_chunk(b"chunk b"),
+            fake_chunk(b"chunk c"),
+        ];
+        for c in &chunks {
+            store.put_chunk(c).unwrap();
+        }
+        let entries = store.iter_chunks().unwrap();
+        assert_eq!(entries.len(), 3);
+        for c in &chunks {
+            let h = c.hash.to_hex().to_string();
+            assert!(entries.iter().any(|(hash, _)| hash == &h));
+        }
+    }
+
+    #[test]
+    fn test_flat_put_idempotent() {
+        let dir = tempdir().unwrap();
+        let store = FlatStore::new(dir.path());
+        let chunk = fake_chunk(b"idempotent");
+        store.put_chunk(&chunk).unwrap();
+        store.put_chunk(&chunk).unwrap();
+        // Object file exists only once (deduped on disk)
+        let hash_hex = chunk.hash.to_hex().to_string();
+        let path = dir.path().join("objects").join(&hash_hex[..2]).join(&hash_hex);
+        assert!(path.exists());
+        // get_chunk works
+        let retrieved = store.get_chunk(&hash_hex).unwrap();
+        assert_eq!(retrieved, b"idempotent");
+    }
 }

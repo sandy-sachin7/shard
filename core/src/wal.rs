@@ -110,3 +110,127 @@ pub fn recover(shard_dir: &Path) -> Result<()> {
     wal.truncate()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_wal_append_read_roundtrip() {
+        let dir = tempdir().unwrap();
+        let wal = Wal::new(dir.path());
+
+        wal.append(&WalEntry::AddBegin {
+            path: "f.txt".into(),
+        })
+        .unwrap();
+        wal.append(&WalEntry::AddEnd).unwrap();
+
+        let entries = wal.read().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0], WalEntry::AddBegin { .. }));
+        assert!(matches!(entries[1], WalEntry::AddEnd));
+    }
+
+    #[test]
+    fn test_wal_read_empty() {
+        let dir = tempdir().unwrap();
+        let wal = Wal::new(dir.path());
+        assert!(!wal.exists());
+        let entries = wal.read().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_wal_truncate() {
+        let dir = tempdir().unwrap();
+        let wal = Wal::new(dir.path());
+        wal.append(&WalEntry::AddEnd).unwrap();
+        assert!(wal.exists());
+        wal.truncate().unwrap();
+        assert!(!wal.exists());
+    }
+
+    #[test]
+    fn test_wal_commit_begin_end_roundtrip() {
+        let dir = tempdir().unwrap();
+        let wal = Wal::new(dir.path());
+        wal.append(&WalEntry::CommitBegin {
+            head_backup: Some("abc".into()),
+            index_backup: b"index_data".to_vec(),
+        })
+        .unwrap();
+        wal.append(&WalEntry::CommitEnd).unwrap();
+        let entries = wal.read().unwrap();
+        assert_eq!(entries.len(), 2);
+        if let WalEntry::CommitBegin {
+            head_backup,
+            index_backup,
+        } = &entries[0]
+        {
+            assert_eq!(head_backup.as_deref(), Some("abc"));
+            assert_eq!(index_backup, b"index_data");
+        } else {
+            panic!("Expected CommitBegin");
+        }
+    }
+
+    #[test]
+    fn test_recover_no_wal() {
+        let dir = tempdir().unwrap();
+        recover(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn test_recover_empty_wal() {
+        let dir = tempdir().unwrap();
+        let wal = Wal::new(dir.path());
+        wal.append(&WalEntry::AddEnd).unwrap();
+        recover(dir.path()).unwrap();
+        assert!(!wal.exists());
+    }
+
+    #[test]
+    fn test_recover_incomplete_commit() {
+        let dir = tempdir().unwrap();
+        let shard = dir.path();
+
+        // Simulate: HEAD exists, then WAL has CommitBegin without CommitEnd
+        fs::write(shard.join("HEAD"), "ref: refs/heads/main").unwrap();
+        fs::write(shard.join("index"), b"original_index").unwrap();
+
+        let wal = Wal::new(shard);
+        wal.append(&WalEntry::CommitBegin {
+            head_backup: Some("ref: refs/heads/main".into()),
+            index_backup: b"original_index".to_vec(),
+        })
+        .unwrap();
+        // No CommitEnd — crash simulation
+
+        // Modify HEAD and index as if partial commit happened
+        fs::write(shard.join("HEAD"), "new_commit_id").unwrap();
+        fs::write(shard.join("index"), b"new_index").unwrap();
+
+        // Recover should restore original state
+        recover(shard).unwrap();
+        assert_eq!(
+            fs::read_to_string(shard.join("HEAD")).unwrap(),
+            "ref: refs/heads/main"
+        );
+        assert_eq!(fs::read(shard.join("index")).unwrap(), b"original_index");
+    }
+
+    #[test]
+    fn test_recover_incomplete_add() {
+        let dir = tempdir().unwrap();
+        let wal = Wal::new(dir.path());
+        wal.append(&WalEntry::AddBegin {
+            path: "f.txt".into(),
+        })
+        .unwrap();
+        // No AddEnd — just WAL should be cleaned
+        recover(dir.path()).unwrap();
+        assert!(!wal.exists());
+    }
+}

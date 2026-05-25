@@ -41,3 +41,6 @@ install:
 
 uninstall:
 	cargo uninstall shard
+
+example:
+	cargo run --example shard-basics -p shard-core

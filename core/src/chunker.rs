@@ -406,4 +406,49 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_blake3_reference_vector() {
+        let hash = blake3::hash(b"");
+        assert_eq!(
+            hash.to_hex().to_string(),
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+    }
+
+    #[test]
+    fn test_blake3_reference_vector_abc() {
+        let hash = blake3::hash(b"abc");
+        assert_eq!(
+            hash.to_hex().to_string(),
+            "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+        );
+    }
+
+    #[test]
+    fn test_blake3_reference_vector_hello() {
+        let hash = blake3::hash(b"hello world");
+        assert_eq!(
+            hash.to_hex().to_string(),
+            "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
+        );
+    }
+
+    #[test]
+    fn test_blake3_large_input_deterministic() {
+        let data = vec![0xABu8; 65536];
+        let hash = blake3::hash(&data);
+        assert_eq!(
+            hash.to_hex().to_string(),
+            "b01eb9000c0964964671d09cab928d484b6381cdd0bc1e78f5e788d560bb7984"
+        );
+    }
+
+    #[test]
+    fn test_blake3_keyed_hash() {
+        let key = [0u8; 32];
+        let mut hasher = blake3::Hasher::new_keyed(&key);
+        let hash = hasher.update(b"test data").finalize();
+        assert_eq!(hash.to_hex().to_string().len(), 64);
+    }
 }

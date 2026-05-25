@@ -1495,12 +1495,9 @@ fn test_cbor_commit_verify_roundtrip() {
     fs::write(dir.join("data.txt"), b"cbor test data").unwrap();
     let out = shard(&["add", "data.txt"], &dir).output().unwrap();
     assert!(out.status.success(), "cbor add failed");
-    let out = shard(
-        &["commit", "-m", "cbor-commit", "--author", "Test"],
-        &dir,
-    )
-    .output()
-    .unwrap();
+    let out = shard(&["commit", "-m", "cbor-commit", "--author", "Test"], &dir)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "cbor commit failed: {}",
@@ -1547,12 +1544,9 @@ fn test_cbor_mixed_format_compat() {
     fs::write(dir.join("f1.txt"), b"json version").unwrap();
     let out = shard(&["add", "f1.txt"], &dir).output().unwrap();
     assert!(out.status.success());
-    let out = shard(
-        &["commit", "-m", "json-commit", "--author", "Test"],
-        &dir,
-    )
-    .output()
-    .unwrap();
+    let out = shard(&["commit", "-m", "json-commit", "--author", "Test"], &dir)
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     let c1 = stdout.split_whitespace().nth(1).unwrap().to_string();
@@ -1566,12 +1560,9 @@ fn test_cbor_mixed_format_compat() {
     fs::write(dir.join("f2.txt"), b"cbor version").unwrap();
     let out = shard(&["add", "f2.txt"], &dir).output().unwrap();
     assert!(out.status.success());
-    let out = shard(
-        &["commit", "-m", "cbor-commit", "--author", "Test"],
-        &dir,
-    )
-    .output()
-    .unwrap();
+    let out = shard(&["commit", "-m", "cbor-commit", "--author", "Test"], &dir)
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     let c2 = stdout.split_whitespace().nth(1).unwrap().to_string();
@@ -1583,10 +1574,7 @@ fn test_cbor_mixed_format_compat() {
         "JSON commit verify failed after CBOR commit"
     );
     let out = shard(&["verify", &c2], &dir).output().unwrap();
-    assert!(
-        out.status.success(),
-        "CBOR commit verify failed"
-    );
+    assert!(out.status.success(), "CBOR commit verify failed");
 
     // Log should show both commits
     let out = shard(&["log"], &dir).output().unwrap();

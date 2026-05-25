@@ -149,3 +149,88 @@ pub fn open_backend(path: &Path, backend: &str) -> anyhow::Result<Box<dyn Storag
         _ => anyhow::bail!("Unknown storage backend: {}", backend),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn test_backend_roundtrip(backend: &dyn StorageBackend) {
+        backend.put(b"key1", b"value1").unwrap();
+        backend.put(b"key2", b"value2").unwrap();
+
+        assert!(backend.contains(b"key1").unwrap());
+        assert!(!backend.contains(b"nonexistent").unwrap());
+
+        assert_eq!(backend.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(backend.get(b"key2").unwrap(), Some(b"value2".to_vec()));
+        assert!(backend.get(b"nonexistent").unwrap().is_none());
+
+        // iter_prefix on all keys
+        let all = backend.iter_prefix(b"").unwrap();
+        assert_eq!(all.len(), 2);
+
+        // iter_prefix on prefix
+        let k1 = backend.iter_prefix(b"key").unwrap();
+        assert_eq!(k1.len(), 2);
+
+        let kn = backend.iter_prefix(b"nope").unwrap();
+        assert_eq!(kn.len(), 0);
+
+        // delete
+        backend.delete(b"key1").unwrap();
+        assert!(!backend.contains(b"key1").unwrap());
+
+        backend.flush().unwrap();
+    }
+
+    #[test]
+    fn test_sled_backend_roundtrip() {
+        let dir = tempdir().unwrap();
+        let backend: Box<dyn StorageBackend> = Box::new(SledBackend::new(&dir.path().join("sled_db")).unwrap());
+        test_backend_roundtrip(backend.as_ref());
+    }
+
+    #[test]
+    fn test_sqlite_backend_roundtrip() {
+        let dir = tempdir().unwrap();
+        let backend: Box<dyn StorageBackend> = Box::new(SqliteBackend::new(&dir.path().join("sqlite.db")).unwrap());
+        test_backend_roundtrip(backend.as_ref());
+    }
+
+    #[test]
+    fn test_open_backend_factory() {
+        let dir = tempdir().unwrap();
+        let sled = open_backend(&dir.path().join("s.db"), "sled").unwrap();
+        let sqlite = open_backend(&dir.path().join("q.db"), "sqlite").unwrap();
+        sled.put(b"a", b"1").unwrap();
+        sqlite.put(b"a", b"1").unwrap();
+        assert_eq!(sled.get(b"a").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(sqlite.get(b"a").unwrap(), Some(b"1".to_vec()));
+    }
+
+    #[test]
+    fn test_open_backend_unknown() {
+        let dir = tempdir().unwrap();
+        let result = open_backend(&dir.path().join("x"), "unknown");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sled_overwrite() {
+        let dir = tempdir().unwrap();
+        let backend: Box<dyn StorageBackend> = Box::new(SledBackend::new(&dir.path().join("o")).unwrap());
+        backend.put(b"k", b"v1").unwrap();
+        backend.put(b"k", b"v2").unwrap();
+        assert_eq!(backend.get(b"k").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn test_sqlite_overwrite() {
+        let dir = tempdir().unwrap();
+        let backend: Box<dyn StorageBackend> = Box::new(SqliteBackend::new(&dir.path().join("o")).unwrap());
+        backend.put(b"k", b"v1").unwrap();
+        backend.put(b"k", b"v2").unwrap();
+        assert_eq!(backend.get(b"k").unwrap(), Some(b"v2".to_vec()));
+    }
+}
