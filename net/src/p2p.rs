@@ -1,3 +1,4 @@
+use blake3;
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
@@ -54,13 +55,20 @@ impl Node {
                 info!("Local peer id: {local_peer_id}");
                 let _ = std::io::stdout().flush();
 
-                // Gossipsub
-                let gossipsub_config = gossipsub::Config::default();
+                // Gossipsub — with content-hash message dedup for idempotent announcements
+                let g_config = gossipsub::Config::default();
+                let gossipsub_config = gossipsub::ConfigBuilder::from(g_config)
+                    .message_id_fn(|msg: &gossipsub::Message| {
+                        let hash = blake3::hash(&msg.data);
+                        gossipsub::MessageId::from(hash.as_bytes().to_vec())
+                    })
+                    .build()
+                    .expect("Valid gossipsub config");
                 let gossipsub = gossipsub::Behaviour::new(
                     gossipsub::MessageAuthenticity::Signed(key.clone()),
                     gossipsub_config,
                 )
-                .expect("Valid gossipsub config");
+                .expect("Valid gossipsub behaviour");
 
                 // Kademlia
                 let store = MemoryStore::new(local_peer_id);
@@ -69,7 +77,8 @@ impl Node {
                 // Request-Response (CBOR for compact binary encoding)
                 let request_response = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new("/shard/1"), ProtocolSupport::Full)],
-                    request_response::Config::default(),
+                    request_response::Config::default()
+                        .with_request_timeout(Duration::from_secs(60)),
                 );
 
                 // mDNS

@@ -99,10 +99,7 @@ mod tests {
     fn test_sqlite_iter_chunks() {
         let dir = tempdir().unwrap();
         let store = SqliteStore::new(dir.path()).unwrap();
-        let chunks = vec![
-            fake_chunk(b"sqlite a"),
-            fake_chunk(b"sqlite b"),
-        ];
+        let chunks = vec![fake_chunk(b"sqlite a"), fake_chunk(b"sqlite b")];
         for c in &chunks {
             store.put_chunk(c).unwrap();
         }

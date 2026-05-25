@@ -64,10 +64,7 @@ mod tests {
         kp.save(dir.path()).unwrap();
 
         let loaded = KeyPair::load(dir.path()).unwrap();
-        assert_eq!(
-            kp.verifying_key.to_bytes(),
-            loaded.verifying_key.to_bytes()
-        );
+        assert_eq!(kp.verifying_key.to_bytes(), loaded.verifying_key.to_bytes());
         // Verify signing consistency
         use ed25519_dalek::Signer;
         let sig = kp.signing_key.sign(b"test message");
@@ -79,10 +76,7 @@ mod tests {
     fn test_keypair_generates_unique_keys() {
         let kp1 = KeyPair::generate();
         let kp2 = KeyPair::generate();
-        assert_ne!(
-            kp1.verifying_key.to_bytes(),
-            kp2.verifying_key.to_bytes()
-        );
+        assert_ne!(kp1.verifying_key.to_bytes(), kp2.verifying_key.to_bytes());
     }
 
     #[test]

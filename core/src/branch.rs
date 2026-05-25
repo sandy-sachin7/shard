@@ -200,7 +200,10 @@ mod tests {
         update_branch_ref(shard, "main", "commit1").unwrap();
         let result = delete_branch(shard, "main");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("currently checked out"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("currently checked out"));
     }
 
     #[test]

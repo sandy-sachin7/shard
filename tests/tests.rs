@@ -77,7 +77,10 @@ fn workspace_checkout_after_commit() {
 
     fs::remove_file(repo.join("checkme.txt")).unwrap();
     shard_core::checkout(&repo, &head, false).unwrap();
-    assert_eq!(fs::read_to_string(repo.join("checkme.txt")).unwrap(), "checkout data");
+    assert_eq!(
+        fs::read_to_string(repo.join("checkme.txt")).unwrap(),
+        "checkout data"
+    );
 }
 
 #[test]

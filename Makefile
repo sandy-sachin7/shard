@@ -14,6 +14,9 @@ test:
 test-all:
 	cargo test --all-targets
 
+test-integration:
+	cargo test -p shard-cli --test integration -- --test-threads=1
+
 bench:
 	cargo bench
 

@@ -29,6 +29,22 @@ pub enum ShardRequest {
     AuthAnswer { signature: Vec<u8> },
 }
 
+/// Announcement payload for Gossipsub pubsub messages on the `shard:ann` topic.
+/// Contains enough information for a peer to decide whether to fetch a commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Announcement {
+    /// The announced commit id (Blake3 hash of canonical commit JSON).
+    pub commit_id: String,
+    /// Number of files in the commit (from manifest(s)).
+    pub file_count: u64,
+    /// Total size of all files in bytes (sum of manifest sizes).
+    pub total_size: u64,
+    /// Human-readable repo name (from `shard config get repo_name` or `repo_id`).
+    pub repo_name: String,
+    /// Multiaddr string of the announcing peer (e.g., `/ip4/1.2.3.4/tcp/9000/p2p/<peer_id>`).
+    pub peer_multiaddr: String,
+}
+
 /// Response messages for Shard's request-response P2P protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShardResponse {

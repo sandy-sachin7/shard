@@ -99,10 +99,7 @@ mod tests {
     fn test_sled_iter_chunks() {
         let dir = tempdir().unwrap();
         let store = SledStore::new(dir.path()).unwrap();
-        let chunks = vec![
-            fake_chunk(b"sled a"),
-            fake_chunk(b"sled b"),
-        ];
+        let chunks = vec![fake_chunk(b"sled a"), fake_chunk(b"sled b")];
         for c in &chunks {
             store.put_chunk(c).unwrap();
         }

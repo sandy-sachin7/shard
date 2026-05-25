@@ -256,7 +256,11 @@ mod tests {
         store.put_chunk(&chunk).unwrap();
         // Object file exists only once (deduped on disk)
         let hash_hex = chunk.hash.to_hex().to_string();
-        let path = dir.path().join("objects").join(&hash_hex[..2]).join(&hash_hex);
+        let path = dir
+            .path()
+            .join("objects")
+            .join(&hash_hex[..2])
+            .join(&hash_hex);
         assert!(path.exists());
         // get_chunk works
         let retrieved = store.get_chunk(&hash_hex).unwrap();

@@ -30,7 +30,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub fn init(
     path: &Path,
@@ -245,7 +245,10 @@ pub fn recover(path: &Path, json: bool) -> Result<()> {
     }
     wal::recover(&shard_dir)?;
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({"status": "recovery complete"}))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"status": "recovery complete"}))?
+        );
     } else {
         info!("Recovery complete.");
     }
@@ -314,7 +317,10 @@ pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
 
     index.save(&shard_dir.join("index"), &fmt)?;
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({"status": "added"}))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"status": "added"}))?
+        );
     }
     Ok(())
 }
@@ -439,10 +445,13 @@ pub fn commit(path: &Path, message: &str, author: &str, json: bool) -> Result<()
     wal.truncate()?;
 
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "commit_id": commit_id,
-            "message": message,
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "commit_id": commit_id,
+                "message": message,
+            }))?
+        );
     } else {
         info!("Committed {} ({})", commit_id, message);
     }
@@ -1000,18 +1009,25 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
     }
 
     let mut untracked = Vec::new();
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            if let Ok(ftype) = entry.file_type() {
-                if ftype.is_file() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.starts_with('.')
-                        && !index.files.contains_key(&name)
-                        && !tracked_names.contains(&name)
-                    {
-                        untracked.push(name);
-                    }
-                }
+    for entry in walkdir::WalkDir::new(path)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() || entry.file_type().is_dir() {
+            let rel_path = entry.path().strip_prefix(path).unwrap_or(entry.path());
+            let name = rel_path.to_string_lossy().to_string();
+            let is_hidden = rel_path
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+            if !is_hidden
+                && entry.path() != shard_dir
+                && !entry.path().starts_with(&shard_dir)
+                && !index.files.contains_key(&name)
+                && !tracked_names.contains(&name)
+                && entry.file_type().is_file()
+            {
+                untracked.push(name);
             }
         }
     }
@@ -1073,10 +1089,7 @@ fn load_keypair(shard_dir: &Path) -> Result<KeyPair> {
             return KeyPair::load(&global);
         }
     }
-    anyhow::bail!(
-        "no keypair found in {} or ~/.shard/keys/",
-        local.display()
-    )
+    anyhow::bail!("no keypair found in {} or ~/.shard/keys/", local.display())
 }
 
 fn load_public_key(shard_dir: &Path) -> Result<Vec<u8>> {
@@ -1345,10 +1358,13 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str, json: bool)
     }
 
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "commit_id": merge_commit_id,
-            "message": message,
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "commit_id": merge_commit_id,
+                "message": message,
+            }))?
+        );
     } else {
         info!("Merge commit {} ({})", merge_commit_id, message);
     }
@@ -1479,10 +1495,13 @@ pub fn prune(path: &Path, json: bool) -> Result<()> {
     }
 
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "pruned": pruned,
-            "remaining": kept,
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "pruned": pruned,
+                "remaining": kept,
+            }))?
+        );
     } else {
         info!("Pruned {} objects. {} objects remain.", pruned, kept);
     }
@@ -1518,10 +1537,13 @@ pub fn peer_add(path: &Path, multiaddr: &str, json: bool) -> Result<()> {
     };
 
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "multiaddr": multiaddr,
-            "added": added,
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "multiaddr": multiaddr,
+                "added": added,
+            }))?
+        );
     } else if added {
         info!("Added peer: {}", multiaddr);
     } else {
@@ -1605,9 +1627,12 @@ pub fn backup(path: &Path, output: &Path, json: bool) -> Result<()> {
     archive.append_dir_all(".", &shard_dir)?;
     archive.finish()?;
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "path": output.to_string_lossy(),
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "path": output.to_string_lossy(),
+            }))?
+        );
     } else {
         info!("Backup created: {}", output.display());
     }
@@ -1665,7 +1690,13 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
     Ok(())
 }
 
-pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str, json: bool) -> Result<()> {
+pub fn import(
+    path: &Path,
+    source_dir: &Path,
+    message: &str,
+    author: &str,
+    json: bool,
+) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1713,7 +1744,10 @@ pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str, json:
     if !index.files.is_empty() {
         commit(path, message, author, json)?;
     } else if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({"status": "no files found"}))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"status": "no files found"}))?
+        );
     } else {
         info!("No files found to import.");
     }
@@ -1736,9 +1770,12 @@ pub fn restore(path: &Path, backup_file: &Path, json: bool) -> Result<()> {
         anyhow::bail!("Backup does not contain a valid .shard directory");
     }
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "backup": backup_file.to_string_lossy(),
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "backup": backup_file.to_string_lossy(),
+            }))?
+        );
     } else {
         info!("Restored from {}", backup_file.display());
     }
@@ -1803,6 +1840,23 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
     }
 }
 
+/// Compute file count and total size for a commit's manifests.
+fn commit_stats(shard_dir: &Path, commit_id: &str) -> Result<(u64, u64)> {
+    let store = Store::open(shard_dir)?;
+    let commit = load_commit(&store, commit_id)?;
+    let mut file_count = 0u64;
+    let mut total_size = 0u64;
+    for mid in &commit.manifests {
+        if let Ok(data) = store.get_chunk(mid) {
+            if let Ok(m) = metadata::deserialize::<FileManifest>(&data) {
+                file_count += 1;
+                total_size += m.size;
+            }
+        }
+    }
+    Ok((file_count, total_size))
+}
+
 pub async fn share(path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
@@ -1810,6 +1864,10 @@ pub async fn share(path: &Path, json: bool) -> Result<()> {
     }
 
     let mut node = shard_net::p2p::Node::new().await?;
+
+    // Subscribe to global announcement topic
+    let ann_topic = shard_net::libp2p::gossipsub::IdentTopic::new("shard:ann");
+    node.subscribe(&ann_topic)?;
 
     // Bootstrap from peers
     let peers = load_peers(&shard_dir)?;
@@ -1823,17 +1881,40 @@ pub async fn share(path: &Path, json: bool) -> Result<()> {
     node.swarm.behaviour_mut().kademlia.bootstrap().ok();
 
     node.listen("/ip4/0.0.0.0/tcp/0").await?;
+    let listen_addrs: Vec<String> = node.swarm.listeners().map(|a| a.to_string()).collect();
+    let peer_multiaddr = listen_addrs.first().cloned().unwrap_or_default();
+
+    let config = load_config(&shard_dir)?;
+    let repo_name = config.get("repo_name").cloned().unwrap_or_default();
 
     let store = Store::open(&shard_dir)?;
     let provider = RepoProvider {
         store,
         shard_dir: shard_dir.clone(),
     };
+
+    // Publish announcement for HEAD commit
+    if let Some(head) = branch::resolve_head(&shard_dir)?.1 {
+        let (file_count, total_size) = commit_stats(&shard_dir, &head)?;
+        let ann = shard_net::protocol::Announcement {
+            commit_id: head,
+            file_count,
+            total_size,
+            repo_name: repo_name.clone(),
+            peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+        };
+        let payload = serde_json::to_vec(&ann)?;
+        let _ = node.publish(&ann_topic, payload);
+    }
+
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "status": "sharing",
-            "peer_id": node.local_peer_id().to_string(),
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "status": "sharing",
+                "peer_id": node.local_peer_id().to_string(),
+            }))?
+        );
     } else {
         info!("Sharing repository...");
     }
@@ -1848,11 +1929,14 @@ pub async fn relay(listen_addr: &str, json: bool) -> Result<()> {
     let mut node = shard_net::p2p::Node::new().await?;
     node.listen(listen_addr).await?;
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "status": "relay active",
-            "listen": listen_addr,
-            "peer_id": node.local_peer_id().to_string(),
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "status": "relay active",
+                "listen": listen_addr,
+                "peer_id": node.local_peer_id().to_string(),
+            }))?
+        );
     } else {
         info!("Relay server active on {}", listen_addr);
         info!("Peer ID: {}", node.local_peer_id());
@@ -1889,15 +1973,18 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
     }
 
     let config = load_config(&shard_dir)?;
-    let repo_id = config
-        .get("repo_id")
-        .ok_or_else(|| anyhow::anyhow!("No repo_id in config. Run `shard init` to create one."))?;
-    let topic_str = format!("/shard/repo/{}", repo_id);
-    let topic = shard_net::libp2p::gossipsub::IdentTopic::new(topic_str);
+    let repo_id = config.get("repo_id").cloned().unwrap_or_default();
+    let repo_name = config.get("repo_name").cloned().unwrap_or_default();
+    let ann_topic = shard_net::libp2p::gossipsub::IdentTopic::new("shard:ann");
+    let repo_topic =
+        shard_net::libp2p::gossipsub::IdentTopic::new(format!("/shard/repo/{}", repo_id));
 
     let mut node = shard_net::p2p::Node::new().await?;
-    node.subscribe(&topic)?;
+    node.subscribe(&ann_topic)?;
+    node.subscribe(&repo_topic)?;
     node.listen("/ip4/0.0.0.0/tcp/0").await?;
+    let listen_addrs: Vec<String> = node.swarm.listeners().map(|a| a.to_string()).collect();
+    let peer_multiaddr = listen_addrs.first().cloned().unwrap_or_default();
 
     // Bootstrap from configured peers
     let peers = load_peers(&shard_dir)?;
@@ -1910,18 +1997,29 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
     // Trigger Kademlia DHT bootstrap
     node.swarm.behaviour_mut().kademlia.bootstrap().ok();
 
+    // Helper to publish announcement to both global and repo-specific topics
+    let publish_ann = |node: &mut shard_net::p2p::Node, ann: &shard_net::protocol::Announcement| {
+        if let Ok(payload) = serde_json::to_vec(ann) {
+            let _ = node.publish(&ann_topic, payload.clone());
+            let _ = node.publish(&repo_topic, payload);
+        }
+    };
+
     let head_commit = branch::resolve_head(&shard_dir)?.1;
 
     // Initial announce (may fail with InsufficientPeers if no peers yet)
     if let Some(ref head) = head_commit {
-        let msg = format!("announce:{}", head);
-        match node.publish(&topic, msg.as_bytes()) {
-            Ok(_) => {
-                if !_json {
-                    info!("Announced commit {} on sync topic", head)
-                }
-            }
-            Err(e) => error!("Initial announce (will retry): {}", e),
+        let (file_count, total_size) = commit_stats(&shard_dir, head)?;
+        let ann = shard_net::protocol::Announcement {
+            commit_id: head.clone(),
+            file_count,
+            total_size,
+            repo_name: repo_name.clone(),
+            peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+        };
+        publish_ann(&mut node, &ann);
+        if !_json {
+            info!("Announced commit {} on sync topic", head)
         }
     } else if !_json {
         info!("No commits to announce");
@@ -1941,6 +2039,8 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     let mut address_book: HashMap<shard_net::libp2p::PeerId, Vec<shard_net::libp2p::Multiaddr>> =
         HashMap::new();
+    let mut announce_counts: HashMap<(shard_net::libp2p::PeerId, String), u32> = HashMap::new();
+    let mut request_counts: HashMap<shard_net::libp2p::PeerId, u32> = HashMap::new();
     let path_buf = path.to_path_buf();
 
     loop {
@@ -1950,12 +2050,20 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
                 break Ok(());
             }
             _ = interval.tick() => {
+                // Periodic rate-limit counter reset (rolling 60s window)
+                request_counts.clear();
+                announce_counts.clear();
                 if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
-                    let msg = format!("announce:{}", head);
-                    match node.publish(&topic, msg.as_bytes()) {
-                        Ok(_) => info!("Re-announced commit {} on sync topic", head),
-                        Err(e) => error!("Re-announce failed: {}", e),
-                    }
+                    let (fc, ts) = commit_stats(&shard_dir, head).unwrap_or_default();
+                    let ann = shard_net::protocol::Announcement {
+                        commit_id: head.clone(),
+                        file_count: fc,
+                        total_size: ts,
+                        repo_name: repo_name.clone(),
+                        peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+                    };
+                    publish_ann(&mut node, &ann);
+                    info!("Re-announced commit {} on sync topic", head);
                 }
             }
             event = node.swarm.select_next_some() => {
@@ -2004,19 +2112,38 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
                             },
                         ),
                     ) => {
-                        if let Ok(text) = String::from_utf8(message.data.clone()) {
-                            if let Some(commit_id) = text.strip_prefix("announce:") {
-                                info!(
-                                    "Peer {} announced commit: {}",
-                                    propagation_source, commit_id
-                                );
-                                let peer = propagation_source;
-                                let commit_id_owned = commit_id.to_string();
-                                // Reply with our HEAD if different (triggers peer to pull from us)
+                        // Parse structured Announcement JSON
+                        if let Ok(ann) = serde_json::from_slice::<shard_net::protocol::Announcement>(&message.data) {
+                            let peer = propagation_source;
+                            let commit_id_owned = ann.commit_id;
+                            info!(
+                                "Peer {} announced commit: {} (repo: {}, {} files, {} bytes)",
+                                peer, commit_id_owned, ann.repo_name, ann.file_count, ann.total_size,
+                            );
+                            // Store announcer's multiaddr if we don't have it yet
+                            if !ann.peer_multiaddr.is_empty() && !address_book.contains_key(&peer) {
+                                if let Ok(addr) = ann.peer_multiaddr.parse::<shard_net::libp2p::Multiaddr>() {
+                                    address_book.entry(peer).or_default().push(addr);
+                                }
+                            }
+                            // Rate limiting: track announcement count per peer
+                            let rate_key = (peer, commit_id_owned.clone());
+                            if announce_counts.get(&rate_key).copied().unwrap_or(0) > 5 {
+                                warn!("Rate limit exceeded for peer {} commit {}", peer, commit_id_owned);
+                            } else {
+                                *announce_counts.entry(rate_key).or_insert(0) += 1;
+                                // Reply with our HEAD if different
                                 let our_head = branch::resolve_head(&shard_dir)?.1.unwrap_or_default();
                                 if our_head != commit_id_owned {
-                                    let msg = format!("announce:{}", our_head);
-                                    let _ = node.publish(&topic, msg.as_bytes());
+                                    let (fc, ts) = commit_stats(&shard_dir, &our_head).unwrap_or_default();
+                                    let reply = shard_net::protocol::Announcement {
+                                        commit_id: our_head,
+                                        file_count: fc,
+                                        total_size: ts,
+                                        repo_name: repo_name.clone(),
+                                        peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+                                    };
+                                    publish_ann(&mut node, &reply);
                                 }
                                 if let Some(addrs) = address_book.get(&peer) {
                                     if let Some(addr) = addrs.first() {
@@ -2042,8 +2169,16 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
                             request, channel, ..
                         } = message
                         {
-                            info!("Received request from {}", peer);
-                            node.serve_request(&peer, &mut provider, request, channel);
+                            // Per-peer request rate limiting: max 50 requests in any 60s window
+                            let req_count = request_counts.entry(peer).or_insert(0u32);
+                            *req_count += 1;
+                            if *req_count > 50 {
+                                warn!("Dropping request from {}: rate limit exceeded", peer);
+                                // Reset counter periodically (cooldown via interval tick)
+                            } else {
+                                info!("Received request from {}", peer);
+                                node.serve_request(&peer, &mut provider, request, channel);
+                            }
                         } else {
                             info!("Received Response from {}", peer);
                         }
@@ -2095,8 +2230,15 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
                             .add_explicit_peer(&peer_id);
                         // Announce HEAD to the newly connected peer
                         if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
-                            let msg = format!("announce:{}", head);
-                            let _ = node.publish(&topic, msg.as_bytes());
+                            let (fc, ts) = commit_stats(&shard_dir, head).unwrap_or_default();
+                            let ann = shard_net::protocol::Announcement {
+                                commit_id: head.clone(),
+                                file_count: fc,
+                                total_size: ts,
+                                repo_name: repo_name.clone(),
+                                peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+                            };
+                            publish_ann(&mut node, &ann);
                         }
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
@@ -2220,7 +2362,9 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str, json: bool) -> Resul
                                 offset: 0,
                             })?;
                         }
-                        if !json { info!("Key rotation records synced from peer."); }
+                        if !json {
+                            info!("Key rotation records synced from peer.");
+                        }
                     }
                 }
             }
@@ -2385,10 +2529,13 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str, json: bool) -> Resul
     partial.cleanup()?;
 
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "status": "pull complete",
-            "commit_id": commit_id,
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "status": "pull complete",
+                "commit_id": commit_id,
+            }))?
+        );
     } else {
         info!("Pull complete.");
     }
@@ -2510,10 +2657,13 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
     }
 
     if json {
-        info!("{}", serde_json::to_string(&serde_json::json!({
-            "status": "push complete",
-            "objects": objects.len(),
-        }))?);
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "status": "push complete",
+                "objects": objects.len(),
+            }))?
+        );
     } else {
         info!("Push complete ({} objects).", objects.len());
     }

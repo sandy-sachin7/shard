@@ -187,14 +187,16 @@ mod tests {
     #[test]
     fn test_sled_backend_roundtrip() {
         let dir = tempdir().unwrap();
-        let backend: Box<dyn StorageBackend> = Box::new(SledBackend::new(&dir.path().join("sled_db")).unwrap());
+        let backend: Box<dyn StorageBackend> =
+            Box::new(SledBackend::new(&dir.path().join("sled_db")).unwrap());
         test_backend_roundtrip(backend.as_ref());
     }
 
     #[test]
     fn test_sqlite_backend_roundtrip() {
         let dir = tempdir().unwrap();
-        let backend: Box<dyn StorageBackend> = Box::new(SqliteBackend::new(&dir.path().join("sqlite.db")).unwrap());
+        let backend: Box<dyn StorageBackend> =
+            Box::new(SqliteBackend::new(&dir.path().join("sqlite.db")).unwrap());
         test_backend_roundtrip(backend.as_ref());
     }
 
@@ -219,7 +221,8 @@ mod tests {
     #[test]
     fn test_sled_overwrite() {
         let dir = tempdir().unwrap();
-        let backend: Box<dyn StorageBackend> = Box::new(SledBackend::new(&dir.path().join("o")).unwrap());
+        let backend: Box<dyn StorageBackend> =
+            Box::new(SledBackend::new(&dir.path().join("o")).unwrap());
         backend.put(b"k", b"v1").unwrap();
         backend.put(b"k", b"v2").unwrap();
         assert_eq!(backend.get(b"k").unwrap(), Some(b"v2".to_vec()));
@@ -228,7 +231,8 @@ mod tests {
     #[test]
     fn test_sqlite_overwrite() {
         let dir = tempdir().unwrap();
-        let backend: Box<dyn StorageBackend> = Box::new(SqliteBackend::new(&dir.path().join("o")).unwrap());
+        let backend: Box<dyn StorageBackend> =
+            Box::new(SqliteBackend::new(&dir.path().join("o")).unwrap());
         backend.put(b"k", b"v1").unwrap();
         backend.put(b"k", b"v2").unwrap();
         assert_eq!(backend.get(b"k").unwrap(), Some(b"v2".to_vec()));

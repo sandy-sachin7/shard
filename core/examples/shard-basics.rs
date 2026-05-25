@@ -27,7 +27,10 @@ fn main() -> anyhow::Result<()> {
 
     // 2. Create a file
     println!("\n2. Creating file.txt...");
-    fs::write(repo.join("file.txt"), b"Hello, shard!\nThis is a test file.\n")?;
+    fs::write(
+        repo.join("file.txt"),
+        b"Hello, shard!\nThis is a test file.\n",
+    )?;
 
     // 3. Add the file
     println!("\n3. Adding file to staging...");

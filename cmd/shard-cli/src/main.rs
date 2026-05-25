@@ -167,7 +167,9 @@ enum BranchCommands {
         name: String,
         commit_id: Option<String>,
     },
-    Delete { name: String },
+    Delete {
+        name: String,
+    },
     List,
 }
 
@@ -202,7 +204,9 @@ enum TransferCommands {
         #[arg(long)]
         json: bool,
     },
-    Remove { commit_id: String },
+    Remove {
+        commit_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -317,7 +321,11 @@ async fn main() -> Result<()> {
             let current_dir = env::current_dir()?;
             shard_core::share(&current_dir, *json).await?;
         }
-        Commands::Pull { peer, commit_id, json } => {
+        Commands::Pull {
+            peer,
+            commit_id,
+            json,
+        } => {
             let current_dir = env::current_dir()?;
             shard_core::pull(&current_dir, peer, commit_id, *json).await?;
         }
@@ -406,7 +414,7 @@ async fn main() -> Result<()> {
         Commands::Relay { listen, json } => {
             shard_core::relay(listen, *json).await?;
         }
-            Commands::Transfer { command } => match command {
+        Commands::Transfer { command } => match command {
             TransferCommands::List { json } => {
                 let current_dir = env::current_dir()?;
                 shard_core::transfer_list(&current_dir, *json)?;

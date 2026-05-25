@@ -59,10 +59,8 @@ mod tests {
         let path = dir.path().join("index");
 
         let mut idx = Index::default();
-        idx.files
-            .insert("a.txt".into(), make_manifest("a.txt"));
-        idx.files
-            .insert("b.txt".into(), make_manifest("b.txt"));
+        idx.files.insert("a.txt".into(), make_manifest("a.txt"));
+        idx.files.insert("b.txt".into(), make_manifest("b.txt"));
         idx.save(&path, &MetadataFormat::Json).unwrap();
 
         let loaded = Index::load(&path, &MetadataFormat::Json).unwrap();
@@ -77,8 +75,7 @@ mod tests {
         let path = dir.path().join("index");
 
         let mut idx = Index::default();
-        idx.files
-            .insert("c.txt".into(), make_manifest("c.txt"));
+        idx.files.insert("c.txt".into(), make_manifest("c.txt"));
         idx.save(&path, &MetadataFormat::Cbor).unwrap();
 
         let loaded = Index::load(&path, &MetadataFormat::Cbor).unwrap();
@@ -96,14 +93,11 @@ mod tests {
         let path = dir.path().join("index");
 
         let mut idx = Index::default();
-        idx.files
-            .insert("x.txt".into(), make_manifest("x.txt"));
+        idx.files.insert("x.txt".into(), make_manifest("x.txt"));
         idx.save(&path, &MetadataFormat::Json).unwrap();
 
         let mut idx2 = Index::default();
-        idx2
-            .files
-            .insert("y.txt".into(), make_manifest("y.txt"));
+        idx2.files.insert("y.txt".into(), make_manifest("y.txt"));
         idx2.save(&path, &MetadataFormat::Json).unwrap();
 
         let loaded = Index::load(&path, &MetadataFormat::Json).unwrap();
