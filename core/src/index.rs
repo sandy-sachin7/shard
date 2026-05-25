@@ -1,4 +1,5 @@
 use crate::manifest::FileManifest;
+use crate::metadata::{self, MetadataFormat};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,17 +12,16 @@ pub struct Index {
 }
 
 impl Index {
-    pub fn load(path: &Path) -> Result<Self> {
+    pub fn load(path: &Path, _fmt: &MetadataFormat) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content = fs::read_to_string(path)?;
-        let index = serde_json::from_str(&content)?;
-        Ok(index)
+        let content = fs::read(path)?;
+        metadata::deserialize(&content)
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let content = serde_json::to_string_pretty(self)?;
+    pub fn save(&self, path: &Path, fmt: &MetadataFormat) -> Result<()> {
+        let content = metadata::serialize(self, fmt);
         fs::write(path, content)?;
         Ok(())
     }

@@ -239,9 +239,10 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         .parse()?;
 
     let chunker_mode = chunker::ChunkerMode::from_config(&config);
+    let fmt = MetadataFormat::from_config(&config);
 
     let store = Store::open(&shard_dir)?;
-    let mut index = Index::load(&shard_dir.join("index"))?;
+    let mut index = Index::load(&shard_dir.join("index"), &fmt)?;
 
     let cipher = maybe_load_cipher(&shard_dir)?;
 
@@ -280,7 +281,7 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
         )?;
     }
 
-    index.save(&shard_dir.join("index"))?;
+    index.save(&shard_dir.join("index"), &fmt)?;
     Ok(())
 }
 
@@ -293,8 +294,11 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     // Recover from any previous crash before mutating
     wal::recover(&shard_dir)?;
 
+    let config = load_config(&shard_dir)?;
+    let fmt = MetadataFormat::from_config(&config);
+
     let store = Store::open(&shard_dir)?;
-    let mut index = Index::load(&shard_dir.join("index"))?;
+    let mut index = Index::load(&shard_dir.join("index"), &fmt)?;
 
     if index.files.is_empty() {
         anyhow::bail!("nothing to commit (stage files with `shard add` first)");
@@ -312,8 +316,6 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     })?;
 
     // 1. Store manifests (signed)
-    let config = load_config(&shard_dir)?;
-    let fmt = MetadataFormat::from_config(&config);
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let keys = KeyPair::load(&shard_dir.join("keys"))?;
     let signing_key = keys.signing_key;
@@ -324,7 +326,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 
         let mut unsigned = manifest.clone();
         unsigned.signature = None;
-        let canonical = serde_json::to_vec(&unsigned)?;
+        let canonical = metadata::serialize_for_signing(&unsigned);
         let sig = signing_key.sign(&canonical);
         manifest.signature = Some(hex::encode(sig.to_bytes()));
 
@@ -388,7 +390,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
 
     // 7. Clear index
     index.files.clear();
-    index.save(&shard_dir.join("index"))?;
+    index.save(&shard_dir.join("index"), &fmt)?;
 
     // WAL: mark commit complete
     wal.append(&wal::WalEntry::CommitEnd)?;
@@ -436,7 +438,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
 
         let mut unsigned_commit = commit.clone();
         unsigned_commit.signature = None;
-        let json_unsigned = serde_json::to_vec(&unsigned_commit)?;
+        let json_unsigned = metadata::serialize_for_signing(&unsigned_commit);
 
         let sig_bytes = hex::decode(sig_hex)?;
         let signature = ed25519_dalek::Signature::from_bytes(sig_bytes.as_slice().try_into()?);
@@ -470,7 +472,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
             let vk = ed25519_dalek::VerifyingKey::from_bytes(pk_bytes.as_slice().try_into()?)?;
             let mut unsigned = manifest.clone();
             unsigned.signature = None;
-            let canonical = serde_json::to_vec(&unsigned)?;
+            let canonical = metadata::serialize_for_signing(&unsigned);
             let sig_bytes = hex::decode(sig_hex)?;
             let sig = ed25519_dalek::Signature::from_bytes(sig_bytes.as_slice().try_into()?);
             vk.verify(&canonical, &sig)?;
@@ -491,7 +493,12 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         if let Some(ref mr) = manifest.merkle_root {
             let computed = FileManifest::merkle_root(&manifest.chunks);
             if mr != &computed {
-                anyhow::bail!("merkle root mismatch for '{}': manifest says {} but computed {}", manifest.name, mr, computed);
+                anyhow::bail!(
+                    "merkle root mismatch for '{}': manifest says {} but computed {}",
+                    manifest.name,
+                    mr,
+                    computed
+                );
             }
         }
 
@@ -857,6 +864,9 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
+    let config = load_config(&shard_dir)?;
+    let fmt = MetadataFormat::from_config(&config);
+
     let (current_branch, head_commit) = branch::resolve_head(&shard_dir)?;
     let mut commit_id: Option<String> = None;
     if let Some(cid) = head_commit {
@@ -872,7 +882,7 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         info!("No commits yet.");
     }
 
-    let index = Index::load(&shard_dir.join("index"))?;
+    let index = Index::load(&shard_dir.join("index"), &fmt)?;
     let staged: Vec<String> = index.files.keys().cloned().collect();
     if !json {
         if staged.is_empty() {
@@ -956,10 +966,20 @@ fn load_config(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, St
     let config_path = shard_dir.join("config.json");
     if config_path.exists() {
         let data = fs::read(&config_path)?;
-        Ok(serde_json::from_slice(&data)?)
+        Ok(metadata::deserialize(&data)?)
     } else {
         Ok(std::collections::BTreeMap::new())
     }
+}
+
+fn save_config(
+    shard_dir: &Path,
+    config: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let fmt = MetadataFormat::from_config(config);
+    let data = metadata::serialize(config, &fmt);
+    fs::write(shard_dir.join("config.json"), data)?;
+    Ok(())
 }
 
 fn maybe_load_cipher(shard_dir: &Path) -> Result<Option<encryption::RepoCipher>> {
@@ -970,15 +990,6 @@ fn maybe_load_cipher(shard_dir: &Path) -> Result<Option<encryption::RepoCipher>>
     } else {
         Ok(None)
     }
-}
-
-fn save_config(
-    shard_dir: &Path,
-    config: &std::collections::BTreeMap<String, String>,
-) -> Result<()> {
-    let data = serde_json::to_string_pretty(config)?;
-    fs::write(shard_dir.join("config.json"), data)?;
-    Ok(())
 }
 
 pub fn config_get(path: &Path, key: Option<&str>) -> Result<()> {
@@ -1158,7 +1169,7 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
 
         let mut unsigned = manifest.clone();
         unsigned.signature = None;
-        let canonical = serde_json::to_vec(&unsigned)?;
+        let canonical = metadata::serialize_for_signing(&unsigned);
         let sig = signing_key.sign(&canonical);
         manifest.signature = Some(hex::encode(sig.to_bytes()));
 
@@ -1273,6 +1284,9 @@ pub fn prune(path: &Path) -> Result<()> {
         anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
+    let config = load_config(&shard_dir)?;
+    let fmt = MetadataFormat::from_config(&config);
+
     let store = Store::open(&shard_dir)?;
     let mut reachable: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1311,9 +1325,9 @@ pub fn prune(path: &Path) -> Result<()> {
     }
 
     // 3. Walk from index (staged files)
-    let index = Index::load(&shard_dir.join("index"))?;
+    let index = Index::load(&shard_dir.join("index"), &fmt)?;
     for manifest in index.files.values() {
-        let json = serde_json::to_vec(manifest)?;
+        let json = metadata::serialize(manifest, &fmt);
         let hash = blake3::hash(&json);
         let hash_hex = hash.to_hex().to_string();
         reachable.insert(hash_hex);
@@ -1511,9 +1525,10 @@ pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Re
         .unwrap_or("zstd")
         .parse()?;
     let chunker_mode = chunker::ChunkerMode::from_config(&config);
+    let fmt = MetadataFormat::from_config(&config);
     let store = Store::open(&shard_dir)?;
     let cipher = maybe_load_cipher(&shard_dir)?;
-    let mut index = Index::load(&shard_dir.join("index"))?;
+    let mut index = Index::load(&shard_dir.join("index"), &fmt)?;
     if !source_dir.is_dir() {
         anyhow::bail!("Source must be a directory");
     }
@@ -1539,7 +1554,7 @@ pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Re
             )?;
         }
     }
-    index.save(&shard_dir.join("index"))?;
+    index.save(&shard_dir.join("index"), &fmt)?;
     // Auto-commit
     if !index.files.is_empty() {
         commit(path, message, author)?;

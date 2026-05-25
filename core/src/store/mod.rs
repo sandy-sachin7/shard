@@ -3,6 +3,7 @@ pub mod sled;
 pub mod sqlite;
 
 use crate::chunker::Chunk;
+use crate::metadata;
 use anyhow::Result;
 use std::path::Path;
 
@@ -26,7 +27,7 @@ impl Store {
         let config_path = root.join("config.json");
         let backend = if config_path.exists() {
             let data = std::fs::read(&config_path)?;
-            let config: std::collections::BTreeMap<String, String> = serde_json::from_slice(&data)?;
+            let config: std::collections::BTreeMap<String, String> = metadata::deserialize(&data)?;
             config
                 .get("storage_backend")
                 .map(|s| s.as_str())

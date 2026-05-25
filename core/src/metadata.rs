@@ -26,9 +26,33 @@ impl MetadataFormat {
     }
 }
 
+fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::with_capacity(keys.len());
+            for key in keys {
+                if let Some(val) = map.get(&key) {
+                    sorted.insert(key, sort_json_keys(val.clone()));
+                }
+            }
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_json_keys).collect())
+        }
+        other => other,
+    }
+}
+
 pub fn serialize<T: Serialize>(data: &T, format: &MetadataFormat) -> Vec<u8> {
     match format {
-        MetadataFormat::Json => serde_json::to_vec(data).expect("JSON serialization failed"),
+        MetadataFormat::Json => {
+            let value = serde_json::to_value(data).expect("JSON serialization failed");
+            let sorted = sort_json_keys(value);
+            serde_json::to_vec(&sorted).expect("canonical JSON serialization failed")
+        }
         MetadataFormat::Cbor => {
             let mut buf = vec![CBOR_MARKER];
             ciborium::into_writer(data, &mut buf).expect("CBOR serialization failed");
@@ -48,7 +72,9 @@ pub fn deserialize<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
 }
 
 pub fn serialize_for_signing<T: Serialize>(data: &T) -> Vec<u8> {
-    serde_json::to_vec(data).expect("JSON serialization for signing failed")
+    let value = serde_json::to_value(data).expect("JSON serialization failed");
+    let sorted = sort_json_keys(value);
+    serde_json::to_vec(&sorted).expect("canonical JSON serialization failed")
 }
 
 #[cfg(test)]
@@ -152,5 +178,18 @@ mod tests {
         assert_eq!(bytes[0], CBOR_MARKER);
         // Must have content after marker
         assert!(bytes.len() > 1);
+    }
+
+    #[test]
+    fn test_cbor_btreemap_roundtrip() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("key1".to_string(), "value1".to_string());
+        map.insert("key2".to_string(), "value2".to_string());
+        let bytes = serialize(&map, &MetadataFormat::Cbor);
+        assert_eq!(bytes[0], CBOR_MARKER);
+        let decoded: std::collections::BTreeMap<String, String> = deserialize(&bytes).unwrap();
+        assert_eq!(decoded["key1"], "value1");
+        assert_eq!(decoded["key2"], "value2");
+        assert_eq!(decoded.len(), 2);
     }
 }
