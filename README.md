@@ -90,6 +90,11 @@ For a 10GB Llama checkpoint with 500MB changed:
 - HF CLI: uploads 10GB
 - Shard: uploads ~500MB via CDC + ~40MB for commit metadata
 
+- **Chunking throughput**: ~1 GB/s (fixed), ~500 MB/s (Rabin CDC)
+- **Compression**: Zstd level 3 — ~500 MB/s compress, ~2 GB/s decompress
+- **Parallel pulls**: concurrent chunk requests — saturates available bandwidth
+- **Memory**: bounded by configurable concurrency cap, not artifact size
+
 ```bash
 # Install Shard and track a model
 shard init
@@ -99,6 +104,25 @@ shard commit -m "base model"
 # After training epoch 50 (only ~500MB changed)
 shard add model.pt
 shard commit -m "epoch 50"  # Only syncs the changed chunks!
+```
+
+---
+
+## Python API
+
+Shard includes native Python bindings (`shard-py`) via PyO3, making it seamless to version models directly from your training scripts or Jupyter notebooks.
+
+```python
+import shard
+
+# Initialize repo and track model
+shard.init(repo_path=".", private=False)
+shard.add(repo_path=".", file_path="model.pt")
+shard.commit(repo_path=".", message="base model", author="Alice")
+
+# Later in your training loop:
+shard.add(repo_path=".", file_path="model.pt")
+shard.commit(repo_path=".", message="epoch 50", author="Alice")
 ```
 
 ---
@@ -265,16 +289,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 | **Signing** | GPG (optional) | ed25519 (built-in, every commit) |
 | **Transport** | SSH/HTTPS | libp2p TCP + Noise + Yamux |
 
----
 
-## Performance
-
-Shard is designed for large artifacts (100 MB – 100 GB). Key performance characteristics:
-
-- **Chunking throughput**: ~1 GB/s (fixed), ~500 MB/s (Rabin CDC)
-- **Compression**: Zstd level 3 — ~500 MB/s compress, ~2 GB/s decompress
-- **Parallel pulls**: concurrent chunk requests — saturates available bandwidth
-- **Memory**: bounded by configurable concurrency cap, not artifact size
 
 ---
 
