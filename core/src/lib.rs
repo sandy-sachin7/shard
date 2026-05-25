@@ -127,6 +127,36 @@ fn relative_path(repo_root: &Path, file_path: &Path) -> String {
         })
 }
 
+fn detect_content_type(file_path: &Path) -> Option<String> {
+    let ext = file_path.extension()?.to_str()?.to_lowercase();
+    let mime = match ext.as_str() {
+        "txt" => "text/plain",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "pdf" => "application/pdf",
+        "yaml" | "yml" => "application/x-yaml",
+        "md" => "text/markdown",
+        "html" | "htm" => "text/html",
+        "py" => "text/x-python",
+        "rs" => "text/x-rust",
+        "ts" => "text/x-typescript",
+        "js" => "application/javascript",
+        "wasm" => "application/wasm",
+        "toml" => "application/toml",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        "bin" => "application/octet-stream",
+        "pt" | "pth" | "ckpt" | "safetensors" => "application/x-model",
+        _ => return None,
+    };
+    Some(mime.to_string())
+}
+
 fn add_file(
     repo_root: &Path,
     file_path: &Path,
@@ -169,9 +199,13 @@ fn add_file(
     let manifest = FileManifest {
         name: name.clone(),
         size: total_size,
-        chunks: chunk_hashes,
-        content_type: None,
+        chunks: chunk_hashes.clone(),
+        content_type: detect_content_type(file_path),
         compression: compression.as_str().to_string(),
+        merkle_root: Some(FileManifest::merkle_root(&chunk_hashes)),
+        created_by: None,
+        created_at: None,
+        signature: None,
     };
 
     index.files.insert(name.clone(), manifest);
@@ -277,11 +311,23 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
         index_backup,
     })?;
 
-    // 1. Store manifests
+    // 1. Store manifests (signed)
     let config = load_config(&shard_dir)?;
     let fmt = MetadataFormat::from_config(&config);
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let keys = KeyPair::load(&shard_dir.join("keys"))?;
+    let signing_key = keys.signing_key;
     let mut manifest_ids = Vec::new();
-    for manifest in index.files.values() {
+    for manifest in index.files.values_mut() {
+        manifest.created_by = Some(author.to_string());
+        manifest.created_at = Some(timestamp);
+
+        let mut unsigned = manifest.clone();
+        unsigned.signature = None;
+        let canonical = serde_json::to_vec(&unsigned)?;
+        let sig = signing_key.sign(&canonical);
+        manifest.signature = Some(hex::encode(sig.to_bytes()));
+
         let encoded = metadata::serialize(manifest, &fmt);
         let hash = blake3::hash(&encoded);
         let chunk = crate::chunker::Chunk {
@@ -302,8 +348,6 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     }
 
     // 3. Create commit
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let keys = KeyPair::load(&shard_dir.join("keys"))?;
     let public_key_hex = hex::encode(keys.verifying_key.to_bytes());
     let key_id = keychain::get_current_key_id(&shard_dir.join("keys")).ok();
     let mut commit = Commit {
@@ -319,7 +363,6 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     };
 
     // 4. Sign — always JSON for deterministic signature
-    let signing_key = keys.signing_key;
     let json_unsigned = metadata::serialize_for_signing(&commit);
     let signature = signing_key.sign(&json_unsigned);
     commit.signature = Some(hex::encode(signature.to_bytes()));
@@ -415,12 +458,41 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         }
 
         let manifest: FileManifest = metadata::deserialize(&manifest_data)?;
+
+        // Verify manifest signature (defense-in-depth; commit signature already covers manifest_id)
+        if let Some(sig_hex) = &manifest.signature {
+            let pk_bytes = if let Some(pk_hex) = &commit.public_key {
+                hex::decode(pk_hex)?
+            } else {
+                let pub_key_path = shard_dir.join("keys/public.key");
+                fs::read(pub_key_path)?
+            };
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(pk_bytes.as_slice().try_into()?)?;
+            let mut unsigned = manifest.clone();
+            unsigned.signature = None;
+            let canonical = serde_json::to_vec(&unsigned)?;
+            let sig_bytes = hex::decode(sig_hex)?;
+            let sig = ed25519_dalek::Signature::from_bytes(sig_bytes.as_slice().try_into()?);
+            vk.verify(&canonical, &sig)?;
+            if !json {
+                info!("  Manifest signature verified for: {}", manifest.name);
+            }
+        }
+
         let compression = manifest.compression.parse::<Compression>()?;
         if !json {
             info!(
                 "Verifying file: {} (compression: {})",
                 manifest.name, manifest.compression
             );
+        }
+
+        // Verify merkle_root if present
+        if let Some(ref mr) = manifest.merkle_root {
+            let computed = FileManifest::merkle_root(&manifest.chunks);
+            if mr != &computed {
+                anyhow::bail!("merkle root mismatch for '{}': manifest says {} but computed {}", manifest.name, mr, computed);
+            }
         }
 
         for chunk_id in &manifest.chunks {
@@ -1065,17 +1137,31 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
         merged_manifests.insert(manifest.name.clone(), (manifest.name, manifest.chunks));
     }
 
-    // Store merged manifests
+    // Store merged manifests (signed)
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let keys = KeyPair::load(&shard_dir.join("keys"))?;
+    let signing_key = keys.signing_key;
     let mut merged_manifest_ids = Vec::new();
     for (name, chunks) in merged_manifests.values() {
         let compression = Compression::None;
-        let manifest = FileManifest {
+        let mut manifest = FileManifest {
             name: name.clone(),
             size: 0,
             chunks: chunks.clone(),
             content_type: None,
             compression: compression.as_str().to_string(),
+            merkle_root: Some(FileManifest::merkle_root(chunks)),
+            created_by: Some(author.to_string()),
+            created_at: Some(timestamp),
+            signature: None,
         };
+
+        let mut unsigned = manifest.clone();
+        unsigned.signature = None;
+        let canonical = serde_json::to_vec(&unsigned)?;
+        let sig = signing_key.sign(&canonical);
+        manifest.signature = Some(hex::encode(sig.to_bytes()));
+
         let encoded = metadata::serialize(&manifest, &fmt);
         let hash = blake3::hash(&encoded);
         store.put_chunk(&crate::chunker::Chunk {
@@ -1088,8 +1174,6 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
     merged_manifest_ids.sort();
 
     // Create merge commit
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let keys = KeyPair::load(&shard_dir.join("keys"))?;
     let public_key_hex = hex::encode(keys.verifying_key.to_bytes());
     let key_id = keychain::get_current_key_id(&shard_dir.join("keys")).ok();
     let parents = vec![current_id.clone(), source_id.clone()];
@@ -1105,7 +1189,6 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
         key_id,
     };
 
-    let signing_key = keys.signing_key;
     let json_unsigned = metadata::serialize_for_signing(&commit);
     let signature = signing_key.sign(&json_unsigned);
     commit.signature = Some(hex::encode(signature.to_bytes()));
