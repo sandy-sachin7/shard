@@ -50,6 +50,11 @@ enum Commands {
         #[command(subcommand)]
         command: PeerCommands,
     },
+    /// Manage signing keys (rotate, list, verify)
+    Key {
+        #[command(subcommand)]
+        command: KeyCommands,
+    },
     /// Share the repository with the network
     Share,
     /// Pull a commit from a peer
@@ -156,6 +161,22 @@ enum ConfigCommands {
 }
 
 #[derive(Subcommand)]
+enum KeyCommands {
+    /// Rotate the signing key (archive old, generate new, sign rotation)
+    Rotate,
+    /// List all keys in the keychain
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify the integrity of the keychain
+    Verify {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum PeerCommands {
     /// Add a peer
     Add {
@@ -219,6 +240,20 @@ async fn main() -> Result<()> {
             BranchCommands::List => {
                 let current_dir = env::current_dir()?;
                 shard_core::branch_list(&current_dir)?;
+            }
+        },
+        Commands::Key { command } => match command {
+            KeyCommands::Rotate => {
+                let current_dir = env::current_dir()?;
+                shard_core::key_rotate(&current_dir)?;
+            }
+            KeyCommands::List { json } => {
+                let current_dir = env::current_dir()?;
+                shard_core::key_list(&current_dir, *json)?;
+            }
+            KeyCommands::Verify { json } => {
+                let current_dir = env::current_dir()?;
+                shard_core::key_verify(&current_dir, *json)?;
             }
         },
         Commands::Peer { command } => match command {

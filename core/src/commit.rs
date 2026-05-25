@@ -10,4 +10,6 @@ pub struct Commit {
     pub timestamp: u64,
     pub public_key: Option<String>,
     pub signature: Option<String>,
+    #[serde(default)]
+    pub key_id: Option<String>,
 }

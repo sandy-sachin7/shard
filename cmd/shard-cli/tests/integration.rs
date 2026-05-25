@@ -1028,3 +1028,142 @@ fn test_private_add_commit_verify_checkout_roundtrip() {
         }
     }
 }
+
+#[test]
+fn test_key_rotate_verify_keychain() {
+    let dir = repo_dir("key-rotate");
+    let out = shard(&["init"], &dir).output().unwrap();
+    assert!(out.status.success(), "init failed");
+
+    // Initial key list should show one key (the genesis key)
+    let out = shard(&["key", "list"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Current key:"));
+    assert!(stdout.contains("Key history:"));
+    assert!(stdout.contains("(active)"));
+
+    // Verify keychain (should pass with genesis key only)
+    let out = shard(&["key", "verify"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Keychain verification successful"));
+
+    // Rotate the key
+    let out = shard(&["key", "rotate"], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "key rotate failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Verify keychain (should pass with rotation)
+    let out = shard(&["key", "verify"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Keychain verification successful"));
+
+    // Key list should now show 2 keys
+    let out = shard(&["key", "list"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().filter(|l| l.contains("previous:")).collect();
+    assert!(!lines.is_empty(), "should show previous key reference");
+}
+
+#[test]
+fn test_key_rotate_add_commit_verify_roundtrip() {
+    let dir = repo_dir("key-roundtrip");
+    let out = shard(&["init"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    // Add a file and commit with genesis key
+    fs::write(dir.join("model.bin"), b"some model data").unwrap();
+    let out = shard(&["add", "model.bin"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let out = shard(
+        &["commit", "-m", "genesis-commit", "--author", "Test"],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success());
+    let genesis_cid = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .expect("no commit id")
+        .to_string();
+
+    // Rotate the signing key
+    let out = shard(&["key", "rotate"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    // Add another file and commit with rotated key
+    fs::write(dir.join("model-v2.bin"), b"more model data").unwrap();
+    let out = shard(&["add", "model-v2.bin"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let out = shard(
+        &["commit", "-m", "rotated-commit", "--author", "Test"],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success());
+
+    // Both commits should verify (keychain validates both)
+    let out = shard(&["verify", &genesis_cid], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "genesis commit verify failed after rotation: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Verification successful"));
+
+    let out = shard(&["verify", &genesis_cid, "--json"], &dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "genesis verify --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("verified"));
+}
+
+#[test]
+fn test_key_verify_tampered_rotation_fails() {
+    let dir = repo_dir("key-tamper");
+    let out = shard(&["init"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    let out = shard(&["key", "rotate"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    // Tamper with rotation signature by modifying the file
+    let rot_dir = dir.join(".shard/keys/rotations");
+    for entry in fs::read_dir(&rot_dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            let data = fs::read(entry.path()).unwrap();
+            if let Ok(mut obj) = serde_json::from_slice::<serde_json::Value>(&data) {
+                if obj.get("signature_hex").is_some() {
+                    let tampered = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+                    obj["signature_hex"] = serde_json::Value::String(tampered.to_string());
+                    fs::write(entry.path(), serde_json::to_string_pretty(&obj).unwrap()).unwrap();
+                }
+            }
+        }
+    }
+
+    // Verify should fail
+    let out = shard(&["key", "verify"], &dir).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "tampered keychain should fail verify"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("Keychain verification failed"));
+}

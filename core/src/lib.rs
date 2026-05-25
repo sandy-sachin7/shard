@@ -4,6 +4,7 @@ pub mod commit;
 pub mod compression;
 pub mod encryption;
 pub mod index;
+pub mod keychain;
 pub mod manifest;
 pub mod store;
 pub mod wal;
@@ -47,6 +48,7 @@ pub fn init(
 
     let keys = KeyPair::generate();
     keys.save(&shard_dir.join("keys"))?;
+    keychain::init_keychain(&shard_dir.join("keys"))?;
 
     // Generate a deterministic repo identity from the public key
     // (same key = same repo_id, so clones share the gossipsub topic)
@@ -293,6 +295,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let keys = KeyPair::load(&shard_dir.join("keys"))?;
     let public_key_hex = hex::encode(keys.verifying_key.to_bytes());
+    let key_id = keychain::get_current_key_id(&shard_dir.join("keys")).ok();
     let mut commit = Commit {
         commit_id: String::new(),
         parents,
@@ -302,6 +305,7 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
         timestamp,
         public_key: Some(public_key_hex),
         signature: None,
+        key_id,
     };
 
     // 4. Sign
@@ -357,6 +361,15 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
 
     let mut sig_verified = false;
     let mut files_checked = 0u64;
+
+    // Verify the signing key was valid at commit time
+    if let Some(kid) = &commit.key_id {
+        if let Err(e) = keychain::key_was_valid_at(&shard_dir.join("keys"), kid, commit.timestamp) {
+            anyhow::bail!("Keychain verification failed: {}", e);
+        } else if !json {
+            info!("Keychain: key {} was active at commit time.", kid);
+        }
+    }
 
     if let Some(sig_hex) = &commit.signature {
         let verifying_key = if let Some(pk_hex) = &commit.public_key {
@@ -903,6 +916,7 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let keys = KeyPair::load(&shard_dir.join("keys"))?;
     let public_key_hex = hex::encode(keys.verifying_key.to_bytes());
+    let key_id = keychain::get_current_key_id(&shard_dir.join("keys")).ok();
     let parents = vec![current_id.clone(), source_id.clone()];
     let mut commit = Commit {
         commit_id: String::new(),
@@ -913,6 +927,7 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
         timestamp,
         public_key: Some(public_key_hex),
         signature: None,
+        key_id,
     };
 
     let signing_key = keys.signing_key;
@@ -1839,5 +1854,91 @@ pub async fn push(path: &Path, peer: &str) -> Result<()> {
     }
 
     info!("Push complete ({} objects).", objects.len());
+    Ok(())
+}
+
+/// Rotate the signing key: generates a new ed25519 keypair, archives the old
+/// one, and persists a signed rotation record.
+pub fn key_rotate(path: &Path) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository (run `shard init` first)");
+    }
+    let keys_dir = shard_dir.join("keys");
+    let rotation = keychain::rotate_signing_key(&keys_dir)?;
+    info!(
+        "Key rotated: {} -> {}",
+        rotation.old_key_id, rotation.new_key_id
+    );
+    info!("Rotation record: {}", rotation.rotation_id);
+    Ok(())
+}
+
+/// List all keys in the keychain with their validity info.
+pub fn key_list(path: &Path, json: bool) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository (run `shard init` first)");
+    }
+    let keys_dir = shard_dir.join("keys");
+    let records = keychain::load_records(&keys_dir)?;
+    let current_id = keychain::get_current_key_id(&keys_dir)?;
+
+    if json {
+        info!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "current": current_id,
+                "records": &records,
+            }))?
+        );
+    } else {
+        info!("Current key: {}", current_id);
+        info!("Key history:");
+        for record in &records {
+            let marker = if record.key_id == current_id {
+                " (active)"
+            } else {
+                ""
+            };
+            info!(
+                "  {}  created_at={}{}",
+                record.key_id, record.created_at, marker
+            );
+            if let Some(prev) = &record.previous_key_id {
+                info!("    previous: {}", prev);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verify the integrity of the keychain: check every rotation's signature.
+pub fn key_verify(path: &Path, json: bool) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository (run `shard init` first)");
+    }
+    let keys_dir = shard_dir.join("keys");
+    let errors = keychain::verify_keychain(&keys_dir)?;
+
+    if json {
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "verified": errors.is_empty(),
+                "errors": errors,
+            }))?
+        );
+    } else {
+        if errors.is_empty() {
+            info!("Keychain verification successful.");
+        } else {
+            for err in &errors {
+                error!("Keychain error: {}", err);
+            }
+            anyhow::bail!("Keychain verification failed ({} errors).", errors.len());
+        }
+    }
     Ok(())
 }
