@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.0 (unreleased)
+## v1.0.2
 
 ### Enterprise hardening
 
@@ -33,7 +33,7 @@
 - **Write-ahead log** (#4): crash-safe commits via JSON-lines WAL with HEAD+index backups, `shard recover` command
 - **Directory recursion** (#2): recursive `walkdir`-based file discovery, auto-skips hidden files
 
-## v0.2.0 (unreleased)
+## v0.2.0
 
 - **Open-source infrastructure**: LICENSE, CODE_OF_CONDUCT, CONTRIBUTING, SECURITY
 - **Cross-platform releases**: GitHub Actions release workflow (Linux, macOS, Windows)
