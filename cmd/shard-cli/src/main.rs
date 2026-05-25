@@ -12,7 +12,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new Shard repository
     Init {
         #[arg(long)]
         private: bool,
@@ -24,126 +23,133 @@ enum Commands {
         chunker: String,
         #[arg(long)]
         chunk_size: Option<u64>,
+        #[arg(long)]
+        json: bool,
     },
-    /// Add a file to the staging area
-    Add { path: PathBuf },
-    /// Record changes to the repository
+    Add {
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     Commit {
         #[arg(short, long)]
         message: String,
         #[arg(long, default_value = "User <user@example.com>")]
         author: String,
+        #[arg(long)]
+        json: bool,
     },
-    /// Verify the integrity of a commit
     Verify {
         commit_id: String,
         #[arg(long)]
         json: bool,
     },
-    /// Manage branches
     Branch {
         #[command(subcommand)]
         command: BranchCommands,
     },
-    /// Show differences between commits
     Diff {
-        /// First commit to compare (required)
         commit_a: String,
-        /// Second commit to compare (defaults to HEAD if omitted)
         commit_b: Option<String>,
         #[arg(long)]
         json: bool,
     },
-    /// Manage peers
     Peer {
         #[command(subcommand)]
         command: PeerCommands,
     },
-    /// Manage signing keys (rotate, list, verify)
     Key {
         #[command(subcommand)]
         command: KeyCommands,
     },
-    /// Share the repository with the network
-    Share,
-    /// Pull a commit from a peer
-    Pull { peer: String, commit_id: String },
-    /// Push all reachable objects to a peer
-    Push { peer: String },
-    /// Show commit log
+    Share {
+        #[arg(long)]
+        json: bool,
+    },
+    Pull {
+        peer: String,
+        commit_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Push {
+        peer: String,
+        #[arg(long)]
+        json: bool,
+    },
     Log {
         #[arg(long)]
         json: bool,
     },
-    /// Merge a branch into the current branch
     Merge {
         branch: String,
         #[arg(short, long)]
         message: String,
         #[arg(long, default_value = "User <user@example.com>")]
         author: String,
+        #[arg(long)]
+        json: bool,
     },
-    /// Checkout a branch or commit
     Checkout {
         target: String,
         #[arg(long)]
         json: bool,
     },
-    /// Show working tree status
     Status {
         #[arg(long)]
         json: bool,
     },
-    /// Get or set configuration values
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Manage tags
     Tag {
         #[command(subcommand)]
         command: TagCommands,
     },
-    /// Prune unreachable objects
-    Prune,
-    /// Recover from a crash using the write-ahead log
-    Recover,
-    /// Sync with peers via pubsub announcements
-    Sync,
-    /// Create a backup archive of the .shard directory
-    Backup {
-        /// Output path for the backup tar.gz file
-        output: PathBuf,
+    Prune {
+        #[arg(long)]
+        json: bool,
     },
-    /// Export commit files to a directory
-    Export {
-        commit_id: String,
-        /// Output directory for exported files
+    Recover {
+        #[arg(long)]
+        json: bool,
+    },
+    Sync {
+        #[arg(long)]
+        json: bool,
+    },
+    Backup {
         output: PathBuf,
         #[arg(long)]
         json: bool,
     },
-    /// Import files from a directory as a new commit
+    Export {
+        commit_id: String,
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     Import {
-        /// Source directory to import from
         path: PathBuf,
         #[arg(short, long)]
         message: String,
         #[arg(long, default_value = "User <user@example.com>")]
         author: String,
+        #[arg(long)]
+        json: bool,
     },
-    /// Restore a repository from a backup archive
     Restore {
-        /// Path to the backup tar.gz file
         backup: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
-    /// Start a circuit relay v2 server for NAT traversal
     Relay {
-        /// Listen address (default: /ip4/0.0.0.0/tcp/0)
         #[arg(long, default_value = "/ip4/0.0.0.0/tcp/0")]
         listen: String,
+        #[arg(long)]
+        json: bool,
     },
-    /// Manage incomplete transfers
     Transfer {
         #[command(subcommand)]
         command: TransferCommands,
@@ -152,44 +158,33 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum BranchCommands {
-    /// Create a new branch
     Create {
         name: String,
-        /// Commit id to point to (defaults to HEAD)
         commit_id: Option<String>,
     },
-    /// Delete a branch
     Delete { name: String },
-    /// List all branches
     List,
 }
 
 #[derive(Subcommand)]
 enum TagCommands {
-    /// Add a tag pointing to a commit
     Add { name: String, commit_id: String },
-    /// List all tags
     List,
 }
 
 #[derive(Subcommand)]
 enum ConfigCommands {
-    /// Get a config value (or all if no key given)
     Get { key: Option<String> },
-    /// Set a config value
     Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
 enum KeyCommands {
-    /// Rotate the signing key (archive old, generate new, sign rotation)
     Rotate,
-    /// List all keys in the keychain
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Verify the integrity of the keychain
     Verify {
         #[arg(long)]
         json: bool,
@@ -198,23 +193,21 @@ enum KeyCommands {
 
 #[derive(Subcommand)]
 enum TransferCommands {
-    /// List incomplete transfers
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Remove an incomplete transfer tracking directory
     Remove { commit_id: String },
 }
 
 #[derive(Subcommand)]
 enum PeerCommands {
-    /// Add a peer
     Add {
         multiaddr: String,
-        /// ed25519 public key (64 hex chars) to authorize
         #[arg(long)]
         public_key: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -236,6 +229,7 @@ async fn main() -> Result<()> {
             compression,
             chunker,
             chunk_size,
+            json,
         } => {
             let current_dir = env::current_dir()?;
             shard_core::init(
@@ -245,15 +239,20 @@ async fn main() -> Result<()> {
                 chunker,
                 *chunk_size,
                 *private,
+                *json,
             )?;
         }
-        Commands::Add { path } => {
+        Commands::Add { path, json } => {
             let current_dir = env::current_dir()?;
-            shard_core::add(&current_dir, path)?;
+            shard_core::add(&current_dir, path, *json)?;
         }
-        Commands::Commit { message, author } => {
+        Commands::Commit {
+            message,
+            author,
+            json,
+        } => {
             let current_dir = env::current_dir()?;
-            shard_core::commit(&current_dir, message, author)?;
+            shard_core::commit(&current_dir, message, author, *json)?;
         }
         Commands::Verify { commit_id, json } => {
             let current_dir = env::current_dir()?;
@@ -299,26 +298,27 @@ async fn main() -> Result<()> {
             PeerCommands::Add {
                 multiaddr,
                 public_key,
+                json,
             } => {
                 let current_dir = env::current_dir()?;
-                shard_core::peer_add(&current_dir, multiaddr)?;
+                shard_core::peer_add(&current_dir, multiaddr, *json)?;
                 if let Some(pk) = public_key {
                     let shard_dir = current_dir.join(".shard");
                     shard_core::add_authorized_key(&shard_dir, pk)?;
                 }
             }
         },
-        Commands::Share => {
+        Commands::Share { json } => {
             let current_dir = env::current_dir()?;
-            shard_core::share(&current_dir).await?;
+            shard_core::share(&current_dir, *json).await?;
         }
-        Commands::Pull { peer, commit_id } => {
+        Commands::Pull { peer, commit_id, json } => {
             let current_dir = env::current_dir()?;
-            shard_core::pull(&current_dir, peer, commit_id).await?;
+            shard_core::pull(&current_dir, peer, commit_id, *json).await?;
         }
-        Commands::Push { peer } => {
+        Commands::Push { peer, json } => {
             let current_dir = env::current_dir()?;
-            shard_core::push(&current_dir, peer).await?;
+            shard_core::push(&current_dir, peer, *json).await?;
         }
         Commands::Log { json } => {
             let current_dir = env::current_dir()?;
@@ -328,9 +328,10 @@ async fn main() -> Result<()> {
             branch,
             message,
             author,
+            json,
         } => {
             let current_dir = env::current_dir()?;
-            shard_core::merge(&current_dir, branch, message, author)?;
+            shard_core::merge(&current_dir, branch, message, author, *json)?;
         }
         Commands::Checkout { target, json } => {
             let current_dir = env::current_dir()?;
@@ -360,21 +361,21 @@ async fn main() -> Result<()> {
                 shard_core::config_set(&current_dir, key, value)?;
             }
         },
-        Commands::Prune => {
+        Commands::Prune { json } => {
             let current_dir = env::current_dir()?;
-            shard_core::prune(&current_dir)?;
+            shard_core::prune(&current_dir, *json)?;
         }
-        Commands::Recover => {
+        Commands::Recover { json } => {
             let current_dir = env::current_dir()?;
-            shard_core::recover(&current_dir)?;
+            shard_core::recover(&current_dir, *json)?;
         }
-        Commands::Sync => {
+        Commands::Sync { json } => {
             let current_dir = env::current_dir()?;
-            shard_core::sync(&current_dir).await?;
+            shard_core::sync(&current_dir, *json).await?;
         }
-        Commands::Backup { output } => {
+        Commands::Backup { output, json } => {
             let current_dir = env::current_dir()?;
-            shard_core::backup(&current_dir, output)?;
+            shard_core::backup(&current_dir, output, *json)?;
         }
         Commands::Export {
             commit_id,
@@ -388,16 +389,17 @@ async fn main() -> Result<()> {
             path,
             message,
             author,
+            json,
         } => {
             let current_dir = env::current_dir()?;
-            shard_core::import(&current_dir, path, message, author)?;
+            shard_core::import(&current_dir, path, message, author, *json)?;
         }
-        Commands::Restore { backup } => {
+        Commands::Restore { backup, json } => {
             let current_dir = env::current_dir()?;
-            shard_core::restore(&current_dir, backup)?;
+            shard_core::restore(&current_dir, backup, *json)?;
         }
-        Commands::Relay { listen } => {
-            shard_core::relay(listen).await?;
+        Commands::Relay { listen, json } => {
+            shard_core::relay(listen, *json).await?;
         }
         Commands::Transfer { command } => match command {
             TransferCommands::List { json } => {

@@ -38,6 +38,7 @@ pub fn init(
     chunker_mode: &str,
     chunk_size: Option<u64>,
     is_private: bool,
+    json: bool,
 ) -> Result<()> {
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
@@ -101,13 +102,26 @@ pub fn init(
             config.get("chunk_size").unwrap_or(&"4 MiB".to_string())
         )
     };
-    info!(
-        "Initialized empty Shard repository in {} with {} storage (compression: {}, chunking: {})",
-        shard_dir.display(),
-        backend,
-        compression_algo,
-        chunker_desc,
-    );
+    if json {
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "path": shard_dir.display().to_string(),
+                "backend": backend,
+                "compression": compression_algo,
+                "chunker": chunker_desc,
+                "private": is_private,
+            }))?
+        );
+    } else {
+        info!(
+            "Initialized empty Shard repository in {} with {} storage (compression: {}, chunking: {})",
+            shard_dir.display(),
+            backend,
+            compression_algo,
+            chunker_desc,
+        );
+    }
     Ok(())
 }
 
@@ -158,6 +172,7 @@ fn detect_content_type(file_path: &Path) -> Option<String> {
     Some(mime.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_file(
     repo_root: &Path,
     file_path: &Path,
@@ -166,6 +181,7 @@ fn add_file(
     compression: &Compression,
     chunker_mode: &chunker::ChunkerMode,
     cipher: Option<&encryption::RepoCipher>,
+    _json: bool,
 ) -> Result<()> {
     let file = fs::File::open(file_path)?;
     let mut chunker = match chunker_mode {
@@ -210,21 +226,27 @@ fn add_file(
     };
 
     index.files.insert(name.clone(), manifest);
-    info!("Added {} ({})", name, total_size);
+    if !_json {
+        info!("Added {} ({})", name, total_size);
+    }
     Ok(())
 }
 
-pub fn recover(path: &Path) -> Result<()> {
+pub fn recover(path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     wal::recover(&shard_dir)?;
-    info!("Recovery complete.");
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({"status": "recovery complete"}))?);
+    } else {
+        info!("Recovery complete.");
+    }
     Ok(())
 }
 
-pub fn add(path: &Path, file_path: &Path) -> Result<()> {
+pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -267,6 +289,7 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
                     &compression,
                     &chunker_mode,
                     cipher.as_ref(),
+                    json,
                 )?;
             }
         }
@@ -279,14 +302,18 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
             &compression,
             &chunker_mode,
             cipher.as_ref(),
+            json,
         )?;
     }
 
     index.save(&shard_dir.join("index"), &fmt)?;
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({"status": "added"}))?);
+    }
     Ok(())
 }
 
-pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
+pub fn commit(path: &Path, message: &str, author: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -405,7 +432,14 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     wal.append(&wal::WalEntry::CommitEnd)?;
     wal.truncate()?;
 
-    info!("Committed {} ({})", commit_id, message);
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "commit_id": commit_id,
+            "message": message,
+        }))?);
+    } else {
+        info!("Committed {} ({})", commit_id, message);
+    }
     Ok(())
 }
 
@@ -1143,7 +1177,7 @@ pub fn branch_list(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<()> {
+pub fn merge(path: &Path, branch: &str, message: &str, author: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1267,7 +1301,14 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
         branch::set_head_commit(&shard_dir, &merge_commit_id)?;
     }
 
-    info!("Merge commit {} ({})", merge_commit_id, message);
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "commit_id": merge_commit_id,
+            "message": message,
+        }))?);
+    } else {
+        info!("Merge commit {} ({})", merge_commit_id, message);
+    }
     Ok(())
 }
 
@@ -1323,7 +1364,7 @@ fn collect_reachable(
     Ok(())
 }
 
-pub fn prune(path: &Path) -> Result<()> {
+pub fn prune(path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1394,11 +1435,18 @@ pub fn prune(path: &Path) -> Result<()> {
         }
     }
 
-    info!("Pruned {} objects. {} objects remain.", pruned, kept);
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "pruned": pruned,
+            "remaining": kept,
+        }))?);
+    } else {
+        info!("Pruned {} objects. {} objects remain.", pruned, kept);
+    }
     Ok(())
 }
 
-pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
+pub fn peer_add(path: &Path, multiaddr: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1417,10 +1465,21 @@ pub fn peer_add(path: &Path, multiaddr: &str) -> Result<()> {
         Vec::new()
     };
 
-    if !peers.contains(&multiaddr.to_string()) {
+    let added = if !peers.contains(&multiaddr.to_string()) {
         peers.push(multiaddr.to_string());
         let data = serde_json::to_vec(&peers)?;
         fs::write(peers_path, data)?;
+        true
+    } else {
+        false
+    };
+
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "multiaddr": multiaddr,
+            "added": added,
+        }))?);
+    } else if added {
         info!("Added peer: {}", multiaddr);
     } else {
         info!("Peer already exists: {}", multiaddr);
@@ -1492,7 +1551,7 @@ pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> 
     Ok(())
 }
 
-pub fn backup(path: &Path, output: &Path) -> Result<()> {
+pub fn backup(path: &Path, output: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1502,7 +1561,13 @@ pub fn backup(path: &Path, output: &Path) -> Result<()> {
     let mut archive = tar::Builder::new(encoder);
     archive.append_dir_all(".", &shard_dir)?;
     archive.finish()?;
-    info!("Backup created: {}", output.display());
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "path": output.to_string_lossy(),
+        }))?);
+    } else {
+        info!("Backup created: {}", output.display());
+    }
     Ok(())
 }
 
@@ -1557,7 +1622,7 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
     Ok(())
 }
 
-pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Result<()> {
+pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1596,20 +1661,23 @@ pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Re
                 &compression,
                 &chunker_mode,
                 cipher.as_ref(),
+                json,
             )?;
         }
     }
     index.save(&shard_dir.join("index"), &fmt)?;
     // Auto-commit
     if !index.files.is_empty() {
-        commit(path, message, author)?;
+        commit(path, message, author, json)?;
+    } else if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({"status": "no files found"}))?);
     } else {
         info!("No files found to import.");
     }
     Ok(())
 }
 
-pub fn restore(path: &Path, backup_file: &Path) -> Result<()> {
+pub fn restore(path: &Path, backup_file: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
         anyhow::bail!(
@@ -1624,7 +1692,13 @@ pub fn restore(path: &Path, backup_file: &Path) -> Result<()> {
     if !path.join(".shard").exists() {
         anyhow::bail!("Backup does not contain a valid .shard directory");
     }
-    info!("Restored from {}", backup_file.display());
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "backup": backup_file.to_string_lossy(),
+        }))?);
+    } else {
+        info!("Restored from {}", backup_file.display());
+    }
     Ok(())
 }
 
@@ -1686,7 +1760,7 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
     }
 }
 
-pub async fn share(path: &Path) -> Result<()> {
+pub async fn share(path: &Path, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1702,16 +1776,21 @@ pub async fn share(path: &Path) -> Result<()> {
         }
     }
 
-    node.listen("/ip4/0.0.0.0/tcp/0").await?; // Listen on random port (TCP)
+    node.listen("/ip4/0.0.0.0/tcp/0").await?;
 
-    // In a real implementation, we would load the repo and serve requests.
-    // For now, we just start the node to prove connectivity.
-    info!("Sharing repository...");
     let store = Store::open(&shard_dir)?;
     let provider = RepoProvider {
         store,
         shard_dir: shard_dir.clone(),
     };
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "status": "sharing",
+            "peer_id": node.local_peer_id().to_string(),
+        }))?);
+    } else {
+        info!("Sharing repository...");
+    }
     node.run(provider).await;
 
     Ok(())
@@ -1719,12 +1798,20 @@ pub async fn share(path: &Path) -> Result<()> {
 
 /// Start a circuit relay v2 server for NAT traversal.
 /// Listens on the given address and forwards traffic between peers.
-pub async fn relay(listen_addr: &str) -> Result<()> {
+pub async fn relay(listen_addr: &str, json: bool) -> Result<()> {
     let mut node = shard_net::p2p::Node::new().await?;
     node.listen(listen_addr).await?;
-    info!("Relay server active on {}", listen_addr);
-    info!("Peer ID: {}", node.local_peer_id());
-    info!("Ready to accept circuit relay v2 reservations");
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "status": "relay active",
+            "listen": listen_addr,
+            "peer_id": node.local_peer_id().to_string(),
+        }))?);
+    } else {
+        info!("Relay server active on {}", listen_addr);
+        info!("Peer ID: {}", node.local_peer_id());
+        info!("Ready to accept circuit relay v2 reservations");
+    }
     node.run(EmptyProvider).await;
     Ok(())
 }
@@ -1749,7 +1836,7 @@ impl shard_net::p2p::ShardContentProvider for EmptyProvider {
     }
 }
 
-pub async fn sync(path: &Path) -> Result<()> {
+pub async fn sync(path: &Path, _json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1780,14 +1867,20 @@ pub async fn sync(path: &Path) -> Result<()> {
     if let Some(ref head) = head_commit {
         let msg = format!("announce:{}", head);
         match node.publish(&topic, msg.as_bytes()) {
-            Ok(_) => info!("Announced commit {} on sync topic", head),
+            Ok(_) => {
+                if !_json {
+                    info!("Announced commit {} on sync topic", head)
+                }
+            }
             Err(e) => error!("Initial announce (will retry): {}", e),
         }
-    } else {
+    } else if !_json {
         info!("No commits to announce");
     }
 
-    info!("Syncing on topic with peer id: {}", node.local_peer_id());
+    if !_json {
+        info!("Syncing on topic with peer id: {}", node.local_peer_id());
+    }
     let _ = std::io::stdout().flush();
 
     let store = Store::open(&shard_dir)?;
@@ -1881,7 +1974,7 @@ pub async fn sync(path: &Path) -> Result<()> {
                                         let multiaddr_str = format!("{}/p2p/{}", addr, peer);
                                         let path_clone = path_buf.clone();
                                         tokio::spawn(async move {
-                                            match pull(&path_clone, &multiaddr_str, &commit_id_owned).await {
+                                            match pull(&path_clone, &multiaddr_str, &commit_id_owned, false).await {
                                                 Ok(_) => info!("Auto-pulled commit {} from {}", commit_id_owned, peer),
                                                 Err(e) => error!("Auto-pull failed for commit {} from {}: {}", commit_id_owned, peer, e),
                                             }
@@ -1991,13 +2084,12 @@ pub async fn sync(path: &Path) -> Result<()> {
     }
 }
 
-pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
+pub async fn pull(path: &Path, peer: &str, commit_id: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     // pull can work on empty repo or existing one.
-    // if !shard_dir.exists() { init(path)?; }
 
     if !shard_dir.exists() {
-        init(path, "flat", "zstd", "fixed", None, false)?;
+        init(path, "flat", "zstd", "fixed", None, false, false)?;
     }
 
     let store = Store::open(&shard_dir)?;
@@ -2013,7 +2105,9 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     };
 
     // 1. Get Commit (sequential — single request)
-    info!("Pulling commit {} from {}...", commit_id, peer);
+    if !json {
+        info!("Pulling commit {} from {}...", commit_id, peer);
+    }
     let commit_data = node
         .request_manifest(&multiaddr, peer_id, commit_id.to_string())
         .await?;
@@ -2029,7 +2123,9 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     store.put_chunk(&chunk)?;
 
     let commit: Commit = metadata::deserialize(&commit_data)?;
-    info!("Got commit: {}", commit.message);
+    if !json {
+        info!("Got commit: {}", commit.message);
+    }
 
     // Fetch key rotation records for this commit's key chain
     let keys_dir = shard_dir.join("keys");
@@ -2041,10 +2137,12 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
                     .filter(|r| store.get_chunk(&r.rotation_id).is_err())
                     .collect();
                 if !missing_rotations.is_empty() {
-                    info!(
-                        "Fetching {} key rotation records from peer...",
-                        missing_rotations.len()
-                    );
+                    if !json {
+                        info!(
+                            "Fetching {} key rotation records from peer...",
+                            missing_rotations.len()
+                        );
+                    }
                     let rot_requests: Vec<(String, shard_net::protocol::ShardRequest)> =
                         missing_rotations
                             .iter()
@@ -2073,7 +2171,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
                                 offset: 0,
                             })?;
                         }
-                        info!("Key rotation records synced from peer.");
+                        if !json { info!("Key rotation records synced from peer."); }
                     }
                 }
             }
@@ -2121,10 +2219,12 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         };
         store.put_chunk(&chunk)?;
         let manifest: FileManifest = metadata::deserialize(manifest_data)?;
-        info!(
-            "Fetching file: {} (compression: {})",
-            manifest.name, manifest.compression
-        );
+        if !json {
+            info!(
+                "Fetching file: {} (compression: {})",
+                manifest.name, manifest.compression
+            );
+        }
         for cid in &manifest.chunks {
             chunk_compression.insert(cid.clone(), manifest.compression.clone());
         }
@@ -2166,7 +2266,9 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         .collect();
 
     if !needed_chunks.is_empty() {
-        info!("Fetching {} chunks...", needed_chunks.len());
+        if !json {
+            info!("Fetching {} chunks...", needed_chunks.len());
+        }
         let chunk_requests: Vec<(String, shard_net::protocol::ShardRequest)> = needed_chunks
             .iter()
             .map(|id| {
@@ -2222,16 +2324,25 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
             file_data.extend_from_slice(&decompressed);
         }
         fs::write(path.join(&manifest.name), file_data)?;
-        info!(
-            "Reconstructed file: {} ({} bytes)",
-            manifest.name, manifest.size
-        );
+        if !json {
+            info!(
+                "Reconstructed file: {} ({} bytes)",
+                manifest.name, manifest.size
+            );
+        }
     }
 
     // 6. Clean up partial transfer tracking
     partial.cleanup()?;
 
-    info!("Pull complete.");
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "status": "pull complete",
+            "commit_id": commit_id,
+        }))?);
+    } else {
+        info!("Pull complete.");
+    }
     Ok(())
 }
 
@@ -2265,7 +2376,7 @@ pub fn transfer_remove(path: &Path, commit_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn push(path: &Path, peer: &str) -> Result<()> {
+pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -2328,11 +2439,13 @@ pub async fn push(path: &Path, peer: &str) -> Result<()> {
         }
     }
 
-    info!(
-        "Pushing {} objects ({} bytes)...",
-        objects.len(),
-        objects.values().map(|v| v.len() as u64).sum::<u64>()
-    );
+    if !json {
+        info!(
+            "Pushing {} objects ({} bytes)...",
+            objects.len(),
+            objects.values().map(|v| v.len() as u64).sum::<u64>()
+        );
+    }
 
     // Connect and send all objects
     let mut node = shard_net::p2p::Node::new().await?;
@@ -2347,7 +2460,14 @@ pub async fn push(path: &Path, peer: &str) -> Result<()> {
             .await?;
     }
 
-    info!("Push complete ({} objects).", objects.len());
+    if json {
+        info!("{}", serde_json::to_string(&serde_json::json!({
+            "status": "push complete",
+            "objects": objects.len(),
+        }))?);
+    } else {
+        info!("Push complete ({} objects).", objects.len());
+    }
     Ok(())
 }
 
