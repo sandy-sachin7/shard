@@ -1,6 +1,4 @@
-use anyhow::Result;
 use pyo3::prelude::*;
-use std::path::PathBuf;
 use std::process::Command;
 
 #[pyclass]
@@ -16,6 +14,7 @@ struct CommitResult {
 }
 
 #[pyfunction]
+#[pyo3(signature = (repo_path=None, private=false, db=None))]
 fn init(repo_path: Option<String>, private: bool, db: Option<String>) -> PyResult<String> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
     let mut cmd = Command::new("shard");
@@ -37,7 +36,8 @@ fn init(repo_path: Option<String>, private: bool, db: Option<String>) -> PyResul
 }
 
 #[pyfunction]
-fn add(repo_path: Option<String>, file_path: String) -> PyResult<String> {
+#[pyo3(signature = (file_path, repo_path=None))]
+fn add(file_path: String, repo_path: Option<String>) -> PyResult<String> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
     let mut cmd = Command::new("shard");
     cmd.arg("add").arg(&file_path);
@@ -52,11 +52,12 @@ fn add(repo_path: Option<String>, file_path: String) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn commit(repo_path: Option<String>, message: String, author: Option<String>) -> PyResult<CommitResult> {
+#[pyo3(signature = (message, repo_path=None, author=None))]
+fn commit(message: String, repo_path: Option<String>, author: Option<String>) -> PyResult<CommitResult> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
     let mut cmd = Command::new("shard");
     cmd.arg("commit").arg("-m").arg(&message);
-    if let Some(a) = author {
+    if let Some(ref a) = author {
         cmd.arg("--author").arg(a);
     }
     cmd.current_dir(&path);
@@ -78,6 +79,7 @@ fn commit(repo_path: Option<String>, message: String, author: Option<String>) ->
 }
 
 #[pyfunction]
+#[pyo3(signature = (repo_path=None, limit=None))]
 fn log(repo_path: Option<String>, limit: Option<usize>) -> PyResult<Vec<String>> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
     let mut cmd = Command::new("shard");
@@ -97,9 +99,11 @@ fn log(repo_path: Option<String>, limit: Option<usize>) -> PyResult<Vec<String>>
 }
 
 #[pyfunction]
+#[pyo3(signature = (repo_path=None))]
 fn status(repo_path: Option<String>) -> PyResult<String> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
-    let cmd = Command::new("shard").arg("status").current_dir(&path);
+    let mut cmd = Command::new("shard");
+    cmd.arg("status").current_dir(&path);
 
     let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
@@ -110,9 +114,11 @@ fn status(repo_path: Option<String>) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn checkout(repo_path: Option<String>, target: String) -> PyResult<String> {
+#[pyo3(signature = (target, repo_path=None))]
+fn checkout(target: String, repo_path: Option<String>) -> PyResult<String> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
-    let cmd = Command::new("shard").arg("checkout").arg(&target).current_dir(&path);
+    let mut cmd = Command::new("shard");
+    cmd.arg("checkout").arg(&target).current_dir(&path);
 
     let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
@@ -123,9 +129,11 @@ fn checkout(repo_path: Option<String>, target: String) -> PyResult<String> {
 }
 
 #[pyfunction]
-fn verify(repo_path: Option<String>, commit_id: String) -> PyResult<String> {
+#[pyo3(signature = (commit_id, repo_path=None))]
+fn verify(commit_id: String, repo_path: Option<String>) -> PyResult<String> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
-    let cmd = Command::new("shard").arg("verify").arg(&commit_id).current_dir(&path);
+    let mut cmd = Command::new("shard");
+    cmd.arg("verify").arg(&commit_id).current_dir(&path);
 
     let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
@@ -135,7 +143,7 @@ fn verify(repo_path: Option<String>, commit_id: String) -> PyResult<String> {
     }
 }
 
-fn py_err_from_status(output: &std::process::Output) -> pyo3::exceptions::PyRuntimeError {
+fn py_err_from_status(output: &std::process::Output) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(String::from_utf8_lossy(&output.stderr).to_string())
 }
 
@@ -146,7 +154,7 @@ fn chrono_now() -> String {
 }
 
 #[pymodule]
-fn shard(_py: Python, m: &PyModule) -> PyResult<()> {
+fn shard(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init, m)?)?;
     m.add_function(wrap_pyfunction!(add, m)?)?;
     m.add_function(wrap_pyfunction!(commit, m)?)?;

@@ -1,0 +1,5 @@
+target/
+.git/
+.shard/
+.cargo/
+python/shard-py/target/
