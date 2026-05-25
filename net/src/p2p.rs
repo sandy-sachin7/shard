@@ -157,11 +157,17 @@ impl Node {
             }
             ShardRequest::GetChunk(id) => {
                 if let Some(data) = provider.get_chunk(&id) {
+                    let piece = crate::protocol::ChunkPiece {
+                        hash: id.clone(),
+                        offset: 0, // offset unknown at serving time; caller has manifest
+                        size: data.len() as u64,
+                        data,
+                    };
                     let _ = self
                         .swarm
                         .behaviour_mut()
                         .request_response
-                        .send_response(channel, ShardResponse::Chunk(data));
+                        .send_response(channel, ShardResponse::Chunk(piece));
                 } else {
                     let _ = self
                         .swarm
@@ -170,8 +176,8 @@ impl Node {
                         .send_response(channel, ShardResponse::NotFound);
                 }
             }
-            ShardRequest::PutChunk { id, data } => {
-                let ok = provider.put_chunk(&id, &data);
+            ShardRequest::PutChunk(piece) => {
+                let ok = provider.put_chunk(&piece.hash, &piece.data);
                 let _ = self.swarm.behaviour_mut().request_response.send_response(
                     channel,
                     if ok {
@@ -361,10 +367,12 @@ impl Node {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
                     let rid = self.swarm.behaviour_mut().request_response.send_request(
                         &peer,
-                        ShardRequest::PutChunk {
-                            id: id.clone(),
+                        ShardRequest::PutChunk(crate::protocol::ChunkPiece {
+                            hash: id.clone(),
+                            offset: 0,
+                            size: data.len() as u64,
                             data: data.clone(),
-                        },
+                        }),
                     );
                     request_id = Some(rid);
                 }
@@ -521,9 +529,8 @@ impl Node {
                         {
                             if *rid == actual_rid {
                                 return match response {
-                                    ShardResponse::Manifest(data) | ShardResponse::Chunk(data) => {
-                                        Ok(data)
-                                    }
+                                    ShardResponse::Manifest(data) => Ok(data),
+                                    ShardResponse::Chunk(piece) => Ok(piece.data),
                                     ShardResponse::NotFound => anyhow::bail!("Not found"),
                                     _ => anyhow::bail!("Unexpected response"),
                                 };
@@ -602,8 +609,11 @@ impl Node {
                 )) => {
                     if let Some(original_id) = request_map.remove(&request_id) {
                         match response {
-                            ShardResponse::Manifest(data) | ShardResponse::Chunk(data) => {
+                            ShardResponse::Manifest(data) => {
                                 results.push((original_id, data));
+                            }
+                            ShardResponse::Chunk(piece) => {
+                                results.push((original_id, piece.data));
                             }
                             ShardResponse::NotFound => {
                                 anyhow::bail!("Object not found: {}", original_id);
