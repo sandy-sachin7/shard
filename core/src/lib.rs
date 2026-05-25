@@ -32,6 +32,38 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
+fn load_shardignore(path: &Path) -> Vec<String> {
+    let ignore_path = path.join(".shardignore");
+    if ignore_path.exists() {
+        fs::read_to_string(&ignore_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+            .map(|l| l.trim().to_string())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn matches_ignore(path: &Path, patterns: &[String]) -> bool {
+    let path_str = path.to_string_lossy();
+    for pattern in patterns {
+        let pattern = pattern.trim_end_matches('/');
+        if pattern == "*" {
+            return true;
+        }
+        if let Some(glob) = pattern.strip_prefix("**/") {
+            if path_str.contains(glob) {
+                return true;
+            }
+        } else if path_str == pattern || path_str.ends_with(&format!("/{}", pattern)) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn init(
     path: &Path,
     backend: &str,
@@ -277,15 +309,21 @@ pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
     let mut index = Index::load(&shard_dir.join("index"), &fmt)?;
 
     let cipher = maybe_load_cipher(&shard_dir)?;
+    let ignore_patterns = load_shardignore(path);
 
     if file_path.is_dir() {
         for entry in walkdir::WalkDir::new(file_path)
             .into_iter()
             .filter_entry(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|s| !s.starts_with('.'))
-                    .unwrap_or(false)
+                let name = e.file_name().to_string_lossy();
+                if name.starts_with('.') && name.to_string() != ".shardignore" {
+                    return false;
+                }
+                let rel = e.path().strip_prefix(file_path).unwrap_or(e.path());
+                if matches_ignore(rel, &ignore_patterns) {
+                    return false;
+                }
+                true
             })
         {
             let entry = entry?;
@@ -1015,6 +1053,7 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
     }
 
     let mut untracked = Vec::new();
+    let ignore_patterns = load_shardignore(path);
     for entry in walkdir::WalkDir::new(path)
         .min_depth(1)
         .into_iter()
@@ -1032,6 +1071,7 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
                 && !index.files.contains_key(&name)
                 && !tracked_names.contains(&name)
                 && entry.file_type().is_file()
+                && !matches_ignore(rel_path, &ignore_patterns)
             {
                 untracked.push(name);
             }
