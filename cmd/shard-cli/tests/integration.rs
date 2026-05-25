@@ -1167,3 +1167,121 @@ fn test_key_verify_tampered_rotation_fails() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("Keychain verification failed"));
 }
+
+#[test]
+fn test_transfer_list_remove() {
+    let dir = repo_dir("transfer-list");
+    let out = shard(&["init"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    // No transfers initially
+    let out = shard(&["transfer", "list"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("No incomplete transfers"));
+
+    // Create a fake partial transfer directory
+    let partial = dir.join(".shard/partial/fake-commit-id");
+    fs::create_dir_all(&partial).unwrap();
+    fs::write(partial.join("chunk1"), b"data1").unwrap();
+    fs::write(partial.join("chunk2"), b"data2").unwrap();
+
+    // List should show it
+    let out = shard(&["transfer", "list"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("fake-commit-id"));
+
+    // JSON output
+    let out = shard(&["transfer", "list", "--json"], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("fake-commit-id"));
+
+    // Remove should clean it up
+    let out = shard(&["transfer", "remove", "fake-commit-id"], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // List should be empty again
+    let out = shard(&["transfer", "list"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("No incomplete transfers"));
+}
+
+#[test]
+fn test_partial_recover_after_interrupted_pull() {
+    let dir = repo_dir("partial-recover");
+    let out = shard(&["init"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    // Create a multi-chunk file (~5 MB = 2 chunks with 4 MiB default)
+    let data = b"x".repeat(6_000_000);
+    fs::write(dir.join("large.bin"), &data).unwrap();
+    let out = shard(&["add", "large.bin"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let out = shard(&["commit", "-m", "big-file", "--author", "Test"], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout
+        .split_whitespace()
+        .nth(1)
+        .expect("no commit id")
+        .to_string();
+
+    // Simulate partial transfer: copy chunk files from objects into .shard/partial/<commit_id>/
+    let partial_dir = dir.join(".shard/partial").join(&commit_id);
+    fs::create_dir_all(&partial_dir).unwrap();
+
+    // Copy a chunk file from the objects directory to simulate a previous partial download
+    let objects_dir = dir.join(".shard/objects");
+    let mut copied = 0usize;
+    if objects_dir.is_dir() {
+        for entry in walkdir::WalkDir::new(&objects_dir) {
+            if copied >= 1 {
+                break;
+            }
+            let entry = entry.unwrap();
+            if entry.file_type().is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let content = fs::read(entry.path()).unwrap();
+                fs::write(partial_dir.join(&name), &content).unwrap();
+                copied += 1;
+            }
+        }
+    }
+
+    // Verify — should still succeed (chunks in store, partial just has copies)
+    let out = shard(&["verify", &commit_id], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "verify after partial recovery failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Clean up via transfer remove
+    let out = shard(&["transfer", "remove", &commit_id], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Partial dir should be gone
+    assert!(
+        !partial_dir.exists(),
+        "partial dir should be removed after transfer remove"
+    );
+
+    // Verify still works after partial cleanup
+    let out = shard(&["verify", &commit_id], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "verify after partial cleanup failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

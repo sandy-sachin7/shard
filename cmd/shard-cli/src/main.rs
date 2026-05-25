@@ -134,6 +134,11 @@ enum Commands {
         #[arg(long, default_value = "/ip4/0.0.0.0/tcp/0")]
         listen: String,
     },
+    /// Manage incomplete transfers
+    Transfer {
+        #[command(subcommand)]
+        command: TransferCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -180,6 +185,17 @@ enum KeyCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum TransferCommands {
+    /// List incomplete transfers
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an incomplete transfer tracking directory
+    Remove { commit_id: String },
 }
 
 #[derive(Subcommand)]
@@ -366,6 +382,16 @@ async fn main() -> Result<()> {
         Commands::Relay { listen } => {
             shard_core::relay(listen).await?;
         }
+        Commands::Transfer { command } => match command {
+            TransferCommands::List { json } => {
+                let current_dir = env::current_dir()?;
+                shard_core::transfer_list(&current_dir, *json)?;
+            }
+            TransferCommands::Remove { commit_id } => {
+                let current_dir = env::current_dir()?;
+                shard_core::transfer_remove(&current_dir, commit_id)?;
+            }
+        },
     }
 
     Ok(())

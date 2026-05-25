@@ -6,6 +6,7 @@ pub mod encryption;
 pub mod index;
 pub mod keychain;
 pub mod manifest;
+pub mod partial;
 pub mod store;
 pub mod wal;
 
@@ -1765,7 +1766,34 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         file_manifests.push(manifest);
     }
 
-    // 3. Fetch all missing chunks in parallel
+    // 3. Resume: recover from partial directory if previous transfer was interrupted
+    let partial = partial::PartialTransfer::new(&shard_dir, commit_id)?;
+    let partial_chunks = partial.list_chunks()?;
+    let mut recovered = 0usize;
+    for chunk_id in &partial_chunks {
+        if let Ok(data) = partial.load_chunk(chunk_id) {
+            let hash = blake3::hash(&data);
+            if hash.to_hex().to_string() == *chunk_id {
+                // Recovered chunk matches — save to store
+                let chunk = crate::chunker::Chunk {
+                    hash,
+                    data: data.clone(),
+                    offset: 0,
+                };
+                if store.put_chunk(&chunk).is_ok() {
+                    recovered += 1;
+                }
+            } else {
+                // Corrupted partial chunk — remove and re-fetch
+                let _ = partial.remove_chunk(chunk_id);
+            }
+        }
+    }
+    if recovered > 0 {
+        info!("Recovered {} chunks from partial transfer", recovered);
+    }
+
+    // 4. Fetch all missing chunks (not in store and not in partial)
     let needed_chunks: Vec<String> = all_chunk_ids
         .into_iter()
         .filter(|id| store.get_chunk(id).is_err())
@@ -1809,10 +1837,12 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
                 offset: 0,
             };
             store.put_chunk(&chunk)?;
+            // Save to partial for resume support
+            partial.save_chunk(chunk_id, chunk_data)?;
         }
     }
 
-    // 4. Reconstruct all files
+    // 5. Reconstruct all files
     for manifest in &file_manifests {
         let compression = manifest.compression.parse::<Compression>()?;
         let mut file_data = Vec::new();
@@ -1832,7 +1862,40 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         );
     }
 
+    // 6. Clean up partial transfer tracking
+    partial.cleanup()?;
+
     info!("Pull complete.");
+    Ok(())
+}
+
+pub fn transfer_list(path: &Path, json: bool) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository (run `shard init` first)");
+    }
+    let transfers = partial::list_incomplete_transfers(&shard_dir)?;
+    if json {
+        info!("{}", serde_json::to_string(&transfers)?);
+    } else {
+        if transfers.is_empty() {
+            info!("No incomplete transfers.");
+        } else {
+            for t in &transfers {
+                info!("Incomplete transfer: {}", t);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn transfer_remove(path: &Path, commit_id: &str) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository (run `shard init` first)");
+    }
+    partial::remove_transfer(&shard_dir, commit_id)?;
+    info!("Removed transfer tracking for {}", commit_id);
     Ok(())
 }
 
