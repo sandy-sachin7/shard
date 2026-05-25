@@ -22,8 +22,28 @@ All metadata in Shard is canonicalized (sorted keys) and signed using `ed25519`.
 
 When a repository is updated, nodes announce the new commit over the P2P network.
 
-- **Topic:** `shard:ann`
-- **Payload:** A simple PubSub message containing `commit_id`, minimal manifest summary, repo name, and peer multiaddr.
+- **Topic:** `shard:ann` (global) and `/shard/repo/<repo_id>` (repo-specific)
+- **Payload:** JSON-serialized `Announcement`:
+
+```json
+{
+  "commit_id": "<blake3 hash>",
+  "file_count": 42,
+  "total_size": 1073741824,
+  "repo_name": "my-model",
+  "peer_multiaddr": "/ip4/192.168.1.2/tcp/9876"
+}
+```
+
+Nodes subscribe to both topics. Announcements are published on initial share, on a 5-second heartbeat, and when new connections are established.
+
+## Rate Limiting
+
+- **Gossipsub:** Custom `message_id_fn` (blake3 content-hash dedup), `max_messages_per_rpc(100)`
+- **Announcements:** Per-peer per-commit dedup, max 5 unique (peer,commit_id) pairs per 60s window
+- **Requests:** Max 50 per-peer requests per window; request-response timeout of 60s
+- **Reset:** All rate counters reset every 5s interval tick
+- **Deduplication:** Duplicate messages silently dropped via content-hash message IDs
 
 ## Fetch Flow
 

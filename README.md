@@ -132,7 +132,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 | `branch` | Manage branches | `create`, `delete`, `list` |
 | `merge <branch>` | Merge branch into current HEAD | `-m <msg>`, `--author <name>` |
 | `config` | View/edit configuration | `get`, `set` |
-| `share` | Announce commits to P2P network | |
+| `share` | Announce commits to P2P network (Gossipsub) | |
 | `sync` | Discover + fetch from peers | |
 | `pull <peer> <commit>` | Pull commit from specific peer | |
 | `push <peer>` | Push commits to peer | |
@@ -142,6 +142,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 | `export <commit> <dir>` | Reconstruct commit to directory | `--json` |
 | `import <dir>` | Ingest directory as commit | `-m <msg>`, `--author <name>` |
 | `recover` | Recover from WAL crash | |
+| `completions` | Generate shell completions | `bash`, `zsh`, `fish`, `elvish`, `powershell` |
 
 ### Global flags
 
@@ -198,6 +199,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 │   └── public.key
 ├── refs/heads/                   # branch pointers
 ├── authorized_keys               # P2P auth whitelist
+├── objects.idx                   # chunk index (flat store O(1) iteration)
 ├── peers.json                    # known P2P peers
 └── tags.json                     # named commit pointers
 ```
@@ -210,9 +212,9 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 | **Compression** | Zstd or Zlib | Runtime selection; zstd is faster with better ratios |
 | **Hashing** | Blake3 | Fastest cryptographic hash, SIMD-accelerated |
 | **Signatures** | ed25519 | Proven, fast, small signatures (64 bytes) |
-| **Storage** | Sled or Flat file | Sled embedded (zero deps); flat file for portability |
+| **Storage** | Sled, SQLite, or Flat file | Sled/SQLite for indexed queries; flat for portability |
 | **P2P** | libp2p TCP+Noise+Yamux | Mature, NAT traversal via relay/WebRTC planned |
-| **Wire format** | JSON | Serde JSON over request-response |
+| **Wire format** | JSON / CBOR | Serde over request-response + Gossipsub |
 
 ---
 

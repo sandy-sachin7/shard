@@ -27,6 +27,7 @@ Shard exposes a unified CLI with Git-like ergonomics. All commands support a `--
 | `export <commit> <dir>` | Reconstruct commit to directory | `--json` |
 | `import <dir>` | Ingest directory as commit | `-m <msg>`, `--author <name>` |
 | `recover` | Recover from WAL crash | |
+| `completions` | Generate shell completions | `bash`, `zsh`, `fish`, `elvish`, `powershell` |
 
 ### Global flags
 
