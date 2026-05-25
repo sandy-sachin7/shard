@@ -30,9 +30,13 @@ trap cleanup EXIT
 
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
 
+now_ns() {
+    python3 -c "import time; print(int(time.time_ns()))"
+}
+
 elapsed_ns() {
     local start=$1 end=$2
-    echo "$start $end" | awk '{printf "%.2f", ($2 - $1) / 1000000000}'
+    python3 -c "print(f'{(($2 - $1) / 1000000000):.2f}')"
 }
 
 echo ""
@@ -57,33 +61,48 @@ $SHARD_BIN init --chunker fixed > /dev/null 2>&1
 echo ""
 log "Running benchmarks..."
 
-START_ADD=$(date +%s%N)
+START_ADD=$(now_ns)
 $SHARD_BIN add "$TEST_FILE" > /dev/null 2>&1
-END_ADD=$(date +%s%N)
+END_ADD=$(now_ns)
 ADD_TIME=$(elapsed_ns $START_ADD $END_ADD)
 
-START_COMMIT=$(date +%s%N)
+START_COMMIT=$(now_ns)
 $SHARD_BIN commit -m "benchmark commit" --author "Benchmark <bench@shard.test>" > /dev/null 2>&1
-END_COMMIT=$(date +%s%N)
+END_COMMIT=$(now_ns)
 COMMIT_TIME=$(elapsed_ns $START_COMMIT $END_COMMIT)
 
-TOTAL_TIME=$(echo "$ADD_TIME $COMMIT_TIME" | awk '{printf "%.2f", $1 + $2}')
-THROUGHPUT=$(echo "$SIZE_MB $TOTAL_TIME" | awk '{printf "%.2f", $1 / $2}')
+TOTAL_TIME=$(python3 -c "print(f'{$ADD_TIME + $COMMIT_TIME:.2f}')")
+THROUGHPUT=$(python3 -c "print(f'{$SIZE_MB / float($TOTAL_TIME):.2f}')")
 
 if [ "$OUTPUT_FORMAT" = "json" ]; then
-    cat <<EOF
-{"operation": "shard add", "size_mb": $SIZE_MB, "duration_seconds": $ADD_TIME, "throughput": "$(echo "$SIZE_MB $ADD_TIME" | awk '{printf "%.2f MB/s", $1 / $2}')"}
-{"operation": "shard commit", "size_mb": $SIZE_MB, "duration_seconds": $COMMIT_TIME}
-{"operation": "total (add + commit)", "size_mb": $SIZE_MB, "duration_seconds": $TOTAL_TIME, "throughput": "${THROUGHPUT} MB/s"}
-EOF
+    python3 -c "
+import json
+print(json.dumps({
+    'operation': 'shard add',
+    'size_mb': $SIZE_MB,
+    'duration_seconds': $ADD_TIME,
+    'throughput': f'{($SIZE_MB / float($ADD_TIME)):.2f} MB/s'
+}))
+print(json.dumps({
+    'operation': 'shard commit',
+    'size_mb': $SIZE_MB,
+    'duration_seconds': $COMMIT_TIME
+}))
+print(json.dumps({
+    'operation': 'total (add + commit)',
+    'size_mb': $SIZE_MB,
+    'duration_seconds': $TOTAL_TIME,
+    'throughput': '${THROUGHPUT} MB/s'
+}))
+"
 else
     echo ""
     echo "  Operation                  Time (seconds)"
     echo "  ----------------------------------------"
-    printf "  %-28s %12.2f\n" "shard add" "$ADD_TIME"
-    printf "  %-28s %12.2f\n" "shard commit" "$COMMIT_TIME"
+    printf "  %-28s %12s\n" "shard add" "$ADD_TIME"
+    printf "  %-28s %12s\n" "shard commit" "$COMMIT_TIME"
     echo "  ----------------------------------------"
-    printf "  %-28s %12.2f\n" "TOTAL (add + commit)" "$TOTAL_TIME"
+    printf "  %-28s %12s\n" "TOTAL (add + commit)" "$TOTAL_TIME"
     printf "\n  Local throughput: %s MB/s\n" "$THROUGHPUT"
     echo ""
     echo "=============================================="
