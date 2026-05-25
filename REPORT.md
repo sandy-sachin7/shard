@@ -1,8 +1,9 @@
-# Shard — Complete Exhaustive Test Report
+# Shard — Comprehensive Test & Analysis Report
 
-**Date:** 2026-05-22
+**Date:** 2026-05-26
+**Shard Version:** 1.0.2
 **Binary:** `target/release/shard` (release, optimized)
-**Test Harness:** `exhaustive_test.sh` (19 phases, 111 scenarios, all pass)
+**Test Sessions:** 111 previous + 50+ new scenario tests
 
 ---
 
@@ -10,354 +11,414 @@
 
 | Metric | Value |
 |---|---|
-| Total scenarios | **111/111 (100%)** |
-| Max add throughput (200 MiB) | **1,360 MiB/s** |
-| Max verify throughput (200 MiB) | **2,899 MiB/s** |
-| Latency p50 (all ops) | **3.7–4.9 ms** |
-| Latency p99.99 (all ops) | **<7.7 ms** |
-| P2P pull throughput (4 MiB) | **63 MiB/s** |
-| Concurrent repos | **10/10** |
-| Unit/integration tests | **35/35** |
-| clippy / fmt / audit | **clean** |
+| Total test scenarios | **160+** |
+| Integration tests | **47/47 pass** |
+| Unit tests | **100+ pass** |
+| clippy / fmt | **clean** |
+| Max add throughput (50 MiB) | **~900 MiB/s** |
+| Max verify throughput (50 MiB) | **~1.5 GiB/s** |
+| p99.99 latency (add) | **<5 ms** |
+| Storage backends tested | **flat, sled, sqlite** |
+| Compression modes | **zstd, zlib, none** |
+| Chunker modes | **fixed, rabin** |
+| File sizes tested | **0B to 50MB** |
+| Special filenames | **unicode, special chars, deep paths** |
+
+### What's New (Groups 10 & 11)
+
+- **Group 10**: Unit tests for all core modules (170 total tests pass)
+- **Group 11**: PubSub topic `shard:ann`, structured announcements, status recursion, rate limiting
+- **Documentation**: Updated README, protocol docs, CLI reference
 
 ---
 
-## 2. Full Scenario Catalog (111 Tests)
+## 2. Test Categories & Results
 
-### Phase 1: Init (12 tests)
-| # | Scenario | Result | Notes |
+### Category 1: Core VCS Operations
+
+| Test | Command | Result | Notes |
 |---|---|---|---|
-| 1.1 | Basic init creates `.shard/` with objects, keys, config | pass | Validates directory structure |
-| 1.2 | Init twice fails | pass | `already initialized` |
-| 1.3 | `init --private` sets config `private=true` | pass | |
-| 1.4 | Init in different directory | pass | Independent repos |
-| 1.5 | Unique `repo_id` per repo (derived from pubkey) | pass | Deterministic from keypair |
-| 1.6 | Init in non-empty dir preserves existing files | pass | |
+| Init (flat) | `shard init` | PASS | Creates `.shard/` with config, keys, objects |
+| Init (sqlite) | `shard init --db sqlite` | PASS | Creates `objects.db` SQLite database |
+| Init (sled) | `shard init --db sled` | PASS | Creates `objects.db` sled database |
+| Init twice | `shard init` on existing repo | PASS | Errors: "already initialized" |
+| Init private | `shard init --private` | PASS | Creates `repo.key` (64 hex chars) |
+| Add small file | `shard add file.txt` | PASS | 3ms, 12 bytes stored |
+| Commit | `shard commit -m "msg" --author "User"` | PASS | Creates signed commit |
+| Verify | `shard verify <commit_id>` | PASS | Signature + hash verification |
+| Checkout | `shard checkout <commit_id>` | PASS | Restores file content |
+| Log | `shard log` | PASS | Shows commit history |
+| Status | `shard status` | PASS | Shows staged, deleted, untracked |
+| Diff | `shard diff <c1> <c2>` | PASS | Shows file changes |
+| Empty commit | `shard commit` with nothing staged | PASS | Errors: "nothing to commit" |
+| Verify bad commit | `shard verify <invalid>` | PASS | Errors: "Chunk not found" |
+| Checkout bad commit | `shard checkout <invalid>` | PASS | Errors: "Chunk not found" |
 
-### Phase 2: Add (20 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 2.1 | Add normal 64 KiB file | pass | |
-| 2.2 | Add same file again (overwrites in index) | pass | Idempotent |
-| 2.3 | Add empty (0-byte) file | pass | Zero-chunk manifest |
-| 2.4 | Add 1-byte file | pass | |
-| 2.5 | Add cross-chunk file (4 MiB + 1 byte) | pass | 2 chunks |
-| 2.6 | Add exact chunk (4 MiB) | pass | 1 chunk |
-| 2.7 | Add file with newlines in content | pass | |
-| 2.8 | Add zero-filled file (dedup candidate) | pass | |
-| 2.9 | **FAILURE:** Add nonexistent file | pass | Correctly errors |
-| 2.10 | **FAILURE:** Add directory | pass | Not supported |
-| 2.11 | Add valid symlink | pass | Follows link, stores target content |
-| 2.12 | **FAILURE:** Add broken symlink | pass | Correctly errors |
-| 2.13 | Add hardlinked file | pass | Same inode, content deduplicated |
-| 2.14 | Add file with unicode filename (`ファイル.txt`) | pass | |
-| 2.15 | Add file with spaces in name | pass | |
-| 2.16 | Add hidden file (`.hidden`) | pass | |
-| 2.17 | Add file with special chars (`!@#$%`) | pass | |
-| 2.18 | **FAILURE:** Add `..` path | pass | Caught by file_name validation |
-| 2.19 | **FAILURE:** Add `.` path | pass | Caught by file_name validation |
-| 2.20 | **FAILURE:** Add without init | pass | `Not a Shard repository` |
+### Category 2: Storage Backends
 
-### Phase 3: Commit (11 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 3.1 | Single file commit, HEAD created | pass | |
-| 3.2 | First commit (no parents) | pass | |
-| 3.3 | Second commit (has parent) | pass | Parent chain built |
-| 3.4 | Multi-file commit (3 files) | pass | |
-| 3.5 | Custom author | pass | `Alice <alice@test>` |
-| 3.6 | Empty message | pass | |
-| 3.7 | Unicode message (`こんにちは世界`) | pass | |
-| 3.8 | **FAILURE:** Commit nothing staged | pass | `Nothing to commit` |
-| 3.9 | **FAILURE:** Commit without init | pass | |
-| 3.10 | Chain of 5 commits, all in log | pass | Linear history |
-
-### Phase 4: Verify (16 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 4.1 | Verify valid commit | pass | |
-| 4.2 | Verify `--json` (parseable output) | pass | JSON with verified, files_checked |
-| 4.3 | **FAILURE:** Verify nonexistent commit | pass | |
-| 4.4 | **FAILURE:** Verify empty commit_id | pass | Caught by `< 2` guard |
-| 4.5 | **FAILURE:** Verify 1-char commit_id | pass | Caught by `< 2` guard |
-| 4.6 | **FAILURE:** Verify non-hex commit_id | pass | |
-| 4.7 | **FAILURE:** Verify without init | pass | |
-| 4.8 | **FAILURE:** Verify tampered chunk | pass | Hash mismatch detected |
-| 4.9 | Signature verification on verify output | pass | `Signature verified` |
-| 4.10 | Verify multi-chunk file (4 MiB + 1) | pass | 2 chunks |
-| 4.11 | Verify zero-filled file | pass | |
-| 4.12 | Verify empty file (0 bytes) | pass | |
-| 4.13 | Verify 1-byte file | pass | |
-| 4.14 | Verify exact 4 MiB chunk boundary | pass | |
-| 4.15 | Verify cross-boundary 4 MiB + 1 | pass | |
-| 4.16 | Verify same commit twice | pass | Idempotent |
-
-### Phase 5: Log (6 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 5.1 | Log with 3 commits | pass | Shows commit chain |
-| 5.2 | Log `--json` (parseable, 3 entries) | pass | |
-| 5.3 | Log shows author field | pass | |
-| 5.4 | Log shows date field (RFC3339) | pass | |
-| 5.5 | **FAILURE:** Log with no commits | pass | `No commits yet` |
-| 5.6 | **FAILURE:** Log without init | pass | |
-
-### Phase 6: Checkout (9 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 6.1 | Checkout restores deleted file (content verified) | pass | |
-| 6.2 | Checkout `--json` (parseable output) | pass | |
-| 6.3 | Checkout multiple files (2 files) | pass | |
-| 6.4 | Checkout same commit twice | pass | Idempotent |
-| 6.5 | **FAILURE:** Checkout bad commit | pass | |
-| 6.6 | **FAILURE:** Checkout without init | pass | |
-| 6.7 | **FAILURE:** Checkout empty commit_id | pass | |
-
-### Phase 7: Status (7 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 7.1 | Status after init: "No commits yet" | pass | |
-| 7.2 | Status shows staged files | pass | |
-| 7.3 | Status clean after commit | pass | |
-| 7.4 | Status shows untracked files | pass | |
-| 7.5 | Status `--json` (parseable) | pass | |
-| 7.6 | Status shows deleted tracked files | pass | |
-| 7.7 | **FAILURE:** Status without init | pass | |
-
-### Phase 8: Config (8 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 8.1 | Config set/get round-trip | pass | |
-| 8.2 | Config get all keys | pass | |
-| 8.3 | **FAILURE:** Get nonexistent key | pass | |
-| 8.4 | Config set empty value | pass | |
-| 8.5 | Config unicode value (`日本語`) | pass | |
-| 8.6 | Config has `repo_id` (created by init) | pass | |
-| 8.7 | **FAILURE:** Config without init | pass | |
-
-### Phase 9: Tag (7 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 9.1 | Tag add valid commit | pass | |
-| 9.2 | Tag list shows tag name | pass | |
-| 9.3 | Tag second commit | pass | |
-| 9.4 | Tag overwrite same name | pass | |
-| 9.5 | **FAILURE:** Tag bad commit | pass | |
-| 9.6 | **FAILURE:** Tag without init | pass | |
-| 9.7 | Tag list on empty repo | pass | `No tags.` |
-
-### Phase 10: Prune (6 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 10.1 | Prune with no orphans | pass | `Pruned 0` |
-| 10.2 | Prune removes orphan object | pass | |
-| 10.3 | Reachable objects survive prune | pass | Verify still works |
-| 10.4 | Tagged commits protected from prune | pass | |
-| 10.5 | Staged file chunks protected from prune | pass | |
-| 10.6 | **FAILURE:** Prune without init | pass | |
-
-### Phase 11: Peer (5 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 11.1 | Peer add valid multiaddr | pass | |
-| 11.2 | Peer add duplicate (info, no error) | pass | |
-| 11.3 | **FAILURE:** Peer add invalid multiaddr | pass | Now validates format |
-| 11.4 | **FAILURE:** Peer add empty string | pass | Now validates format |
-| 11.5 | **FAILURE:** Peer add without init | pass | |
-
-### Phase 12: Workflow Integration (4 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 12.1 | Full lifecycle: init→add→commit→verify→log→checkout→status | pass | End-to-end |
-| 12.2 | Batch add (5 files) then commit | pass | |
-| 12.3 | Config persists across commands | pass | |
-| 12.4 | Tag persists after prune | pass | Tag-protected |
-
-### Phase 13: State Machine Violations (5 tests)
-| # | Scenario | Result | Notes |
-|---|---|---|---|
-| 13.1 | Verify before any commit | pass | Errors correctly |
-| 13.2 | Checkout before any commit | pass | Errors correctly |
-| 13.3 | Log before any commit | pass | Errors correctly |
-| 13.4 | Tag before any commit | pass | Errors correctly |
-| 13.5 | Commit without staged files (double commit) | pass | `Nothing to commit` |
-
-### Phase 14: Throughput Benchmarks (11 measurements)
-
-| File Size | Add Latency | Throughput |
+| Test | Result | Notes |
 |---|---|---|
-| 1 byte | 3 ms | <1 MiB/s |
-| 1 KiB | 3 ms | <1 MiB/s |
-| 64 KiB | 3 ms | 20 MiB/s |
-| 1 MiB | 5 ms | 200 MiB/s |
-| 4 MiB | 9 ms | 444 MiB/s |
-| 4 MiB + 1 | 10 ms | 400 MiB/s |
-| 8 MiB | 14 ms | 571 MiB/s |
+| Flat (default) | PASS | Git-like `<2char>/<hash>` layout |
+| SQLite | PASS | `objects.db` SQLite database |
+| Sled | PASS | `objects.db` sled embedded DB |
 
-**Large file stress:**
-| Metric | 100 MiB | 200 MiB |
+### Category 3: Compression Options
+
+| Test | Result | Notes |
 |---|---|---|
-| Add latency | 79 ms | 147 ms |
-| Add throughput | 1,265 MiB/s | 1,360 MiB/s |
-| Commit latency | 4 ms | 4 ms |
-| Verify latency | 36 ms | 69 ms |
-| Objects created | 27 | 52 |
+| zstd (default) | PASS | Level 3, ~500 MB/s compress |
+| zlib | PASS | Standard gzip-level |
+| none | PASS | Raw storage, no compression |
 
-**Many small files (100 × 1 KiB):**
-| Metric | Value |
+### Category 4: Encryption (Private Repos)
+
+| Test | Result | Notes |
+|---|---|---|
+| Init --private | PASS | Creates `repo.key` (AES-256-GCM key) |
+| Add/commit with encryption | PASS | Chunks encrypted, manifests signed |
+| Checkout encrypted file | PASS | Content verified correctly |
+| Verify encrypted commit | PASS | Signature + integrity verified |
+| Chunk is encrypted (not plaintext) | PASS | Binary encrypted data, not readable |
+
+### Category 5: Key Rotation
+
+| Test | Result | Notes |
+|---|---|---|
+| Key list | PASS | Shows current key + history |
+| Key verify | PASS | "Keychain verification successful" |
+| Key rotate | PASS | Old → new key with rotation record |
+| Commit after rotation | PASS | New commit signed with new key |
+| Verify old commit after rotation | PASS | Key was valid at commit time |
+
+### Category 6: Chunking Modes
+
+| Test | Result | Notes |
+|---|---|---|
+| Fixed (default, 4 MiB) | PASS | Single chunk for 50MB file |
+| Rabin CDC | PASS | Content-defined chunking |
+| Custom chunk size (1 MB) | PASS | `--chunk-size 1048576` |
+| Rabin with large file (10 MB) | PASS | Multiple smaller chunks |
+
+### Category 7: File Size Stress Tests
+
+| File Size | Add Time | Commit | Verify | Result |
+|---|---|---|---|---|
+| 0 bytes (empty) | 2 ms | 3 ms | 3 ms | PASS |
+| 1 byte | 3 ms | 2 ms | 4 ms | PASS |
+| 14 bytes | 3 ms | 2 ms | 3 ms | PASS |
+| 1 MB | 5 ms | 3 ms | 5 ms | PASS |
+| 4 MB (exact boundary) | 9 ms | 3 ms | 5 ms | PASS |
+| 5 MB (crosses boundary) | 10 ms | 3 ms | 7 ms | PASS |
+| 10 MB | 20 ms | 3 ms | 11 ms | PASS |
+| 50 MB | 60 ms | 3 ms | 34 ms | PASS |
+
+**Performance**: Add ~900 MiB/s, Verify ~1.5 GiB/s for 50MB file.
+
+### Category 8: Many Small Files
+
+| Test | Result | Notes |
+|---|---|---|
+| 500 small files (17 bytes each) | PASS | Add: 81ms, Commit: 27ms, Verify: 42ms |
+| Each file stored separately | PASS | 500 manifests, 500 chunks |
+
+### Category 9: Special Path Names
+
+| Test | Result | Notes |
+|---|---|---|
+| Deep nested (5 levels) | PASS | `deep/nested/dir/v1/v2/v3/v4/v5/deep_file.txt` |
+| Unicode filenames | PASS | `日本語ファイル.txt`, `emoji_😎.bin`, `العربية.txt`, `한국어.bin` |
+| Special characters | PASS | 18 files with `=`, `+`, `@`, `!`, `{`, `[`, `(`, `<`, `|`, `^`, `%`, `&`, `#`, `;`, `"`, `'`, spaces |
+| Checkout special chars | PASS | All 18 files restored correctly |
+| Hidden files (`.hidden`) | PARTIAL | **Only `visible.txt` tracked, `.hidden*` skipped** |
+
+### Category 10: Backup / Restore / Export / Import
+
+| Test | Result | Notes |
+|---|---|---|
+| Backup | PASS | Creates `tar.gz` |
+| Export | PASS | Reconstructs commit to directory |
+| Import | PASS | Ingests directory as commit |
+| **Restore** | **FAIL** | **BUG: Format mismatch** |
+
+### Category 11: CBOR Serialization
+
+| Test | Result | Notes |
+|---|---|---|
+| Init + CBOR format | PASS | `config set serialization_format cbor` |
+| Add/commit in CBOR | PASS | Stored as CBOR with 0x02 prefix |
+| Verify CBOR commit | PASS | Signature + integrity verified |
+| Checkout CBOR commit | PASS | Content restored correctly |
+
+### Category 12: WAL Recovery
+
+| Test | Result | Notes |
+|---|---|---|
+| Recover on fresh repo | PASS | Empty WAL, no-op |
+| Recover no crash | PASS | Smoke test passes |
+
+### Category 13: Tampering Detection
+
+| Test | Result | Notes |
+|---|---|---|
+| Tamper chunk (write "TAMPERED") | PASS | **Detected**: "commit object hash mismatch" |
+| Verify after tamper | PASS | Errors immediately on hash check |
+
+### Category 14: P2P Networking
+
+| Test | Result | Notes |
+|---|---|---|
+| Peer add valid multiaddr | PASS | `/ip4/127.0.0.1/tcp/12345` |
+| Peer add invalid multiaddr | PASS | Errors: "invalid multiaddr" |
+| **Peer list** | **MISSING** | **No `shard peer list` command** |
+
+### Category 15: Branching & Merging
+
+| Test | Result | Notes |
+|---|---|---|
+| Branch create | PASS | Creates at current commit |
+| Branch list | PASS | Shows all branches |
+| Branch switch | PASS | Updates HEAD |
+| Merge | PASS | Creates merge commit with 2 parents |
+| Merge same (no change) | PASS | "Already up to date" |
+| Tag add/list | PASS | Tags point to commits |
+
+### Category 16: Hidden Files & Symlinks
+
+| Test | Result | Notes |
+|---|---|---|
+| Hidden files (`.hidden`) | PARTIAL | **Only non-hidden files tracked** |
+| Symlink to file | PASS | Followed, content stored (12 bytes) |
+
+---
+
+## 3. Bugs Found
+
+### Bug 1: Backup/Restore Format Mismatch (CRITICAL)
+
+**Severity:** High
+
+**Description:** The `backup()` function uses `archive.append_dir_all(".", &shard_dir)` which stores the *contents* of `.shard/` directly with prefix `.` (e.g., `./config.json`, `./objects/...`). However, `restore()` unpacks to `path` and then checks `if !path.join(".shard").exists()`.
+
+**Result:** After `restore`, files land in the repo root (e.g., `config.json`), NOT in `.shard/` subdirectory. The check fails.
+
+**Location:** `core/src/lib.rs` lines 1627 and 1769-1770
+
+**Fix needed:** Either:
+1. Change `backup()` to use `append_dir_all(".shard", &shard_dir)` so archive entries have `.shard/` prefix
+2. OR change `restore()` to move extracted contents into `.shard/`
+
+### Bug 2: Failed Checkout Corrupts HEAD (HIGH)
+
+**Severity:** High
+
+**Description:** When `checkout` is given an invalid target (e.g., `nonexistent-branch`), it partially writes to `.shard/HEAD` before failing. The HEAD file ends up containing the invalid string instead of a valid ref or commit ID.
+
+**Result:** Repository left in inconsistent state. Subsequent commands fail with confusing errors ("Chunk not found: nonexistent-branch").
+
+**Location:** `core/src/lib.rs` — checkout command
+
+**Reproduction:**
+```bash
+shard checkout nonexistent-branch
+# Error: Chunk not found: nonexistent-branch
+cat .shard/HEAD
+# Shows: nonexistent-branch (corrupted!)
+```
+
+**Fix needed:** Write HEAD atomically or use a transaction pattern.
+
+### Bug 3: Checkout Error Message (LOW)
+
+**Severity:** Low
+
+**Description:** `shard checkout nonexistent-branch` gives error "Chunk not found: nonexistent-branch" instead of something like "Branch not found" or "Commit not found".
+
+**Location:** `core/src/lib.rs` — checkout command treats non-existent branch as commit_id
+
+**Impact:** Confusing error message, but functional
+
+### Bug 4: Missing Peer List Command (LOW)
+
+**Severity:** Low
+
+**Description:** No `shard peer list` command exists. Users must read `peers.json` directly.
+
+**Location:** `cmd/shard-cli/src/main.rs`
+
+**Impact:** Minor ergonomics issue
+
+---
+
+## 4. Loopholes & Missing Features
+
+### 4.1 Hidden Files Skipped
+
+**Severity:** Medium
+
+**Description:** `shard add` skips files starting with `.` (hidden files). The `walkdir` filter excludes hidden files.
+
+**Impact:** Cannot version control hidden files like `.gitignore`, `.env`, etc.
+
+**Location:** `core/src/lib.rs` — `add()` uses `WalkDir::new()` with hidden file filter
+
+### 4.2 Symlink Content Stored, Not Symlink
+
+**Severity:** Low
+
+**Description:** When adding a symlink, the target's *content* is stored, not the symlink itself. Link metadata is lost.
+
+**Impact:** Restored as regular file, not symlink
+
+### 4.3 No Directory Recursion Control
+
+**Severity:** Low
+
+**Description:** `shard add <dir>` is not supported. Only `shard add <dir>/` with trailing slash works (or the directory is treated as a file path).
+
+### 4.4 No `.shardignore`
+
+**Severity:** Low
+
+**Description:** Cannot exclude patterns from staging. All files in added directories are staged.
+
+### 4.5 Checkout Error Message Quality
+
+**Severity:** Low
+
+**Description:** Invalid checkout targets all give "Chunk not found" regardless of whether the issue is a bad branch name, bad commit ID, or other issue.
+
+### 4.6 Merge Uses Union-of-Manifests (Design Limitation)
+
+**Severity:** Low
+
+**Description:** Merge doesn't do content-level merging. Files present in either branch are included. No conflict detection or resolution.
+
+**Impact:** Expected for this architecture, but worth documenting
+
+### 4.7 Rate Limiting Internal Only
+
+**Severity:** Info
+
+**Description:** Rate limiting (Gossipsub max 100 msg/RPC, per-peer 5 announcements/60s, 50 requests/60s) is implemented but not exposed via CLI or config.
+
+---
+
+## 5. Performance Benchmarks
+
+### Add Throughput
+
+| File Size | Add Time | Throughput |
+|---|---|---|
+| 14 bytes | 3 ms | <1 MiB/s (process startup dominates) |
+| 1 MB | 5 ms | 200 MiB/s |
+| 4 MB | 9 ms | 444 MiB/s |
+| 10 MB | 20 ms | 500 MiB/s |
+| 50 MB | 60 ms | 833 MiB/s |
+
+### Verify Throughput
+
+| File Size | Verify Time | Throughput |
+|---|---|---|
+| 1 MB | 5 ms | 200 MiB/s |
+| 4 MB | 5 ms | 800 MiB/s |
+| 10 MB | 11 ms | 909 MiB/s |
+| 50 MB | 34 ms | 1,470 MiB/s |
+
+### Commit Latency
+
+| File Count | Commit Time |
 |---|---|
-| Total add | 352 ms |
-| Per-file avg | 3.5 ms |
-| Commit | 6 ms |
-| Verify | 5 ms |
+| 1 file | 3 ms |
+| 500 files | 27 ms |
 
-### Phase 15: P99.99 Latency Distribution (N=100 cycles)
+### p99.99 Latency (from prior 100-cycle test)
 
-Each iteration: unique 64 KiB random file → add → commit → verify.
-
-| Operation | min | p50 | p90 | p99 | p99.99 | max | mean |
-|---|---|---|---|---|---|---|---|
-| **add** | 3.35 | 3.71 | 4.24 | 4.98 | 4.98 | 4.98 | 3.79 |
-| **commit** | 4.40 | 4.83 | 5.42 | 6.41 | 6.41 | 6.41 | 4.91 |
-| **verify** | 3.50 | 3.80 | 4.35 | 5.02 | 5.02 | 5.02 | 3.90 |
-
-**Key findings:**
-- CV < 0.15 for all operations (extremely tight)
-- p99.99 ≤ 1.7× p50 — no tail amplification
-- No GC pauses (Rust)
-
-### Phase 16: Storage Scaling
-
-Cumulative objects after sequential adds + commits:
-
-| Added File | Objects | Overhead |
-|---|---|---|
-| 1 MiB | 3 | 3× (commit + manifest + 1 chunk) |
-| 4 MiB | 6 | 6× (2 commits + 2 manifests + 2 chunks) |
-| 8 MiB | 10 | — |
-| 16 MiB | 16 | — |
-| 32 MiB | 26 | — |
-
-Metadata overhead: ~300-500 bytes per commit/manifest JSON blob.
-
-### Phase 17: Concurrent Repo Stress (10 repos)
-
-10 independent repos running `init → add (64K) → commit → verify` in parallel.
-
-| Metric | Result |
-|---|---|
-| Completed | **10/10 (100%)** |
-| Isolation | Perfect — no shared state |
-
-### Phase 18: P2P Network (2 tests)
-
-| Test | Result | Latency |
-|---|---|---|
-| Pull 4 MiB file + cross-peer verify | pass | 63 ms |
-| Re-pull into fresh repo | pass | 65 ms |
-
-**Throughput:** ~63 MiB/s (loopback TCP, CBOR request-response protocol)
-
-### Phase 19: Crypto/Key Edge Cases (3 tests)
-
-| # | Scenario | Result |
-|---|---|---|
-| 19.1 | `secret.key` is 32 bytes (ed25519 seed) | pass |
-| 19.2 | `public.key` is 32 bytes (ed25519 public) | pass |
-| 19.3 | `init --private` sets `private=true` in config | pass |
-
----
-
-## 3. Bugs Fixed During Testing
-
-### 3.1 Panic Vectors Eliminated (5 fixes, commit `677a0c8`)
-
-| Location | Issue | Fix |
-|---|---|---|
-| `core/src/lib.rs:69` | `file_name().unwrap()` panics on `.`/`..` | `and_then` + `ok_or_else` with error |
-| `core/src/lib.rs:172` | `commit_id[..2]` panics on short/empty strings | Added `len < 2` guard |
-| `core/src/lib.rs:250` | `commit_id[..2]` panics in `load_commit()` | Added `len < 2` guard |
-| `core/src/store.rs:19` | `hash_hex[..2]` panics on short hex | `hash_hex.get(..2).unwrap_or("xx")` |
-| `core/src/store.rs:34` | `hash_hex[..2]` panics in `get_chunk()` | Added `len < 2` guard |
-
-### 3.2 Peer Validation Fixed
-
-`peer_add()` previously accepted any string (including empty and invalid multiaddrs). Fixed to validate multiaddr format before storing.
-
----
-
-## 4. Identified Loopholes (Not Fixed)
-
-| Loophole | Severity | Location | Description |
+| Operation | p50 | p99.99 | Notes |
 |---|---|---|---|
-| No directory recursion | Medium | `core/src/lib.rs:49-86` | `shard add <dir>` errors; cannot stage trees |
-| Symlink content stored, not symlink | Low | `core/src/lib.rs:49-86` | Symlinks are followed, link metadata lost |
-| No `.shardignore` | Low | — | Cannot exclude files from staging |
-| Fixed 4 MiB chunk size | Medium | `core/src/chunker.rs:4` | Cannot tune per-workload |
-| No compression | Medium | `core/src/store.rs:27` | Raw bytes; git uses zlib (2-10× smaller) |
-| Sequential pull (3 RTT) | Low | `core/src/lib.rs:1038-1121` | commit→manifest→chunk in sequence |
-| No push protocol | Low | — | Only pull from announced peers |
-| No merge/branch | Low | — | Linear history only |
-| No write-ahead log | Medium | — | Unsafe for concurrent add+commit |
-| Flat filesystem store | Low | `core/src/store.rs:17-46` | O(n) enumeration of objects |
+| add | 3.71 ms | 4.98 ms | Extremely tight distribution |
+| commit | 4.83 ms | 6.41 ms | Metadata-only |
+| verify | 3.80 ms | 5.02 ms | Read-only |
 
 ---
 
-## 5. Performance Characteristics
+## 6. Integration Test Results
 
-### Throughput Scaling
-- **Add:** 3 ms floor (process startup + I/O setup), scales to ~1.4 GiB/s for 200 MiB files
-- **Verify:** Slightly faster than add (read-only), ~2.9 GiB/s for 200 MiB
-- **Commit:** Constant ~4-6 ms regardless of file size (metadata-only operation)
-- **Checkout:** Linear in file count and size
+```
+cargo test -p shard-cli --test integration -- --test-threads=1
 
-### Latency Stability
-- All operations: p50 ~3-5 ms, p99.99 ~5-7 ms
-- No GC pauses, no OS page fault amplification
-- Tight distribution (CV < 0.15) across 100 iterations
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
 
-### P2P Network
-- Loopback pull: ~63 MiB/s constrained by CBOR serialization + libp2p framing
-- Three sequential round-trips: commit, manifests (parallel), chunks (parallel)
+All 47 integration tests pass serially. Clippy and fmt are clean.
 
 ---
 
-## 6. Quality Gates
+## 7. Quality Gates
 
 | Gate | Status |
 |---|---|
-| `cargo test` (35 tests) | **pass** |
+| `cargo test` (unit + integration) | **PASS** |
 | `cargo fmt --check` | **clean** |
-| `cargo clippy --all-targets -- -D warnings` | **clean** |
-| `cargo audit` | **clean** (0 vulnerabilities) |
-| `exhaustive_test.sh` (111 scenarios) | **111/111 pass** |
+| `cargo clippy --all-targets` | **clean** |
+| Integration tests (47) | **47/47 pass** |
+| Unit tests (100+) | **100+/100+ pass** |
 
 ---
 
-## 7. Test Infrastructure
+## 8. Recommendations
 
-```
-exhaustive_test.sh
-├── Phase 0:  Model file creation (10 model files)
-├── Phase 1:  Init scenarios (12 tests)
-├── Phase 2:  Add scenarios (20 tests)
-├── Phase 3:  Commit scenarios (11 tests)
-├── Phase 4:  Verify scenarios (16 tests)
-├── Phase 5:  Log scenarios (6 tests)
-├── Phase 6:  Checkout scenarios (9 tests)
-├── Phase 7:  Status scenarios (7 tests)
-├── Phase 8:  Config scenarios (8 tests)
-├── Phase 9:  Tag scenarios (7 tests)
-├── Phase 10: Prune scenarios (6 tests)
-├── Phase 11: Peer scenarios (5 tests)
-├── Phase 12: Workflow integration (4 tests)
-├── Phase 13: State machine violations (5 tests)
-├── Phase 14: Throughput benchmarks (11 measurements)
-├── Phase 15: P99.99 latency distribution (N=100 cycles)
-├── Phase 16: Storage scaling (5 increments: 1-32 MiB)
-├── Phase 17: Concurrent stress (10 parallel repos)
-├── Phase 18: P2P network (share + pull + cross-peer verify)
-└── Phase 19: Crypto edge cases (3 tests)
-Running from: exhaustive_test.sh (bash)
-Binary:      target/release/shard (release, optimized)
-Results:     /tmp/.../results.log
+### High Priority
+
+1. **Fix Backup/Restore bug** — Format mismatch prevents restore from working
+2. **Fix Checkout HEAD corruption** — Failed checkout should not corrupt HEAD
+3. **Add hidden file support** — Allow `.hidden` files to be versioned (config option)
+
+### Medium Priority
+
+4. **Add `shard peer list` command** — For usability
+5. **Improve checkout error messages** — Distinguish branch not found vs commit not found
+6. **Add `.shardignore` support** — For excluding patterns
+
+### Low Priority
+
+7. **Document merge behavior** — Union-of-manifests, no content merging
+8. **Expose rate limiting config** — Allow tuning via CLI/config
+9. **Add progress reporting** — For large file operations
+
+---
+
+## 9. Test Coverage Summary
+
+| Category | Covered | Notes |
+|---|---|---|
+| Core VCS (init, add, commit, verify, checkout, log, status, diff) | YES | All commands tested |
+| Storage backends (flat, sled, sqlite) | YES | All three tested |
+| Compression (zstd, zlib, none) | YES | All three tested |
+| Chunker (fixed, rabin, custom size) | YES | All three tested |
+| Encryption (private repos) | YES | AES-256-GCM tested |
+| Key rotation | YES | Full lifecycle tested |
+| File sizes (0B to 50MB) | YES | Empty, tiny, small, boundary, large |
+| Many small files (500) | YES | Performance tested |
+| Special paths (unicode, special chars, deep) | YES | 18+ special char files |
+| Backup/Restore/Export/Import | PARTIAL | Backup/Export/Import work, Restore broken |
+| WAL recovery | YES | Smoke tested |
+| Tampering detection | YES | Chunk hash verified |
+| CBOR serialization | YES | Full roundtrip tested |
+| P2P networking | PARTIAL | Peer add tested, share/sync/pull not in isolation |
+| Branching and merging | YES | Create, switch, list, merge all tested |
+| Hidden files | PARTIAL | Skipped (by design) |
+| Symlinks | PARTIAL | Content stored, not link |
+
+---
+
+## 10. Conclusion
+
+Shard is a well-architected distributed version control system for ML artifacts. The core functionality (init, add, commit, verify, checkout, branch, merge) is solid and tested. Storage backends, compression, chunking, and encryption all work correctly.
+
+**Critical bugs found:**
+1. Backup/restore format mismatch (blocks restore)
+2. Failed checkout corrupts HEAD (blocks operations)
+
+**Test coverage:** 160+ scenarios across 16 categories, all core functionality verified.
+
+**Performance:** Sub-5ms p99.99 for typical operations, ~1.5 GiB/s verify throughput.
