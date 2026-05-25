@@ -27,7 +27,9 @@ fn init(repo_path: Option<String>, private: bool, db: Option<String>) -> PyResul
     }
     cmd.current_dir(&path);
 
-    let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -43,7 +45,9 @@ fn add(file_path: String, repo_path: Option<String>) -> PyResult<String> {
     cmd.arg("add").arg(&file_path);
     cmd.current_dir(&path);
 
-    let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -53,7 +57,11 @@ fn add(file_path: String, repo_path: Option<String>) -> PyResult<String> {
 
 #[pyfunction]
 #[pyo3(signature = (message, repo_path=None, author=None))]
-fn commit(message: String, repo_path: Option<String>, author: Option<String>) -> PyResult<CommitResult> {
+fn commit(
+    message: String,
+    repo_path: Option<String>,
+    author: Option<String>,
+) -> PyResult<CommitResult> {
     let path = repo_path.unwrap_or_else(|| ".".to_string());
     let mut cmd = Command::new("shard");
     cmd.arg("commit").arg("-m").arg(&message);
@@ -62,13 +70,19 @@ fn commit(message: String, repo_path: Option<String>, author: Option<String>) ->
     }
     cmd.current_dir(&path);
 
-    let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if !output.status.success() {
         return Err(py_err_from_status(&output));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let commit_id = stdout.split_whitespace().nth(1).unwrap_or("unknown").to_string();
+    let commit_id = stdout
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("unknown")
+        .to_string();
 
     Ok(CommitResult {
         commit_id,
@@ -89,7 +103,9 @@ fn log(repo_path: Option<String>, limit: Option<usize>) -> PyResult<Vec<String>>
     }
     cmd.current_dir(&path);
 
-    let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
         let out = String::from_utf8_lossy(&output.stdout).to_string();
         Ok(out.lines().map(|s| s.to_string()).collect())
@@ -105,7 +121,9 @@ fn status(repo_path: Option<String>) -> PyResult<String> {
     let mut cmd = Command::new("shard");
     cmd.arg("status").current_dir(&path);
 
-    let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -120,7 +138,9 @@ fn checkout(target: String, repo_path: Option<String>) -> PyResult<String> {
     let mut cmd = Command::new("shard");
     cmd.arg("checkout").arg(&target).current_dir(&path);
 
-    let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -135,7 +155,9 @@ fn verify(commit_id: String, repo_path: Option<String>) -> PyResult<String> {
     let mut cmd = Command::new("shard");
     cmd.arg("verify").arg(&commit_id).current_dir(&path);
 
-    let output = cmd.output().map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let output = cmd
+        .output()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {

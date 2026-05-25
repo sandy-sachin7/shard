@@ -1,5 +1,5 @@
 FROM rust:alpine AS builder
-RUN apk add --no-cache musl-dev pkgconfig
+RUN apk add --no-cache musl-dev pkgconfig python3
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY cmd/shard-cli/Cargo.toml cmd/shard-cli/

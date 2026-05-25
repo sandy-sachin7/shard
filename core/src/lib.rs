@@ -1062,12 +1062,10 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         if entry.file_type().is_file() || entry.file_type().is_dir() {
             let rel_path = entry.path().strip_prefix(path).unwrap_or(entry.path());
             let name = rel_path.to_string_lossy().to_string();
-            let is_hidden = rel_path
-                .components()
-                .any(|c| {
-                    let name = c.as_os_str().to_string_lossy();
-                    name == ".shard" || name == ".git"
-                });
+            let is_hidden = rel_path.components().any(|c| {
+                let name = c.as_os_str().to_string_lossy();
+                name == ".shard" || name == ".git"
+            });
             if !is_hidden
                 && entry.path() != shard_dir
                 && !entry.path().starts_with(&shard_dir)
