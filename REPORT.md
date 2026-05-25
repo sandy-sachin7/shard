@@ -1,7 +1,7 @@
 # Shard — Comprehensive Test & Analysis Report
 
 **Date:** 2026-05-26
-**Shard Version:** 1.0.2
+**Shard Version:** 1.0.2 (commit `251c0dd`)
 **Binary:** `target/release/shard` (release, optimized)
 **Test Sessions:** 111 previous + 50+ new scenario tests
 
@@ -135,10 +135,10 @@
 
 | Test | Result | Notes |
 |---|---|---|
-| Backup | PASS | Creates `tar.gz` |
+| Backup | PASS | Creates `tar.gz` with `.shard/` directory entry |
 | Export | PASS | Reconstructs commit to directory |
 | Import | PASS | Ingests directory as commit |
-| **Restore** | **FAIL** | **BUG: Format mismatch** |
+| Restore | PASS | Extracts backup to `.shard/` subdirectory (FIXED) |
 
 ### Category 11: CBOR Serialization
 
@@ -193,39 +193,29 @@
 
 ## 3. Bugs Found
 
-### Bug 1: Backup/Restore Format Mismatch (CRITICAL)
+### Bug 1: Backup/Restore Format Mismatch — ✅ FIXED
 
 **Severity:** High
 
-**Description:** The `backup()` function uses `archive.append_dir_all(".", &shard_dir)` which stores the *contents* of `.shard/` directly with prefix `.` (e.g., `./config.json`, `./objects/...`). However, `restore()` unpacks to `path` and then checks `if !path.join(".shard").exists()`.
+**Description:** The `backup()` function used `archive.append_dir_all(".", &shard_dir)` which stored `.shard/` *contents* directly with prefix `.` (e.g., `./config.json`). The `restore()` function checked `if !path.join(".shard").exists()`, which failed since files landed in the repo root.
 
-**Result:** After `restore`, files land in the repo root (e.g., `config.json`), NOT in `.shard/` subdirectory. The check fails.
+**Fix:** Changed `backup()` to use `append_dir_all(".shard", &shard_dir)` so archive entries have `.shard/` prefix. `restore()` now correctly unpacks to `.shard/` subdirectory.
 
-**Location:** `core/src/lib.rs` lines 1627 and 1769-1770
+**Location:** `core/src/lib.rs` line 1627
 
-**Fix needed:** Either:
-1. Change `backup()` to use `append_dir_all(".shard", &shard_dir)` so archive entries have `.shard/` prefix
-2. OR change `restore()` to move extracted contents into `.shard/`
+**Verification:** Backup → wipe → restore → checkout now works end-to-end.
 
-### Bug 2: Failed Checkout Corrupts HEAD (HIGH)
+### Bug 2: Failed Checkout Corrupts HEAD — ✅ FIXED
 
 **Severity:** High
 
-**Description:** When `checkout` is given an invalid target (e.g., `nonexistent-branch`), it partially writes to `.shard/HEAD` before failing. The HEAD file ends up containing the invalid string instead of a valid ref or commit ID.
+**Description:** When `checkout` was given an invalid target (e.g., `nonexistent-branch`), it called `set_head_branch()` or `set_head_commit()` *before* `load_commit()`. If the target was invalid, `load_commit()` failed but HEAD had already been written with the invalid string, leaving the repository in an inconsistent state.
 
-**Result:** Repository left in inconsistent state. Subsequent commands fail with confusing errors ("Chunk not found: nonexistent-branch").
+**Fix:** Moved `load_commit()` validation to occur *before* any HEAD writes. Now if a target is invalid, HEAD is never touched.
 
-**Location:** `core/src/lib.rs` — checkout command
+**Location:** `core/src/lib.rs` lines 882-908
 
-**Reproduction:**
-```bash
-shard checkout nonexistent-branch
-# Error: Chunk not found: nonexistent-branch
-cat .shard/HEAD
-# Shows: nonexistent-branch (corrupted!)
-```
-
-**Fix needed:** Write HEAD atomically or use a transaction pattern.
+**Verification:** `shard checkout nonexistent-branch` now errors without modifying HEAD.
 
 ### Bug 3: Checkout Error Message (LOW)
 
@@ -369,8 +359,8 @@ All 47 integration tests pass serially. Clippy and fmt are clean.
 
 ### High Priority
 
-1. **Fix Backup/Restore bug** — Format mismatch prevents restore from working
-2. **Fix Checkout HEAD corruption** — Failed checkout should not corrupt HEAD
+1. ~~Fix Backup/Restore bug~~ — ✅ FIXED (commit `251c0dd`)
+2. ~~Fix Checkout HEAD corruption~~ — ✅ FIXED (commit `251c0dd`)
 3. **Add hidden file support** — Allow `.hidden` files to be versioned (config option)
 
 ### Medium Priority
@@ -400,7 +390,7 @@ All 47 integration tests pass serially. Clippy and fmt are clean.
 | File sizes (0B to 50MB) | YES | Empty, tiny, small, boundary, large |
 | Many small files (500) | YES | Performance tested |
 | Special paths (unicode, special chars, deep) | YES | 18+ special char files |
-| Backup/Restore/Export/Import | PARTIAL | Backup/Export/Import work, Restore broken |
+| Backup/Restore/Export/Import | YES | All four operations now work correctly |
 | WAL recovery | YES | Smoke tested |
 | Tampering detection | YES | Chunk hash verified |
 | CBOR serialization | YES | Full roundtrip tested |
@@ -415,9 +405,9 @@ All 47 integration tests pass serially. Clippy and fmt are clean.
 
 Shard is a well-architected distributed version control system for ML artifacts. The core functionality (init, add, commit, verify, checkout, branch, merge) is solid and tested. Storage backends, compression, chunking, and encryption all work correctly.
 
-**Critical bugs found:**
-1. Backup/restore format mismatch (blocks restore)
-2. Failed checkout corrupts HEAD (blocks operations)
+**Critical bugs found and fixed:**
+1. Backup/restore format mismatch — ✅ FIXED (`251c0dd`)
+2. Failed checkout corrupts HEAD — ✅ FIXED (`251c0dd`)
 
 **Test coverage:** 160+ scenarios across 16 categories, all core functionality verified.
 
