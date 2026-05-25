@@ -159,6 +159,25 @@ pub fn rotate_signing_key(keys_dir: &Path) -> Result<KeyRotation> {
     Ok(rotation)
 }
 
+/// Walk the key rotation chain for a given key_id, returning all rotation
+/// records in order (newest first). Starts from the rotation whose new_key_id
+/// matches key_id, then follows previous_key_id backward to genesis.
+pub fn collect_rotation_chain(keys_dir: &Path, key_id: &str) -> Result<Vec<KeyRotation>> {
+    let rotations = load_rotations(keys_dir)?;
+    // Build index: new_key_id -> rotation
+    let new_to_old: std::collections::HashMap<&str, &KeyRotation> = rotations
+        .iter()
+        .map(|r| (r.new_key_id.as_str(), r))
+        .collect();
+    let mut chain = Vec::new();
+    let mut current = key_id;
+    while let Some(rot) = new_to_old.get(current) {
+        chain.push((*rot).clone());
+        current = &rot.old_key_id;
+    }
+    Ok(chain)
+}
+
 /// Load all rotation records sorted by timestamp.
 pub fn load_rotations(keys_dir: &Path) -> Result<Vec<KeyRotation>> {
     let rot_dir = keys_dir.join(ROTATIONS_DIR);

@@ -14,6 +14,7 @@ pub mod wal;
 use crate::commit::Commit;
 use crate::compression::Compression;
 use crate::index::Index;
+use crate::keychain::KeyRotation;
 use crate::manifest::FileManifest;
 use crate::store::Store;
 use anyhow::Result;
@@ -382,7 +383,10 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     // 6. Cycle detection: verify no parent chain already contains this commit
     let commit_id = hash.to_hex().to_string();
     if has_dag_cycle(&store, &commit.parents, &commit_id)? {
-        anyhow::bail!("Cycle detected: commit {} is already an ancestor of one or more parents", commit_id);
+        anyhow::bail!(
+            "Cycle detected: commit {} is already an ancestor of one or more parents",
+            commit_id
+        );
     }
 
     // 7. Update HEAD and branch ref
@@ -1249,7 +1253,10 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
 
     // Cycle detection on merge
     if has_dag_cycle(&store, &commit.parents, &merge_commit_id)? {
-        anyhow::bail!("Cycle detected in merge: commit {} is already an ancestor of one or more parents", merge_commit_id);
+        anyhow::bail!(
+            "Cycle detected in merge: commit {} is already an ancestor of one or more parents",
+            merge_commit_id
+        );
     }
 
     // Update HEAD and branch ref
@@ -2024,6 +2031,55 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     let commit: Commit = metadata::deserialize(&commit_data)?;
     info!("Got commit: {}", commit.message);
 
+    // Fetch key rotation records for this commit's key chain
+    let keys_dir = shard_dir.join("keys");
+    if let Some(kid) = &commit.key_id {
+        if keys_dir.join("records").exists() {
+            if let Ok(chain) = keychain::collect_rotation_chain(&keys_dir, kid) {
+                let missing_rotations: Vec<&KeyRotation> = chain
+                    .iter()
+                    .filter(|r| store.get_chunk(&r.rotation_id).is_err())
+                    .collect();
+                if !missing_rotations.is_empty() {
+                    info!(
+                        "Fetching {} key rotation records from peer...",
+                        missing_rotations.len()
+                    );
+                    let rot_requests: Vec<(String, shard_net::protocol::ShardRequest)> =
+                        missing_rotations
+                            .iter()
+                            .map(|r| {
+                                (
+                                    r.rotation_id.clone(),
+                                    shard_net::protocol::ShardRequest::GetChunk(
+                                        r.rotation_id.clone(),
+                                    ),
+                                )
+                            })
+                            .collect();
+                    if let Ok(rot_results) = node
+                        .request_parallel(&multiaddr, peer_id, rot_requests)
+                        .await
+                    {
+                        for (rot_id, rot_data) in &rot_results {
+                            let rh = blake3::hash(rot_data);
+                            if rh.to_hex().to_string() != *rot_id {
+                                info!("Key rotation record hash mismatch (expected {}, got {}) — skipping", rot_id, rh.to_hex());
+                                continue;
+                            }
+                            store.put_chunk(&crate::chunker::Chunk {
+                                hash: rh,
+                                data: rot_data.clone(),
+                                offset: 0,
+                            })?;
+                        }
+                        info!("Key rotation records synced from peer.");
+                    }
+                }
+            }
+        }
+    }
+
     // Set repo_id from commit's public key so clones share the gossipsub topic
     if let Some(pk_hex) = &commit.public_key {
         let pk_bytes = hex::decode(pk_hex)?;
@@ -2234,6 +2290,24 @@ pub async fn push(path: &Path, peer: &str) -> Result<()> {
         if let Ok(data) = store.get_chunk(&cid) {
             objects.insert(cid, data.clone());
             if let Ok(commit) = metadata::deserialize::<Commit>(&data) {
+                // Include key rotation records for this commit's key chain
+                if let Some(kid) = &commit.key_id {
+                    let keys_dir = shard_dir.join("keys");
+                    if let Ok(chain) = keychain::collect_rotation_chain(&keys_dir, kid) {
+                        for rot in &chain {
+                            let rj = serde_json::to_vec(rot)?;
+                            let rh = blake3::hash(&rj);
+                            if !store.has_chunk(rh.to_hex().as_ref()) {
+                                store.put_chunk(&crate::chunker::Chunk {
+                                    hash: rh,
+                                    data: rj.clone(),
+                                    offset: 0,
+                                })?;
+                            }
+                            objects.insert(rot.rotation_id.clone(), rj);
+                        }
+                    }
+                }
                 for mid in &commit.manifests {
                     if let Ok(manifest_data) = store.get_chunk(mid) {
                         objects.insert(mid.clone(), manifest_data.clone());
@@ -2286,11 +2360,38 @@ pub fn key_rotate(path: &Path) -> Result<()> {
     }
     let keys_dir = shard_dir.join("keys");
     let rotation = keychain::rotate_signing_key(&keys_dir)?;
+
+    // Store rotation record as a content-addressed chunk in the DAG
+    let store = Store::open(&shard_dir)?;
+    let json = serde_json::to_vec(&rotation)?;
+    let hash = blake3::hash(&json);
+    if !store.has_chunk(hash.to_hex().as_ref()) {
+        store.put_chunk(&crate::chunker::Chunk {
+            hash,
+            data: json,
+            offset: 0,
+        })?;
+    }
+
+    // Replicate all rotation records as chunks for P2P availability
+    let rotations = keychain::load_rotations(&keys_dir)?;
+    for rot in &rotations {
+        let rj = serde_json::to_vec(rot)?;
+        let rh = blake3::hash(&rj);
+        if !store.has_chunk(rh.to_hex().as_ref()) {
+            store.put_chunk(&crate::chunker::Chunk {
+                hash: rh,
+                data: rj,
+                offset: 0,
+            })?;
+        }
+    }
+
     info!(
         "Key rotated: {} -> {}",
         rotation.old_key_id, rotation.new_key_id
     );
-    info!("Rotation record: {}", rotation.rotation_id);
+    info!("Rotation record: {} (stored in DAG)", rotation.rotation_id);
     Ok(())
 }
 
