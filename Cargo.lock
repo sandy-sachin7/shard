@@ -3106,12 +3106,14 @@ dependencies = [
 name = "shard-core"
 version = "1.0.2"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "blake3",
  "criterion",
  "ed25519-dalek",
  "flate2",
  "hex",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "shard-crypto",

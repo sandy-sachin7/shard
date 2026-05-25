@@ -2,6 +2,7 @@ pub mod branch;
 pub mod chunker;
 pub mod commit;
 pub mod compression;
+pub mod encryption;
 pub mod index;
 pub mod manifest;
 pub mod store;
@@ -30,6 +31,7 @@ pub fn init(
     compression_algo: &str,
     chunker_mode: &str,
     chunk_size: Option<u64>,
+    is_private: bool,
 ) -> Result<()> {
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
@@ -51,6 +53,12 @@ pub fn init(
     let pubkey = fs::read(shard_dir.join("keys/public.key"))?;
     let repo_id = blake3::hash(&pubkey).to_hex().to_string();
     let mut config = load_config(&shard_dir)?;
+
+    if is_private {
+        let key = encryption::generate_repo_key();
+        encryption::save_repo_key(&shard_dir.join("keys"), &key)?;
+        config.insert("private".to_string(), "true".to_string());
+    }
     config.insert("repo_id".to_string(), repo_id);
     config.insert("storage_backend".to_string(), backend.to_string());
     config.insert("compression".to_string(), compression_algo.to_string());
@@ -116,6 +124,7 @@ fn add_file(
     index: &mut Index,
     compression: &Compression,
     chunker_mode: &chunker::ChunkerMode,
+    cipher: Option<&encryption::RepoCipher>,
 ) -> Result<()> {
     let file = fs::File::open(file_path)?;
     let mut chunker = match chunker_mode {
@@ -132,9 +141,13 @@ fn add_file(
     while let Some(chunk) = chunker.next_chunk()? {
         let hash = chunk.hash;
         let compressed_data = compression.compress(&chunk.data)?;
+        let stored_data = match cipher {
+            Some(c) => c.encrypt(&compressed_data),
+            None => compressed_data,
+        };
         let stored = crate::chunker::Chunk {
             hash,
-            data: compressed_data,
+            data: stored_data,
             offset: chunk.offset,
         };
         store.put_chunk(&stored)?;
@@ -186,6 +199,8 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
     let store = Store::open(&shard_dir)?;
     let mut index = Index::load(&shard_dir.join("index"))?;
 
+    let cipher = maybe_load_cipher(&shard_dir)?;
+
     if file_path.is_dir() {
         for entry in walkdir::WalkDir::new(file_path)
             .into_iter()
@@ -205,6 +220,7 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
                     &mut index,
                     &compression,
                     &chunker_mode,
+                    cipher.as_ref(),
                 )?;
             }
         }
@@ -216,6 +232,7 @@ pub fn add(path: &Path, file_path: &Path) -> Result<()> {
             &mut index,
             &compression,
             &chunker_mode,
+            cipher.as_ref(),
         )?;
     }
 
@@ -334,6 +351,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
         anyhow::bail!("invalid commit id (too short: need at least 2 characters)");
     }
     let store = Store::open(&shard_dir)?;
+    let cipher = maybe_load_cipher(&shard_dir)?;
     let commit_data = store.get_chunk(commit_id)?;
     let commit: Commit = serde_json::from_slice(&commit_data)?;
 
@@ -384,7 +402,11 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
 
         for chunk_id in &manifest.chunks {
             let chunk_data = store.get_chunk(chunk_id)?;
-            let decompressed = compression.decompress(&chunk_data)?;
+            let decrypted = match &cipher {
+                Some(c) => c.decrypt(&chunk_data)?,
+                None => chunk_data,
+            };
+            let decompressed = compression.decompress(&decrypted)?;
             let hash = blake3::hash(&decompressed);
             if hash.to_hex().to_string() != *chunk_id {
                 anyhow::bail!("chunk hash mismatch for '{}': content does not match stored hash (expected {}, got {}). File may be corrupted.", manifest.name, chunk_id, hash.to_hex());
@@ -510,6 +532,7 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
     }
 
     let store = Store::open(&shard_dir)?;
+    let cipher = maybe_load_cipher(&shard_dir)?;
 
     // Resolve target: branch name or commit id
     let branch_path = shard_dir.join("refs").join("heads").join(target);
@@ -543,7 +566,11 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
             let chunk_data = store.get_chunk(chunk_id)?;
-            let decompressed = compression.decompress(&chunk_data)?;
+            let decrypted = match &cipher {
+                Some(c) => c.decrypt(&chunk_data)?,
+                None => chunk_data,
+            };
+            let decompressed = compression.decompress(&decrypted)?;
             file_data.extend_from_slice(&decompressed);
         }
         fs::write(path.join(&manifest.name), file_data)?;
@@ -675,6 +702,16 @@ fn load_config(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, St
         Ok(serde_json::from_slice(&data)?)
     } else {
         Ok(std::collections::BTreeMap::new())
+    }
+}
+
+fn maybe_load_cipher(shard_dir: &Path) -> Result<Option<encryption::RepoCipher>> {
+    let config = load_config(shard_dir)?;
+    if config.get("private").map(|s| s.as_str()) == Some("true") {
+        let key = encryption::load_repo_key(&shard_dir.join("keys"))?;
+        Ok(Some(encryption::RepoCipher::from_key(&key)))
+    } else {
+        Ok(None)
     }
 }
 
@@ -1143,6 +1180,7 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
         anyhow::bail!("not a shard repository (run `shard init` first)");
     }
     let store = Store::open(&shard_dir)?;
+    let cipher = maybe_load_cipher(&shard_dir)?;
     let commit = load_commit(&store, commit_id)?;
     let mut files = Vec::new();
     for manifest_id in &commit.manifests {
@@ -1155,7 +1193,11 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
             let chunk_data = store.get_chunk(chunk_id)?;
-            let decompressed = compression.decompress(&chunk_data)?;
+            let decrypted = match &cipher {
+                Some(c) => c.decrypt(&chunk_data)?,
+                None => chunk_data,
+            };
+            let decompressed = compression.decompress(&decrypted)?;
             file_data.extend_from_slice(&decompressed);
         }
         let out_path = output_dir.join(&manifest.name);
@@ -1197,6 +1239,7 @@ pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Re
         .parse()?;
     let chunker_mode = chunker::ChunkerMode::from_config(&config);
     let store = Store::open(&shard_dir)?;
+    let cipher = maybe_load_cipher(&shard_dir)?;
     let mut index = Index::load(&shard_dir.join("index"))?;
     if !source_dir.is_dir() {
         anyhow::bail!("Source must be a directory");
@@ -1219,6 +1262,7 @@ pub fn import(path: &Path, source_dir: &Path, message: &str, author: &str) -> Re
                 &mut index,
                 &compression,
                 &chunker_mode,
+                cipher.as_ref(),
             )?;
         }
     }
@@ -1573,10 +1617,11 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     // if !shard_dir.exists() { init(path)?; }
 
     if !shard_dir.exists() {
-        init(path, "flat", "zstd", "fixed", None)?;
+        init(path, "flat", "zstd", "fixed", None, false)?;
     }
 
     let store = Store::open(&shard_dir)?;
+    let cipher = maybe_load_cipher(&shard_dir)?;
 
     let mut node = shard_net::p2p::Node::new().await?;
 
@@ -1685,13 +1730,17 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
                 .map(|s| s.as_str())
                 .unwrap_or("none")
                 .parse()?;
-            // Decompress to verify the content hash
-            let decompressed = compression.decompress(chunk_data)?;
+            // Decrypt (if private) then decompress to verify the content hash
+            let decrypted = match &cipher {
+                Some(c) => c.decrypt(chunk_data)?,
+                None => chunk_data.clone(),
+            };
+            let decompressed = compression.decompress(&decrypted)?;
             let hash = blake3::hash(&decompressed);
             if hash.to_hex().to_string() != *chunk_id {
                 anyhow::bail!("Chunk hash mismatch: {}", chunk_id);
             }
-            // Store the compressed data (as received)
+            // Store the data as received (encrypted for private repos)
             let chunk = crate::chunker::Chunk {
                 hash,
                 data: chunk_data.clone(),
@@ -1706,8 +1755,12 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
         let compression = manifest.compression.parse::<Compression>()?;
         let mut file_data = Vec::new();
         for chunk_id in &manifest.chunks {
-            let compressed = store.get_chunk(chunk_id)?;
-            let decompressed = compression.decompress(&compressed)?;
+            let stored = store.get_chunk(chunk_id)?;
+            let decrypted = match &cipher {
+                Some(c) => c.decrypt(&stored)?,
+                None => stored,
+            };
+            let decompressed = compression.decompress(&decrypted)?;
             file_data.extend_from_slice(&decompressed);
         }
         fs::write(path.join(&manifest.name), file_data)?;

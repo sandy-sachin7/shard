@@ -936,3 +936,95 @@ fn test_sqlite_checkout_restores_files() {
         "SQLite checkout"
     );
 }
+
+#[test]
+fn test_private_init_creates_repo_key_and_config() {
+    let dir = repo_dir("private-init-key");
+    let out = shard(&["init", "--private"], &dir).output().unwrap();
+    assert!(out.status.success(), "private init failed");
+
+    // repo.key must exist and be a 64-char hex string (32 bytes)
+    let key_path = dir.join(".shard/keys/repo.key");
+    assert!(key_path.exists(), "repo.key not created for private repo");
+    let key_hex = fs::read_to_string(&key_path).unwrap();
+    let key_hex = key_hex.trim();
+    assert_eq!(
+        key_hex.len(),
+        64,
+        "repo.key should be 64 hex chars (32 bytes)"
+    );
+
+    // Config must have private=true
+    let out = shard(&["config", "get", "private"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("private = true"));
+}
+
+#[test]
+fn test_private_add_commit_verify_checkout_roundtrip() {
+    let dir = repo_dir("private-roundtrip");
+    let out = shard(&["init", "--private"], &dir).output().unwrap();
+    assert!(out.status.success());
+
+    fs::write(dir.join("secret.txt"), b"this is private data").unwrap();
+    let out = shard(&["add", "secret.txt"], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "private add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = shard(
+        &["commit", "-m", "private-commit", "--author", "Test"],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "private commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).expect("no commit id");
+
+    // Verify must succeed on encrypted data
+    let out = shard(&["verify", commit_id], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "private verify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Verification successful"));
+
+    // Checkout must produce original content
+    fs::remove_file(dir.join("secret.txt")).unwrap();
+    let out = shard(&["checkout", commit_id], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "private checkout failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("secret.txt")).unwrap(),
+        "this is private data"
+    );
+
+    // Verify stored chunk is NOT the plaintext (encryption active)
+    let objects_dir = dir.join(".shard/objects");
+    if objects_dir.is_dir() {
+        let plaintext = b"this is private data";
+        for entry in walkdir::WalkDir::new(&objects_dir) {
+            let entry = entry.unwrap();
+            if entry.file_type().is_file() {
+                let content = fs::read(entry.path()).unwrap();
+                assert!(
+                    !content.windows(plaintext.len()).any(|w| w == plaintext),
+                    "stored chunk contains plaintext — encryption not active"
+                );
+            }
+        }
+    }
+}

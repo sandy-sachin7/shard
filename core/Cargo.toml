@@ -27,6 +27,8 @@ zstd = { version = "0.13", default-features = false }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 tar = { workspace = true }
 tracing = "0.1.44"
+aes-gcm = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

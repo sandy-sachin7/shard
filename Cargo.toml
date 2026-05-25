@@ -23,3 +23,5 @@ walkdir = "2.4"
 time = "0.3"
 tar = "0.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
+aes-gcm = "0.10"
+rand = "0.8"

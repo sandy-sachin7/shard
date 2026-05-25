@@ -186,10 +186,14 @@ async fn main() -> Result<()> {
             chunk_size,
         } => {
             let current_dir = env::current_dir()?;
-            shard_core::init(&current_dir, db, compression, chunker, *chunk_size)?;
-            if *private {
-                shard_core::config_set(&current_dir, "private", "true")?;
-            }
+            shard_core::init(
+                &current_dir,
+                db,
+                compression,
+                chunker,
+                *chunk_size,
+                *private,
+            )?;
         }
         Commands::Add { path } => {
             let current_dir = env::current_dir()?;
