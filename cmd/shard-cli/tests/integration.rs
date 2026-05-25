@@ -1475,3 +1475,133 @@ fn test_partial_recover_after_interrupted_pull() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn test_cbor_commit_verify_roundtrip() {
+    let dir = repo_dir("cbor-commit");
+    let out = shard(&["init"], &dir).output().unwrap();
+    assert!(out.status.success(), "init failed");
+
+    // Enable CBOR serialization
+    let out = shard(&["config", "set", "serialization_format", "cbor"], &dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "config set cbor failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    fs::write(dir.join("data.txt"), b"cbor test data").unwrap();
+    let out = shard(&["add", "data.txt"], &dir).output().unwrap();
+    assert!(out.status.success(), "cbor add failed");
+    let out = shard(
+        &["commit", "-m", "cbor-commit", "--author", "Test"],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "cbor commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).expect("no commit id");
+
+    // Verify
+    let out = shard(&["verify", commit_id], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "cbor verify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("Verification successful"));
+
+    // Checkout
+    fs::remove_file(dir.join("data.txt")).unwrap();
+    let out = shard(&["checkout", commit_id], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "cbor checkout failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("data.txt")).unwrap(),
+        "cbor test data"
+    );
+
+    // Verify works after cleanup
+    let out = shard(&["verify", commit_id], &dir).output().unwrap();
+    assert!(out.status.success(), "cbor verify after checkout failed");
+}
+
+#[test]
+fn test_cbor_mixed_format_compat() {
+    let dir = repo_dir("cbor-compat");
+    let out = shard(&["init"], &dir).output().unwrap();
+    assert!(out.status.success(), "init failed");
+
+    // Commit 1: JSON (default)
+    fs::write(dir.join("f1.txt"), b"json version").unwrap();
+    let out = shard(&["add", "f1.txt"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let out = shard(
+        &["commit", "-m", "json-commit", "--author", "Test"],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let c1 = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    // Switch to CBOR and commit again
+    let out = shard(&["config", "set", "serialization_format", "cbor"], &dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    fs::write(dir.join("f2.txt"), b"cbor version").unwrap();
+    let out = shard(&["add", "f2.txt"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let out = shard(
+        &["commit", "-m", "cbor-commit", "--author", "Test"],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let c2 = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    // Both commits should verify
+    let out = shard(&["verify", &c1], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "JSON commit verify failed after CBOR commit"
+    );
+    let out = shard(&["verify", &c2], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "CBOR commit verify failed"
+    );
+
+    // Log should show both commits
+    let out = shard(&["log"], &dir).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains(&c1[..8]));
+    assert!(stdout.contains(&c2[..8]));
+
+    // Diff should work between the two
+    let out = shard(&["diff", &c1, &c2], &dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "diff between JSON and CBOR commits failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("f1.txt") || stdout.contains("f2.txt"));
+}

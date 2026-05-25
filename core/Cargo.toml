@@ -30,6 +30,7 @@ tracing = "0.1.44"
 aes-gcm = { workspace = true }
 rand = { workspace = true }
 similar = { workspace = true }
+ciborium = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

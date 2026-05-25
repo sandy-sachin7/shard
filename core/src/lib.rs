@@ -6,6 +6,7 @@ pub mod encryption;
 pub mod index;
 pub mod keychain;
 pub mod manifest;
+pub mod metadata;
 pub mod partial;
 pub mod store;
 pub mod wal;
@@ -17,6 +18,7 @@ use crate::manifest::FileManifest;
 use crate::store::Store;
 use anyhow::Result;
 use ed25519_dalek::{Signer, Verifier};
+use metadata::MetadataFormat;
 use serde::Serialize;
 use shard_crypto::KeyPair;
 use shard_net::libp2p::futures::StreamExt;
@@ -65,6 +67,10 @@ pub fn init(
     }
     config.insert("repo_id".to_string(), repo_id);
     config.insert("storage_backend".to_string(), backend.to_string());
+    config.insert(
+        "serialization_format".to_string(),
+        MetadataFormat::Json.config_value().to_string(),
+    );
     config.insert("compression".to_string(), compression_algo.to_string());
     config.insert("chunker_mode".to_string(), chunker_mode.to_string());
     match chunker_mode {
@@ -272,13 +278,15 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
     })?;
 
     // 1. Store manifests
+    let config = load_config(&shard_dir)?;
+    let fmt = MetadataFormat::from_config(&config);
     let mut manifest_ids = Vec::new();
     for manifest in index.files.values() {
-        let json = serde_json::to_vec(manifest)?;
-        let hash = blake3::hash(&json);
+        let encoded = metadata::serialize(manifest, &fmt);
+        let hash = blake3::hash(&encoded);
         let chunk = crate::chunker::Chunk {
             hash,
-            data: json,
+            data: encoded,
             offset: 0,
         };
         store.put_chunk(&chunk)?;
@@ -310,18 +318,18 @@ pub fn commit(path: &Path, message: &str, author: &str) -> Result<()> {
         key_id,
     };
 
-    // 4. Sign
+    // 4. Sign — always JSON for deterministic signature
     let signing_key = keys.signing_key;
-    let json_unsigned = serde_json::to_vec(&commit)?;
+    let json_unsigned = metadata::serialize_for_signing(&commit);
     let signature = signing_key.sign(&json_unsigned);
     commit.signature = Some(hex::encode(signature.to_bytes()));
 
-    // 5. Store commit
-    let json_final = serde_json::to_vec(&commit)?;
-    let hash = blake3::hash(&json_final);
+    // 5. Store commit — use configured format
+    let encoded = metadata::serialize(&commit, &fmt);
+    let hash = blake3::hash(&encoded);
     let chunk = crate::chunker::Chunk {
         hash,
-        data: json_final,
+        data: encoded,
         offset: 0,
     };
     store.put_chunk(&chunk)?;
@@ -359,7 +367,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
     let store = Store::open(&shard_dir)?;
     let cipher = maybe_load_cipher(&shard_dir)?;
     let commit_data = store.get_chunk(commit_id)?;
-    let commit: Commit = serde_json::from_slice(&commit_data)?;
+    let commit: Commit = metadata::deserialize(&commit_data)?;
 
     let mut sig_verified = false;
     let mut files_checked = 0u64;
@@ -406,7 +414,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
             anyhow::bail!("manifest object hash mismatch for manifest '{}': content does not match stored hash. The object store may be corrupted.", manifest_id);
         }
 
-        let manifest: FileManifest = serde_json::from_slice(&manifest_data)?;
+        let manifest: FileManifest = metadata::deserialize(&manifest_data)?;
         let compression = manifest.compression.parse::<Compression>()?;
         if !json {
             info!(
@@ -455,7 +463,7 @@ fn load_commit(store: &Store, commit_id: &str) -> Result<Commit> {
         );
     };
     let data = store.get_chunk(commit_id)?;
-    let mut commit: Commit = serde_json::from_slice(&data)?;
+    let mut commit: Commit = metadata::deserialize(&data)?;
     commit.commit_id = commit_id.to_string();
     Ok(commit)
 }
@@ -583,14 +591,14 @@ pub fn diff(path: &Path, commit_a: &str, commit_b: Option<&str>, json: bool) -> 
     let mut files1: HashMap<String, FileManifest> = HashMap::new();
     for mid in &commit1.manifests {
         let data = store.get_chunk(mid)?;
-        let m: FileManifest = serde_json::from_slice(&data)?;
+        let m: FileManifest = metadata::deserialize(&data)?;
         files1.insert(m.name.clone(), m);
     }
 
     let mut files2: HashMap<String, FileManifest> = HashMap::new();
     for mid in &commit2.manifests {
         let data = store.get_chunk(mid)?;
-        let m: FileManifest = serde_json::from_slice(&data)?;
+        let m: FileManifest = metadata::deserialize(&data)?;
         files2.insert(m.name.clone(), m);
     }
 
@@ -731,7 +739,7 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
         if hash.to_hex().to_string() != *manifest_id {
             anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
         }
-        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        let manifest: FileManifest = metadata::deserialize(&data)?;
         let compression = manifest.compression.parse::<Compression>()?;
         if !json {
             info!(
@@ -812,7 +820,7 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         if let Ok(commit) = load_commit(&store, head) {
             for manifest_id in &commit.manifests {
                 if let Ok(data) = store.get_chunk(manifest_id) {
-                    if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&data) {
+                    if let Ok(manifest) = metadata::deserialize::<FileManifest>(&data) {
                         let file_path = path.join(&manifest.name);
                         if !file_path.exists() {
                             deleted.push(manifest.name.clone());
@@ -1023,6 +1031,9 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
 
     let store = Store::open(&shard_dir)?;
 
+    let config = load_config(&shard_dir)?;
+    let fmt = MetadataFormat::from_config(&config);
+
     // Resolve current HEAD
     let (current_branch, current_id) = branch::resolve_head(&shard_dir)?;
     let current_id =
@@ -1044,13 +1055,13 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
 
     for manifest_id in &current_commit.manifests {
         let data = store.get_chunk(manifest_id)?;
-        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        let manifest: FileManifest = metadata::deserialize(&data)?;
         merged_manifests.insert(manifest.name.clone(), (manifest.name, manifest.chunks));
     }
 
     for manifest_id in &source_commit.manifests {
         let data = store.get_chunk(manifest_id)?;
-        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        let manifest: FileManifest = metadata::deserialize(&data)?;
         merged_manifests.insert(manifest.name.clone(), (manifest.name, manifest.chunks));
     }
 
@@ -1065,11 +1076,11 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
             content_type: None,
             compression: compression.as_str().to_string(),
         };
-        let json = serde_json::to_vec(&manifest)?;
-        let hash = blake3::hash(&json);
+        let encoded = metadata::serialize(&manifest, &fmt);
+        let hash = blake3::hash(&encoded);
         store.put_chunk(&crate::chunker::Chunk {
             hash,
-            data: json,
+            data: encoded,
             offset: 0,
         })?;
         merged_manifest_ids.push(hash.to_hex().to_string());
@@ -1095,15 +1106,15 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str) -> Result<(
     };
 
     let signing_key = keys.signing_key;
-    let json_unsigned = serde_json::to_vec(&commit)?;
+    let json_unsigned = metadata::serialize_for_signing(&commit);
     let signature = signing_key.sign(&json_unsigned);
     commit.signature = Some(hex::encode(signature.to_bytes()));
 
-    let json_final = serde_json::to_vec(&commit)?;
-    let hash = blake3::hash(&json_final);
+    let encoded = metadata::serialize(&commit, &fmt);
+    let hash = blake3::hash(&encoded);
     store.put_chunk(&crate::chunker::Chunk {
         hash,
-        data: json_final,
+        data: encoded,
         offset: 0,
     })?;
 
@@ -1158,7 +1169,7 @@ fn collect_reachable(
         reachable.insert(manifest_id.clone());
 
         if let Ok(data) = store.get_chunk(manifest_id) {
-            if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&data) {
+            if let Ok(manifest) = metadata::deserialize::<FileManifest>(&data) {
                 for chunk_id in &manifest.chunks {
                     reachable.insert(chunk_id.clone());
                 }
@@ -1364,7 +1375,7 @@ pub fn export(path: &Path, commit_id: &str, output_dir: &Path, json: bool) -> Re
     let mut files = Vec::new();
     for manifest_id in &commit.manifests {
         let data = store.get_chunk(manifest_id)?;
-        let manifest: FileManifest = serde_json::from_slice(&data)?;
+        let manifest: FileManifest = metadata::deserialize(&data)?;
         let compression = manifest.compression.parse::<Compression>()?;
         if !json {
             info!("Exporting file: {}", manifest.name);
@@ -1874,7 +1885,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
     };
     store.put_chunk(&chunk)?;
 
-    let commit: Commit = serde_json::from_slice(&commit_data)?;
+    let commit: Commit = metadata::deserialize(&commit_data)?;
     info!("Got commit: {}", commit.message);
 
     // Set repo_id from commit's public key so clones share the gossipsub topic
@@ -1917,7 +1928,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str) -> Result<()> {
             offset: 0,
         };
         store.put_chunk(&chunk)?;
-        let manifest: FileManifest = serde_json::from_slice(manifest_data)?;
+        let manifest: FileManifest = metadata::deserialize(manifest_data)?;
         info!(
             "Fetching file: {} (compression: {})",
             manifest.name, manifest.compression
@@ -2086,11 +2097,11 @@ pub async fn push(path: &Path, peer: &str) -> Result<()> {
         }
         if let Ok(data) = store.get_chunk(&cid) {
             objects.insert(cid, data.clone());
-            if let Ok(commit) = serde_json::from_slice::<Commit>(&data) {
+            if let Ok(commit) = metadata::deserialize::<Commit>(&data) {
                 for mid in &commit.manifests {
                     if let Ok(manifest_data) = store.get_chunk(mid) {
                         objects.insert(mid.clone(), manifest_data.clone());
-                        if let Ok(manifest) = serde_json::from_slice::<FileManifest>(&manifest_data)
+                        if let Ok(manifest) = metadata::deserialize::<FileManifest>(&manifest_data)
                         {
                             for cid in &manifest.chunks {
                                 if let Ok(chunk_data) = store.get_chunk(cid) {

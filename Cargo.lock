@@ -3214,6 +3214,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "blake3",
+ "ciborium",
  "criterion",
  "ed25519-dalek",
  "flate2",

@@ -26,3 +26,4 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 aes-gcm = "0.10"
 rand = "0.8"
 similar = "2"
+ciborium = "0.2"
