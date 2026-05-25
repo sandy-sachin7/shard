@@ -6,7 +6,6 @@ members = [
     "crypto",
     "storage",
     "tests",
-    "python/shard-py",
 ]
 resolver = "2"
 
@@ -29,5 +28,3 @@ aes-gcm = "0.10"
 rand = "0.8"
 similar = "2"
 ciborium = "0.2"
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py38"] }
-chrono = "0.4"
