@@ -1,7 +1,13 @@
 <div align="center">
   <h1>💎 Shard</h1>
-  <p><b>Distributed, content-addressed version control for large ML artifacts</b></p>
-  <p><i>No cloud bills, no central bottlenecks. Local-first, protocol-first, peer-to-peer.</i></p>
+
+  <p><b>shard is a local-first version control system for your machine learning artifacts.</b></p>
+
+  <p>
+    local-first, no cloud dependency<br>
+    every commit is content-addressed and cryptographically signed<br>
+    only changed chunks transfer, not the full artifact
+  </p>
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
   [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
@@ -19,8 +25,6 @@
 </div>
 
 ---
-
-Shard is a protocol-first, local-first, peer-to-peer version control system for ML artifacts — models, datasets, checkpoints. Git-like ergonomics, content-addressed storage, signed commits, and direct P2P transfers.
 
 <div align="center">
   <img src="demo.gif" alt="Shard Demo" width="80%">
@@ -67,15 +71,6 @@ Install from local source
 
 ```bash
 cargo install --path cmd/shard-cli
-```
-
-**Build from source**
-
-```bash
-git clone https://github.com/sandy-sachin7/shard.git
-cd shard
-cargo build --release
-./target/release/shard --help
 ```
 
 ---
@@ -292,16 +287,15 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 
 ## Comparison
 
-| Feature | Git | Shard |
-| :--- | :--- | :--- |
-| **Primary use** | Source code | ML artifacts (models, datasets, checkpoints) |
-| **Chunking** | CDC (git fast-import) | Rabin + Fixed + configurable |
-| **Compression** | zlib (default) | Zstd or Zlib (runtime selectable) |
-| **Hashing** | SHA-1 (transitioning to SHA-256) | Blake3 |
-| **P2P** | Remote-centric (push/pull to server) | Native P2P (mDNS, Kademlia, Gossipsub) |
-| **Storage backend** | Flat files + packfiles | Sled or SQLite indexed store |
-| **Signing** | GPG (optional) | ed25519 (built-in, every commit) |
-| **Transport** | SSH/HTTPS | libp2p TCP + Noise + Yamux |
+| Feature | Git LFS | DVC | HuggingFace Hub | Shard |
+| :--- | :--- | :--- | :--- | :--- |
+| **cloud dependency** | required | optional | required | none (local-first) |
+| **chunking strategy** | full file | full file | full file | rabin cdc or fixed |
+| **signing** | gpg (optional) | no | no | ed25519 (built-in) |
+| **P2P** | no | no | no | native |
+| **Python API** | no | yes | yes | yes |
+| **primary use case** | large files | data pipelines | model hosting | ml artifacts |
+| **offline support** | poor | good | poor | first-class |
 
 
 
@@ -317,7 +311,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 - [x] Phase 6: Push Protocol (object transfer to peer)
 - [x] Phase 7: Production Hardening (auth, tracing, backup/export/import/restore, Docker)
 - [x] Phase 8: Publishing (crate metadata, crates.io publish-ready, 5-target releases)
-- [ ] Phase 9: Enterprise (CI polish, benchmarks, docs, community templates)
+- [x] Phase 9: Enterprise (CI polish, benchmarks, docs, community templates)
 
 ---
 
