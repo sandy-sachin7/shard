@@ -5,6 +5,7 @@
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
   [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
+  [![PyPI - Version](https://img.shields.io/pypi/v/shard-py?style=for-the-badge&logo=pypi&color=blue)](https://pypi.org/project/shard-py/)
   [![CI](https://img.shields.io/github/actions/workflow/status/sandy-sachin7/shard/ci.yml?style=for-the-badge&logo=github)](https://github.com/sandy-sachin7/shard/actions)
   [![Release](https://img.shields.io/github/v/release/sandy-sachin7/shard?style=for-the-badge)](https://github.com/sandy-sachin7/shard/releases)
   [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](http://makeapullrequest.com)
@@ -24,6 +25,12 @@ Shard is a protocol-first, local-first, peer-to-peer version control system for 
 ---
 
 ## Install
+
+**Python (pip)**
+
+```bash
+pip install shard-py
+```
 
 **Linux & macOS (one-liner)**
 

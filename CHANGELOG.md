@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.1.1
+
+### Bug fixes
+
+- **macOS Build**: Fixed `_PyBaseObject_Type` undefined symbols by properly injecting `-undefined dynamic_lookup` linking flags for PyO3 (`PYO3_MAC_EXT_LINK_DYNAMIC_LOOKUP`).
+- **Windows Build**: Resolved `LNK1181` linking error by ensuring PyO3 can accurately locate `python3.lib` in the host environment.
+- **Security**: Upgraded `pyo3` to `0.24.2` to resolve a known buffer overflow vulnerability (`RUSTSEC-2025-0020`).
+- **Docker**: Ensured `python3` is available in Alpine builder and fixed `.cargo` missing directory issues by updating `.dockerignore`.
 ## v2.1.0
 
 ### Bug fixes
