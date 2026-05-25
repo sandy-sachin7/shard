@@ -316,7 +316,7 @@ pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
             .into_iter()
             .filter_entry(|e| {
                 let name = e.file_name().to_string_lossy();
-                if name.starts_with('.') && name.to_string() != ".shardignore" {
+                if name == ".shard" || name == ".git" {
                     return false;
                 }
                 let rel = e.path().strip_prefix(file_path).unwrap_or(e.path());
@@ -1064,7 +1064,10 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
             let name = rel_path.to_string_lossy().to_string();
             let is_hidden = rel_path
                 .components()
-                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
+                .any(|c| {
+                    let name = c.as_os_str().to_string_lossy();
+                    name == ".shard" || name == ".git"
+                });
             if !is_hidden
                 && entry.path() != shard_dir
                 && !entry.path().starts_with(&shard_dir)
