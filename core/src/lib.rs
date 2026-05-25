@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info};
 
@@ -54,6 +55,11 @@ pub fn init(
 
     let keys = KeyPair::generate();
     keys.save(&shard_dir.join("keys"))?;
+    if let Some(global) = global_keys_dir() {
+        fs::create_dir_all(&global).ok();
+        let _ = keys.save(&global);
+        let _ = keychain::init_keychain(&global);
+    }
     keychain::init_keychain(&shard_dir.join("keys"))?;
 
     // Generate a deterministic repo identity from the public key
@@ -345,7 +351,7 @@ pub fn commit(path: &Path, message: &str, author: &str, json: bool) -> Result<()
 
     // 1. Store manifests (signed)
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let keys = KeyPair::load(&shard_dir.join("keys"))?;
+    let keys = load_keypair(&shard_dir)?;
     let signing_key = keys.signing_key;
     let mut manifest_ids = Vec::new();
     for manifest in index.files.values_mut() {
@@ -481,8 +487,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
             let pk_bytes = hex::decode(pk_hex)?;
             ed25519_dalek::VerifyingKey::from_bytes(pk_bytes.as_slice().try_into()?)?
         } else {
-            let pub_key_path = shard_dir.join("keys/public.key");
-            let pub_bytes = fs::read(pub_key_path)?;
+            let pub_bytes = load_public_key(&shard_dir)?;
             ed25519_dalek::VerifyingKey::from_bytes(pub_bytes.as_slice().try_into()?)?
         };
 
@@ -516,8 +521,7 @@ pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
             let pk_bytes = if let Some(pk_hex) = &commit.public_key {
                 hex::decode(pk_hex)?
             } else {
-                let pub_key_path = shard_dir.join("keys/public.key");
-                fs::read(pub_key_path)?
+                load_public_key(&shard_dir)?
             };
             let vk = ed25519_dalek::VerifyingKey::from_bytes(pk_bytes.as_slice().try_into()?)?;
             let mut unsigned = manifest.clone();
@@ -1053,6 +1057,45 @@ fn save_config(
     Ok(())
 }
 
+fn global_keys_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| Path::new(&h).join(".shard").join("keys"))
+}
+
+fn load_keypair(shard_dir: &Path) -> Result<KeyPair> {
+    let local = shard_dir.join("keys");
+    if local.join("secret.key").exists() {
+        return KeyPair::load(&local);
+    }
+    if let Some(global) = global_keys_dir() {
+        if global.join("secret.key").exists() {
+            return KeyPair::load(&global);
+        }
+    }
+    anyhow::bail!(
+        "no keypair found in {} or ~/.shard/keys/",
+        local.display()
+    )
+}
+
+fn load_public_key(shard_dir: &Path) -> Result<Vec<u8>> {
+    let local = shard_dir.join("keys/public.key");
+    if local.exists() {
+        return Ok(fs::read(&local)?);
+    }
+    if let Some(global) = global_keys_dir() {
+        let gp = global.join("public.key");
+        if gp.exists() {
+            return Ok(fs::read(&gp)?);
+        }
+    }
+    anyhow::bail!(
+        "no public key found in {} or ~/.shard/keys/",
+        local.display()
+    )
+}
+
 fn maybe_load_cipher(shard_dir: &Path) -> Result<Option<encryption::RepoCipher>> {
     let config = load_config(shard_dir)?;
     if config.get("private").map(|s| s.as_str()) == Some("true") {
@@ -1221,7 +1264,7 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str, json: bool)
 
     // Store merged manifests (signed)
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let keys = KeyPair::load(&shard_dir.join("keys"))?;
+    let keys = load_keypair(&shard_dir)?;
     let signing_key = keys.signing_key;
     let mut merged_manifest_ids = Vec::new();
     for (name, chunks) in merged_manifests.values() {
@@ -1755,7 +1798,7 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
         true
     }
     fn repo_public_key(&self) -> Option<Vec<u8>> {
-        let keys = shard_crypto::KeyPair::load(&self.shard_dir.join("keys")).ok()?;
+        let keys = load_keypair(&self.shard_dir).ok()?;
         Some(keys.verifying_key.to_bytes().to_vec())
     }
 }
@@ -1775,6 +1818,9 @@ pub async fn share(path: &Path, json: bool) -> Result<()> {
             let _ = node.swarm.dial(addr);
         }
     }
+
+    // Trigger Kademlia DHT bootstrap
+    node.swarm.behaviour_mut().kademlia.bootstrap().ok();
 
     node.listen("/ip4/0.0.0.0/tcp/0").await?;
 
@@ -1860,6 +1906,9 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
             let _ = node.swarm.dial(addr);
         }
     }
+
+    // Trigger Kademlia DHT bootstrap
+    node.swarm.behaviour_mut().kademlia.bootstrap().ok();
 
     let head_commit = branch::resolve_head(&shard_dir)?.1;
 
@@ -2480,6 +2529,14 @@ pub fn key_rotate(path: &Path) -> Result<()> {
     }
     let keys_dir = shard_dir.join("keys");
     let rotation = keychain::rotate_signing_key(&keys_dir)?;
+
+    // Also update global keyring
+    if let Some(global) = global_keys_dir() {
+        fs::create_dir_all(&global).ok();
+        if let Ok(new_keys) = KeyPair::load(&keys_dir) {
+            let _ = new_keys.save(&global);
+        }
+    }
 
     // Store rotation record as a content-addressed chunk in the DAG
     let store = Store::open(&shard_dir)?;
