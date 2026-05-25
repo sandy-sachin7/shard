@@ -15,6 +15,8 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
+use libp2p_dcutr as dcutr;
+use libp2p_relay as relay;
 use tokio::signal;
 
 #[derive(NetworkBehaviour)]
@@ -25,6 +27,9 @@ pub struct ShardBehaviour {
     pub mdns: mdns::tokio::Behaviour,
     pub identify: libp2p::identify::Behaviour,
     pub ping: ping::Behaviour,
+    pub relay: relay::Behaviour,
+    pub dcutr: dcutr::Behaviour,
+    pub autonat: libp2p_autonat::Behaviour,
 }
 
 pub struct Node {
@@ -37,12 +42,13 @@ impl Node {
     pub async fn new() -> Result<Self> {
         let swarm = SwarmBuilder::with_new_identity()
             .with_tokio()
-            // .with_quic()
             .with_tcp(
                 tcp::Config::new().nodelay(true),
                 noise::Config::new,
                 yamux::Config::default,
             )?
+            .with_quic()
+            .with_dns()?
             .with_behaviour(|key| {
                 let local_peer_id = PeerId::from(key.public());
                 info!("Local peer id: {local_peer_id}");
@@ -79,6 +85,18 @@ impl Node {
                 // Ping (keeps connections alive)
                 let ping = ping::Behaviour::new(ping::Config::new());
 
+                // Relay (circuit relay v2) — both client and server in one behaviour
+                let relay = relay::Behaviour::new(local_peer_id, relay::Config::default());
+
+                // DCUtR (Direct Connection Upgrade through Relay) — hole-punching
+                let dcutr = dcutr::Behaviour::new(local_peer_id);
+
+                // AutoNAT (NAT type detection)
+                let autonat = libp2p_autonat::Behaviour::new(
+                    local_peer_id,
+                    libp2p_autonat::Config::default(),
+                );
+
                 ShardBehaviour {
                     gossipsub,
                     kademlia,
@@ -86,6 +104,9 @@ impl Node {
                     mdns,
                     identify,
                     ping,
+                    relay,
+                    dcutr,
+                    autonat,
                 }
             })?
             .with_swarm_config(|config| {
@@ -268,6 +289,15 @@ impl Node {
                         }
                         SwarmEvent::Behaviour(ShardBehaviourEvent::Identify(event)) => {
                             info!("Identify event: {:?}", event);
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::Relay(event)) => {
+                            info!("Relay event: {:?}", event);
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::Dcutr(event)) => {
+                            info!("DCUtR event: {:?}", event);
+                        }
+                        SwarmEvent::Behaviour(ShardBehaviourEvent::Autonat(event)) => {
+                            info!("AutoNAT event: {:?}", event);
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                             info!("Connection established with {}", peer_id);

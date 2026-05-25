@@ -128,6 +128,12 @@ enum Commands {
         /// Path to the backup tar.gz file
         backup: PathBuf,
     },
+    /// Start a circuit relay v2 server for NAT traversal
+    Relay {
+        /// Listen address (default: /ip4/0.0.0.0/tcp/0)
+        #[arg(long, default_value = "/ip4/0.0.0.0/tcp/0")]
+        listen: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -356,6 +362,9 @@ async fn main() -> Result<()> {
         Commands::Restore { backup } => {
             let current_dir = env::current_dir()?;
             shard_core::restore(&current_dir, backup)?;
+        }
+        Commands::Relay { listen } => {
+            shard_core::relay(listen).await?;
         }
     }
 

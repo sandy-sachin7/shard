@@ -1399,6 +1399,38 @@ pub async fn share(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Start a circuit relay v2 server for NAT traversal.
+/// Listens on the given address and forwards traffic between peers.
+pub async fn relay(listen_addr: &str) -> Result<()> {
+    let mut node = shard_net::p2p::Node::new().await?;
+    node.listen(listen_addr).await?;
+    info!("Relay server active on {}", listen_addr);
+    info!("Peer ID: {}", node.local_peer_id());
+    info!("Ready to accept circuit relay v2 reservations");
+    node.run(EmptyProvider).await;
+    Ok(())
+}
+
+/// Minimal provider for relay-only mode (no repo content needed).
+struct EmptyProvider;
+impl shard_net::p2p::ShardContentProvider for EmptyProvider {
+    fn get_manifest(&self, _id: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn get_chunk(&self, _id: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn put_chunk(&mut self, _id: &str, _data: &[u8]) -> bool {
+        false
+    }
+    fn verify_auth(&self, _public_key: &[u8], _nonce: &[u8], _signature: &[u8]) -> bool {
+        false
+    }
+    fn repo_public_key(&self) -> Option<Vec<u8>> {
+        None
+    }
+}
+
 pub async fn sync(path: &Path) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
@@ -1606,6 +1638,21 @@ pub async fn sync(path: &Path) -> Result<()> {
                             let msg = format!("announce:{}", head);
                             let _ = node.publish(&topic, msg.as_bytes());
                         }
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Relay(event),
+                    ) => {
+                        info!("Relay event: {:?}", event);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Dcutr(event),
+                    ) => {
+                        info!("DCUtR event: {:?}", event);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Autonat(event),
+                    ) => {
+                        info!("AutoNAT event: {:?}", event);
                     }
                     shard_net::libp2p::swarm::SwarmEvent::IncomingConnection {
                         local_addr,
