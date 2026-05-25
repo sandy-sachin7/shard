@@ -91,7 +91,8 @@ Shard is built for ML artifact sizes. Here's how it compares:
 | **Storage overhead** | 1:1 copy | 1:1 copy | **~1.05:1** (dedup) |
 | **Pull (10GB checkpoint)** | ~4 min | ~3.5 min | **~45 sec** |
 
-> **Reproducible benchmarks**: Run `./benchmarks/benchmark.sh [size_mb]` to verify these numbers yourself.
+> **Reproducible benchmarks**: Run `./benchmarks/benchmark.sh [size_mb]` for local throughput.
+> For P2P transfer benchmarks, see `benchmarks/p2p_bench.sh` and `benchmarks/METHODOLOGY.md`.
 
 **Why Shard is faster:**
 - **Rabin CDC** (Content-Defined Chunking) — only uploads the diffs, not the full file

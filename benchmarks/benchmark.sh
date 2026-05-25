@@ -1,6 +1,15 @@
 #!/bin/bash
 # Shard Benchmark Script
-# Reproducible performance testing for ML artifact operations
+# Reproducible performance testing for local ML artifact operations
+#
+# WHAT THIS MEASURES:
+#   - shard add:     chunking + compression + local store throughput
+#   - shard commit: metadata creation latency
+#
+# WHAT THIS DOES NOT MEASURE:
+#   - Network transfer (P2P push/pull requires two nodes)
+#   - Git LFS push times (includes network upload to remote)
+#
 # Usage: ./benchmark.sh [size_in_mb] [output_format]
 #   size_in_mb: File size to test (default: 1024 = 1GB)
 #   output_format: "table" (default) or "json"
@@ -28,7 +37,7 @@ elapsed_ns() {
 
 echo ""
 echo "=============================================="
-echo "  Shard Benchmark — $SIZE_MB MB file"
+echo "  Shard Local Benchmark — $SIZE_MB MB file"
 echo "=============================================="
 echo ""
 log "Generating ${SIZE_MB} MB random test file..."
@@ -60,7 +69,6 @@ COMMIT_TIME=$(elapsed_ns $START_COMMIT $END_COMMIT)
 
 TOTAL_TIME=$(echo "$ADD_TIME $COMMIT_TIME" | awk '{printf "%.2f", $1 + $2}')
 THROUGHPUT=$(echo "$SIZE_MB $TOTAL_TIME" | awk '{printf "%.2f", $1 / $2}')
-EXTRAPOLATED=$(echo "$TOTAL_TIME" | awk '{printf "%.2f", $1 * 10}')
 
 if [ "$OUTPUT_FORMAT" = "json" ]; then
     cat <<EOF
@@ -76,23 +84,25 @@ else
     printf "  %-28s %12.2f\n" "shard commit" "$COMMIT_TIME"
     echo "  ----------------------------------------"
     printf "  %-28s %12.2f\n" "TOTAL (add + commit)" "$TOTAL_TIME"
-    printf "\n  %-28s %12s MB/s\n" "Throughput (add + commit)" "$THROUGHPUT"
+    printf "\n  Local throughput: %s MB/s\n" "$THROUGHPUT"
     echo ""
     echo "=============================================="
-    echo "  Extrapolation to 10GB"
+    echo "  Scope & Limitations"
     echo "=============================================="
     echo ""
-    echo "  Projected time for 10GB: ~${EXTRAPOLATED} seconds"
+    echo "  This benchmark measures LOCAL operations only:"
+    echo "    - Chunking (fixed 4MiB blocks)"
+    echo "    - Compression (zstd)"
+    echo "    - Blake3 hashing"
+    echo "    - Local object storage"
     echo ""
-    echo "  Comparison (from README):"
-    echo "    Git LFS 10GB push: ~300 seconds (5 min)"
-    echo "    Shard 10GB push:   ~${EXTRAPOLATED} seconds"
+    echo "  NOT measured (requires P2P setup):"
+    echo "    - shard share:  announce to network"
+    echo "    - shard pull:   P2P transfer speed"
+    echo "    - shard push:   P2P push speed"
     echo ""
-    echo "  NOTE: Git LFS benchmark not included — run manually with:"
-    echo "    git lfs track '*.bin'"
-    echo "    cp $TEST_FILE test_model.bin"
-    echo "    git add test_model.bin"
-    echo "    time git commit -m 'bench'"
+    echo "  The README claims ~40 sec for 10GB push (P2P)."
+    echo "  Run benchmarks/p2p_bench.sh on two machines to verify."
 fi
 
 echo ""
