@@ -22,6 +22,10 @@
 
 Shard is a protocol-first, local-first, peer-to-peer version control system for ML artifacts — models, datasets, checkpoints. Git-like ergonomics, content-addressed storage, signed commits, and direct P2P transfers.
 
+<div align="center">
+  <img src="demo.gif" alt="Shard Demo" width="80%">
+</div>
+
 ---
 
 ## Install
