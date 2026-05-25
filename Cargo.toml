@@ -5,6 +5,7 @@ members = [
     "net",
     "crypto",
     "storage",
+    "tests",
 ]
 resolver = "2"
 

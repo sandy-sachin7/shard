@@ -1,6 +1,8 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use std::env;
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -153,6 +155,9 @@ enum Commands {
     Transfer {
         #[command(subcommand)]
         command: TransferCommands,
+    },
+    Completions {
+        shell: String,
     },
 }
 
@@ -401,7 +406,7 @@ async fn main() -> Result<()> {
         Commands::Relay { listen, json } => {
             shard_core::relay(listen, *json).await?;
         }
-        Commands::Transfer { command } => match command {
+            Commands::Transfer { command } => match command {
             TransferCommands::List { json } => {
                 let current_dir = env::current_dir()?;
                 shard_core::transfer_list(&current_dir, *json)?;
@@ -411,6 +416,11 @@ async fn main() -> Result<()> {
                 shard_core::transfer_remove(&current_dir, commit_id)?;
             }
         },
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let shell: Shell = shell.parse().map_err(|e| anyhow::anyhow!("{}", e))?;
+            generate(shell, &mut cmd, "shard", &mut io::stdout());
+        }
     }
 
     Ok(())

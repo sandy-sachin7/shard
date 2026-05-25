@@ -40,6 +40,9 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
+      - name: cargo bench
+        run: cargo bench --locked || echo "Benchmarks are informational"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

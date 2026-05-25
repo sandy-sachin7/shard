@@ -1,0 +1,13 @@
+[package]
+name = "shard-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+shard-core = { path = "../core" }
+tempfile = { workspace = true }
+
+[[test]]
+name = "integration"
+path = "tests.rs"
