@@ -858,3 +858,81 @@ fn test_sync_auto_pull() {
     let _ = child_b.kill();
     let _ = child_b.wait();
 }
+
+#[test]
+fn test_init_sqlite_creates_dot_shard() {
+    let dir = repo_dir("sqlite-init");
+    let output = shard(&["init", "--db", "sqlite"], &dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "sqlite init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(dir.join(".shard").is_dir());
+    // Config must store the sqlite backend
+    let config: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(dir.join(".shard/config.json")).unwrap()).unwrap();
+    assert_eq!(
+        config.get("storage_backend").map(|s| s.as_str()),
+        Some("sqlite")
+    );
+}
+
+#[test]
+fn test_sqlite_add_commit_verify_roundtrip() {
+    let dir = repo_dir("sqlite-roundtrip");
+    shard(&["init", "--db", "sqlite"], &dir).output().unwrap();
+
+    fs::write(dir.join("hello.txt"), b"Hello, SQLite!").unwrap();
+    let output = shard(&["add", "hello.txt"], &dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "sqlite add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // DB file should now exist after first chunk stored
+    assert!(dir.join(".shard/objects.db").exists());
+
+    let output = shard(&["commit", "-m", "sqlite-test", "--author", "Test"], &dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "sqlite commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).expect("no commit id");
+
+    let output = shard(&["verify", commit_id], &dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "sqlite verify failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Verification successful"));
+}
+
+#[test]
+fn test_sqlite_checkout_restores_files() {
+    let dir = repo_dir("sqlite-checkout");
+    shard(&["init", "--db", "sqlite"], &dir).output().unwrap();
+
+    fs::write(dir.join("restore.txt"), b"SQLite checkout").unwrap();
+    shard(&["add", "restore.txt"], &dir).output().unwrap();
+    let output = shard(&["commit", "-m", "co-test", "--author", "T"], &dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
+
+    fs::remove_file(dir.join("restore.txt")).unwrap();
+    let output = shard(&["checkout", &commit_id], &dir).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(dir.join("restore.txt")).unwrap(),
+        "SQLite checkout"
+    );
+}

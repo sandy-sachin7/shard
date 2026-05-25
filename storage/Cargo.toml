@@ -2,7 +2,7 @@
 name = "shard-storage"
 version = "1.0.2"
 edition = "2021"
-description = "Storage backends for shard distributed VCS (sled, flat file)"
+description = "Storage backends for shard distributed VCS (sled, sqlite, flat file)"
 license = "MIT"
 repository = "https://github.com/sandy-sachin7/shard"
 homepage = "https://github.com/sandy-sachin7/shard"
@@ -12,5 +12,6 @@ categories = ["database"]
 [dependencies]
 anyhow = { workspace = true }
 sled = "0.34"
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
