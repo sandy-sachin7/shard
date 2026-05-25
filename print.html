@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-ffc536ef.js";
+            window.path_to_searchindex_js = "searchindex-fa2a3422.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-50be9360.js"></script>
@@ -310,6 +310,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 <tr><td style="text-align: left"><code>export &lt;commit&gt; &lt;dir&gt;</code></td><td style="text-align: left">Reconstruct commit to directory</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>import &lt;dir&gt;</code></td><td style="text-align: left">Ingest directory as commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
 <tr><td style="text-align: left"><code>recover</code></td><td style="text-align: left">Recover from WAL crash</td><td style="text-align: left"></td></tr>
+<tr><td style="text-align: left"><code>completions</code></td><td style="text-align: left">Generate shell completions</td><td style="text-align: left"><code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>elvish</code>, <code>powershell</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -416,8 +417,25 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 <h2 id="announcements"><a class="header" href="#announcements">Announcements</a></h2>
 <p>When a repository is updated, nodes announce the new commit over the P2P network.</p>
 <ul>
-<li><strong>Topic:</strong> <code>shard:ann</code></li>
-<li><strong>Payload:</strong> A simple PubSub message containing <code>commit_id</code>, minimal manifest summary, repo name, and peer multiaddr.</li>
+<li><strong>Topic:</strong> <code>shard:ann</code> (global) and <code>/shard/repo/&lt;repo_id&gt;</code> (repo-specific)</li>
+<li><strong>Payload:</strong> JSON-serialized <code>Announcement</code>:</li>
+</ul>
+<pre><code class="language-json">{
+  "commit_id": "&lt;blake3 hash&gt;",
+  "file_count": 42,
+  "total_size": 1073741824,
+  "repo_name": "my-model",
+  "peer_multiaddr": "/ip4/192.168.1.2/tcp/9876"
+}
+</code></pre>
+<p>Nodes subscribe to both topics. Announcements are published on initial share, on a 5-second heartbeat, and when new connections are established.</p>
+<h2 id="rate-limiting"><a class="header" href="#rate-limiting">Rate Limiting</a></h2>
+<ul>
+<li><strong>Gossipsub:</strong> Custom <code>message_id_fn</code> (blake3 content-hash dedup), <code>max_messages_per_rpc(100)</code></li>
+<li><strong>Announcements:</strong> Per-peer per-commit dedup, max 5 unique (peer,commit_id) pairs per 60s window</li>
+<li><strong>Requests:</strong> Max 50 per-peer requests per window; request-response timeout of 60s</li>
+<li><strong>Reset:</strong> All rate counters reset every 5s interval tick</li>
+<li><strong>Deduplication:</strong> Duplicate messages silently dropped via content-hash message IDs</li>
 </ul>
 <h2 id="fetch-flow"><a class="header" href="#fetch-flow">Fetch Flow</a></h2>
 <p>The core mechanism for retrieving artifacts from peers operates via a parallelized fetch flow.</p>
