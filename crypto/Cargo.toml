@@ -1,6 +1,6 @@
 [package]
 name = "shard-crypto"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 description = "Ed25519 key generation, signing, and verification for shard distributed VCS"
 license = "MIT"
