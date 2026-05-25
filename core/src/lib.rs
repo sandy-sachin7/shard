@@ -883,17 +883,23 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
     let cipher = maybe_load_cipher(&shard_dir)?;
 
     // Resolve target: branch name or commit id
+    // Validate BEFORE writing to HEAD to avoid corruption on failure
     let branch_path = shard_dir.join("refs").join("heads").join(target);
     let commit_id = if branch_path.exists() {
-        let id = fs::read_to_string(&branch_path)?.trim().to_string();
-        branch::set_head_branch(&shard_dir, target)?;
-        id
+        fs::read_to_string(&branch_path)?.trim().to_string()
     } else {
-        branch::set_head_commit(&shard_dir, target)?;
         target.to_string()
     };
 
+    // Validate commit exists before touching HEAD
     let commit = load_commit(&store, &commit_id)?;
+
+    // Only update HEAD after validation succeeds
+    if branch_path.exists() {
+        branch::set_head_branch(&shard_dir, target)?;
+    } else {
+        branch::set_head_commit(&shard_dir, target)?;
+    }
     let mut files = Vec::new();
 
     for manifest_id in &commit.manifests {
@@ -1624,7 +1630,7 @@ pub fn backup(path: &Path, output: &Path, json: bool) -> Result<()> {
     let file = fs::File::create(output)?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut archive = tar::Builder::new(encoder);
-    archive.append_dir_all(".", &shard_dir)?;
+    archive.append_dir_all(".shard", &shard_dir)?;
     archive.finish()?;
     if json {
         info!(
