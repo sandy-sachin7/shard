@@ -1,16 +1,16 @@
 # Changelog
 
-## v1.1.0
+## v2.0.0
 
 ### Bug fixes
 
+- **Dockerfile**: added `tests/` workspace member to multi-stage build (was causing build failure in CI)
 - **HEAD corruption**: prevent HEAD corruption on failed checkout, fix backup/restore format mismatch
 - **Flaky test**: `test_sync_auto_pull` ignored due to P2P race condition
 
-### Documentation
+### Infrastructure
 
-- **Test report**: comprehensive report with 160+ scenarios, bugs, and performance benchmarks
-- **Bug status**: Bug 1 and Bug 2 marked as fixed in REPORT.md
+- **Version bump**: 1.1.0 → 2.0.0 across all workspace crates for semantic versioning clarity
 
 ## v1.0.2
 
