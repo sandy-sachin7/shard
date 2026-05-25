@@ -1,6 +1,6 @@
 [package]
 name = "shard-cli"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 description = "CLI for shard distributed VCS — content-addressed version control for large ML artifacts"
 license = "MIT"
@@ -14,8 +14,8 @@ name = "shard"
 path = "src/main.rs"
 
 [dependencies]
-shard-core = { path = "../../core", version = "1.0.2" }
-shard-crypto = { path = "../../crypto", version = "1.0.2" }
+shard-core = { path = "../../core", version = "1.1.0" }
+shard-crypto = { path = "../../crypto", version = "1.1.0" }
 tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4.4"

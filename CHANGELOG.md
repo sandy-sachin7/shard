@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.0
+
+### Bug fixes
+
+- **HEAD corruption**: prevent HEAD corruption on failed checkout, fix backup/restore format mismatch
+- **Flaky test**: `test_sync_auto_pull` ignored due to P2P race condition
+
+### Documentation
+
+- **Test report**: comprehensive report with 160+ scenarios, bugs, and performance benchmarks
+- **Bug status**: Bug 1 and Bug 2 marked as fixed in REPORT.md
+
 ## v1.0.2
 
 ### Enterprise hardening
