@@ -3,15 +3,18 @@ use anyhow::Result;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub struct FlatStore {
     root: PathBuf,
+    lock: Mutex<()>,
 }
 
 impl FlatStore {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            lock: Mutex::new(()),
         }
     }
 
@@ -67,6 +70,7 @@ impl FlatStore {
     }
 
     pub fn put_chunk(&self, chunk: &Chunk) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let hash_hex = chunk.hash.to_hex().to_string();
         let prefix = hash_hex.get(..2).unwrap_or("xx");
 
@@ -107,6 +111,7 @@ impl FlatStore {
     /// Returns (hash, full_relative_path) for all stored chunks.
     /// Uses the index file when available; falls back to filesystem scan.
     pub fn iter_chunks(&self) -> Result<Vec<(String, String)>> {
+        let _guard = self.lock.lock().unwrap();
         let idx_path = self.index_path();
         if idx_path.exists() {
             let file = fs::File::open(&idx_path)?;
@@ -129,6 +134,7 @@ impl FlatStore {
     }
 
     pub fn delete_chunk(&self, hash_hex: &str, full_path: Option<&str>) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let path = if let Some(fp) = full_path {
             self.objects_dir().join(fp)
         } else {
