@@ -1,6 +1,6 @@
 [package]
 name = "shard-core"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "Core library for shard distributed VCS: chunking, compression, commits, branching, merging, WAL"
 license = "MIT"
@@ -31,6 +31,11 @@ aes-gcm = { workspace = true }
 rand = { workspace = true }
 similar = { workspace = true }
 ciborium = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+once_cell = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

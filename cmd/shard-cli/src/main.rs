@@ -8,6 +8,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    #[arg(global = true, long, default_value = "plain", value_parser = ["plain", "json"])]
+    log_format: String,
     #[command(subcommand)]
     command: Commands,
 }
@@ -27,6 +29,8 @@ enum Commands {
         chunk_size: Option<u64>,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        passphrase: Option<String>,
     },
     Add {
         path: PathBuf,
@@ -109,6 +113,10 @@ enum Commands {
         #[command(subcommand)]
         command: TagCommands,
     },
+    Health {
+        #[arg(long)]
+        json: bool,
+    },
     Prune {
         #[arg(long)]
         json: bool,
@@ -156,6 +164,16 @@ enum Commands {
         #[command(subcommand)]
         command: TransferCommands,
     },
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        addr: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Unlock {
+        #[arg(long)]
+        passphrase: String,
+    },
     Completions {
         shell: String,
     },
@@ -196,6 +214,16 @@ enum KeyCommands {
         #[arg(long)]
         json: bool,
     },
+    AddAuthorized {
+        public_key_hex: String,
+    },
+    RemoveAuthorized {
+        public_key_hex: String,
+    },
+    ListAuthorized {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -222,14 +250,21 @@ enum PeerCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .without_time()
-        .with_target(false)
-        .with_level(false)
-        .init();
-
     let cli = Cli::parse();
+
+    match cli.log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt().json().with_ansi(false).init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_target(false)
+                .with_level(false)
+                .init();
+        }
+    }
 
     match &cli.command {
         Commands::Init {
@@ -239,9 +274,11 @@ async fn main() -> Result<()> {
             chunker,
             chunk_size,
             json,
+            passphrase,
         } => {
             let current_dir = env::current_dir()?;
-            shard_core::init(
+            let pass = passphrase.as_deref().unwrap_or("");
+            shard_core::init_with_passphrase(
                 &current_dir,
                 db,
                 compression,
@@ -249,6 +286,7 @@ async fn main() -> Result<()> {
                 *chunk_size,
                 *private,
                 *json,
+                pass,
             )?;
         }
         Commands::Add { path, json } => {
@@ -301,6 +339,21 @@ async fn main() -> Result<()> {
             KeyCommands::Verify { json } => {
                 let current_dir = env::current_dir()?;
                 shard_core::key_verify(&current_dir, *json)?;
+            }
+            KeyCommands::AddAuthorized { public_key_hex } => {
+                let current_dir = env::current_dir()?;
+                let shard_dir = current_dir.join(".shard");
+                shard_core::add_authorized_key(&shard_dir, public_key_hex)?;
+            }
+            KeyCommands::RemoveAuthorized { public_key_hex } => {
+                let current_dir = env::current_dir()?;
+                let shard_dir = current_dir.join(".shard");
+                shard_core::remove_authorized_key(&shard_dir, public_key_hex)?;
+            }
+            KeyCommands::ListAuthorized { json } => {
+                let current_dir = env::current_dir()?;
+                let shard_dir = current_dir.join(".shard");
+                shard_core::list_authorized_keys(&shard_dir, *json)?;
             }
         },
         Commands::Peer { command } => match command {
@@ -374,6 +427,10 @@ async fn main() -> Result<()> {
                 shard_core::config_set(&current_dir, key, value)?;
             }
         },
+        Commands::Health { json } => {
+            let current_dir = env::current_dir()?;
+            shard_core::health(&current_dir, *json)?;
+        }
         Commands::Prune { json } => {
             let current_dir = env::current_dir()?;
             shard_core::prune(&current_dir, *json)?;
@@ -424,6 +481,14 @@ async fn main() -> Result<()> {
                 shard_core::transfer_remove(&current_dir, commit_id)?;
             }
         },
+        Commands::Serve { addr, json } => {
+            let current_dir = env::current_dir()?;
+            shard_core::api::serve(&current_dir, addr, *json).await?;
+        }
+        Commands::Unlock { passphrase } => {
+            shard_core::cache_passphrase(passphrase)?;
+            eprintln!("Passphrase cached for this session.");
+        }
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             let shell: Shell = shell.parse().map_err(|e| anyhow::anyhow!("{}", e))?;

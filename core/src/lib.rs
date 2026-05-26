@@ -1,12 +1,17 @@
+pub mod api;
 pub mod branch;
 pub mod chunker;
 pub mod commit;
 pub mod compression;
+pub mod config;
 pub mod encryption;
+pub mod gc;
 pub mod index;
 pub mod keychain;
 pub mod manifest;
 pub mod metadata;
+pub mod metrics;
+pub mod ops;
 pub mod partial;
 pub mod store;
 pub mod wal;
@@ -29,8 +34,62 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
+
+static PASSPHRASE_CACHE: Mutex<Option<String>> = Mutex::new(None);
+
+static OP_QUEUES: once_cell::sync::Lazy<ops::RepoOpQueues> =
+    once_cell::sync::Lazy::new(ops::RepoOpQueues::new);
+
+#[allow(dead_code)]
+fn with_write_op<T>(path: &Path, desc: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let trace_id = ops::generate_trace_id();
+    ops::set_trace_id(&trace_id);
+    let guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, desc.to_string());
+    OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .wait_for_turn(&guard);
+    let result = f();
+    if let Err(ref e) = result {
+        crate::metrics::METRICS
+            .errors_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ops::traced_warn(format!("op {} failed: {}", desc, e));
+    }
+    drop(guard);
+    ops::set_trace_id("");
+    result
+}
+
+#[allow(dead_code)]
+fn with_read_op<T>(path: &Path, desc: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let trace_id = ops::generate_trace_id();
+    ops::set_trace_id(&trace_id);
+    let guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Read, desc.to_string());
+    OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .wait_for_turn(&guard);
+    let result = f();
+    drop(guard);
+    ops::set_trace_id("");
+    result
+}
+
+pub fn cache_passphrase(passphrase: &str) -> Result<()> {
+    let mut cache = PASSPHRASE_CACHE.lock().unwrap();
+    *cache = Some(passphrase.to_string());
+    Ok(())
+}
+
+fn get_cached_passphrase() -> Option<String> {
+    PASSPHRASE_CACHE.lock().unwrap().clone()
+}
 
 fn load_shardignore(path: &Path) -> Vec<String> {
     let ignore_path = path.join(".shardignore");
@@ -73,6 +132,35 @@ pub fn init(
     is_private: bool,
     json: bool,
 ) -> Result<()> {
+    init_with_passphrase(
+        path,
+        backend,
+        compression_algo,
+        chunker_mode,
+        chunk_size,
+        is_private,
+        json,
+        "",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn init_with_passphrase(
+    path: &Path,
+    backend: &str,
+    compression_algo: &str,
+    chunker_mode: &str,
+    chunk_size: Option<u64>,
+    is_private: bool,
+    json: bool,
+    passphrase: &str,
+) -> Result<()> {
+    crate::metrics::METRICS
+        .ops_init
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, "init".to_string());
     let shard_dir = path.join(".shard");
     if shard_dir.exists() {
         anyhow::bail!(
@@ -86,10 +174,13 @@ pub fn init(
     branch::set_head_branch(&shard_dir, "main")?;
 
     let keys = KeyPair::generate();
-    keys.save(&shard_dir.join("keys"))?;
+    keys.save_with_passphrase(&shard_dir.join("keys"), passphrase)?;
+    if !passphrase.is_empty() {
+        cache_passphrase(passphrase)?;
+    }
     if let Some(global) = global_keys_dir() {
         fs::create_dir_all(&global).ok();
-        let _ = keys.save(&global);
+        let _ = keys.save_with_passphrase(&global, passphrase);
         let _ = keychain::init_keychain(&global);
     }
     keychain::init_keychain(&shard_dir.join("keys"))?;
@@ -271,6 +362,9 @@ fn add_file(
 }
 
 pub fn recover(path: &Path, json: bool) -> Result<()> {
+    crate::metrics::METRICS
+        .ops_recover
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -287,7 +381,139 @@ pub fn recover(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn health(path: &Path, json: bool) -> Result<()> {
+    use crate::metrics::METRICS;
+    METRICS
+        .ops_health
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository (run `shard init` first)");
+    }
+
+    let mut issues: Vec<String> = Vec::new();
+
+    let objects_ok = shard_dir.join("objects").exists();
+    if !objects_ok {
+        issues.push("objects directory missing".to_string());
+    }
+
+    let config_ok = shard_dir.join("config.json").exists();
+    let _config: Option<std::collections::BTreeMap<String, String>> = if config_ok {
+        match load_config(&shard_dir) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                issues.push(format!("config.json corrupt: {}", e));
+                None
+            }
+        }
+    } else {
+        issues.push("config.json missing".to_string());
+        None
+    };
+
+    let keys_dir = shard_dir.join("keys");
+    let keys_ok = keys_dir.join("secret.key").exists() && keys_dir.join("public.key").exists();
+    if !keys_ok {
+        issues.push("keys missing (secret.key and/or public.key)".to_string());
+    }
+
+    let wal_has_entries = shard_dir.join("wal.log").exists() && {
+        std::fs::metadata(shard_dir.join("wal.log"))
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    };
+
+    let store_result = Store::open(&shard_dir);
+    let object_count = match &store_result {
+        Ok(store) => store.iter_chunks().map(|c| c.len() as u64).unwrap_or(0),
+        Err(e) => {
+            issues.push(format!("store error: {}", e));
+            0
+        }
+    };
+
+    let (branch, head) = branch::resolve_head(&shard_dir)
+        .ok()
+        .unwrap_or((None, None));
+
+    let branch_count = branch::list_branches(&shard_dir)
+        .map(|(_, b)| b.len() as u64)
+        .unwrap_or(0);
+
+    let tags_count = load_tags(&shard_dir).map(|t| t.len() as u64).unwrap_or(0);
+
+    let disk_usage = dir_size(&shard_dir);
+
+    let key_valid = load_keypair(&shard_dir).is_ok();
+
+    let metrics_snapshot = crate::metrics::METRICS.snapshot();
+
+    if json {
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "status": if issues.is_empty() { "healthy" } else { "degraded" },
+                "shard_dir": shard_dir.display().to_string(),
+                "objects_ok": objects_ok,
+                "config_ok": config_ok,
+                "keys_ok": keys_ok && key_valid,
+                "wal_pending": wal_has_entries,
+                "object_count": object_count,
+                "current_branch": branch,
+                "head_commit": head,
+                "branch_count": branch_count,
+                "tag_count": tags_count,
+                "disk_usage_bytes": disk_usage,
+                "issues": issues,
+                "metrics": metrics_snapshot,
+            }))?
+        );
+    } else {
+        if issues.is_empty() {
+            info!("Health: OK");
+        } else {
+            info!("Health: DEGRADED");
+            for issue in &issues {
+                warn!("  - {}", issue);
+            }
+        }
+        info!("  Objects: {}", object_count);
+        info!("  Branches: {}, Tags: {}", branch_count, tags_count);
+        info!("  Current branch: {:?}", branch);
+        info!("  HEAD: {:?}", head);
+        info!("  WAL pending: {}", wal_has_entries);
+        info!("  Disk usage: {} bytes", disk_usage);
+    }
+
+    if !issues.is_empty() {
+        anyhow::bail!("health check found {} issue(s)", issues.len());
+    }
+    Ok(())
+}
+
+fn dir_size(path: &Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+pub fn get_metrics() -> metrics::MetricsSnapshot {
+    crate::metrics::METRICS.snapshot()
+}
+
 pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
+    crate::metrics::METRICS
+        .ops_add
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, "add".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -364,6 +590,9 @@ pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
 }
 
 pub fn commit(path: &Path, message: &str, author: &str, json: bool) -> Result<()> {
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, "commit".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -497,6 +726,9 @@ pub fn commit(path: &Path, message: &str, author: &str, json: bool) -> Result<()
 }
 
 pub fn verify(path: &Path, commit_id: &str, json: bool) -> Result<()> {
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Read, "verify".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -912,6 +1144,9 @@ pub fn diff(path: &Path, commit_a: &str, commit_b: Option<&str>, json: bool) -> 
 }
 
 pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, "checkout".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1102,12 +1337,17 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
 
 fn load_config(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {
     let config_path = shard_dir.join("config.json");
-    if config_path.exists() {
+    let mut config: std::collections::BTreeMap<String, String> = if config_path.exists() {
         let data = fs::read(&config_path)?;
-        Ok(metadata::deserialize(&data)?)
+        metadata::deserialize(&data)?
     } else {
-        Ok(std::collections::BTreeMap::new())
+        std::collections::BTreeMap::new()
+    };
+    let overrides = config::load_env_overrides();
+    for (k, v) in overrides {
+        config.insert(k, v);
     }
+    Ok(config)
 }
 
 fn save_config(
@@ -1129,11 +1369,34 @@ fn global_keys_dir() -> Option<PathBuf> {
 fn load_keypair(shard_dir: &Path) -> Result<KeyPair> {
     let local = shard_dir.join("keys");
     if local.join("secret.key").exists() {
-        return KeyPair::load(&local);
+        match KeyPair::load(&local) {
+            Ok(kp) => return Ok(kp),
+            Err(e) => {
+                if e.to_string().contains("encrypted") {
+                    if let Some(passphrase) = get_cached_passphrase() {
+                        return KeyPair::load_with_passphrase(&local, &passphrase);
+                    }
+                    anyhow::bail!(
+                        "secret.key is encrypted. Use `shard unlock --passphrase <pass>` or provide --passphrase"
+                    );
+                }
+                return Err(e);
+            }
+        }
     }
     if let Some(global) = global_keys_dir() {
         if global.join("secret.key").exists() {
-            return KeyPair::load(&global);
+            match KeyPair::load(&global) {
+                Ok(kp) => return Ok(kp),
+                Err(e) => {
+                    if e.to_string().contains("encrypted") {
+                        if let Some(passphrase) = get_cached_passphrase() {
+                            return KeyPair::load_with_passphrase(&global, &passphrase);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
         }
     }
     anyhow::bail!("no keypair found in {} or ~/.shard/keys/", local.display())
@@ -1197,7 +1460,7 @@ pub fn config_set(path: &Path, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn load_tags(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+pub(crate) fn load_tags(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, String>> {
     let tags_path = shard_dir.join("tags.json");
     if tags_path.exists() {
         let data = fs::read(&tags_path)?;
@@ -1207,7 +1470,10 @@ fn load_tags(shard_dir: &Path) -> Result<std::collections::BTreeMap<String, Stri
     }
 }
 
-fn save_tags(shard_dir: &Path, tags: &std::collections::BTreeMap<String, String>) -> Result<()> {
+pub(crate) fn save_tags(
+    shard_dir: &Path,
+    tags: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
     let data = serde_json::to_string_pretty(tags)?;
     fs::write(shard_dir.join("tags.json"), data)?;
     Ok(())
@@ -1281,6 +1547,9 @@ pub fn branch_list(path: &Path) -> Result<()> {
 }
 
 pub fn merge(path: &Path, branch: &str, message: &str, author: &str, json: bool) -> Result<()> {
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, "merge".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1471,6 +1740,9 @@ fn collect_reachable(
 }
 
 pub fn prune(path: &Path, json: bool) -> Result<()> {
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, "prune".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1614,6 +1886,27 @@ fn authorized_keys_path(shard_dir: &Path) -> std::path::PathBuf {
     shard_dir.join("authorized_keys")
 }
 
+/// An authorized key entry with optional comment.
+struct AuthorizedKeyEntry {
+    key: ed25519_dalek::VerifyingKey,
+    comment: String,
+}
+
+fn parse_authorized_key_line(line: &str) -> Option<AuthorizedKeyEntry> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    // Format: <hex_key> [comment]
+    let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+    let hex_key = parts[0].trim();
+    let comment = parts.get(1).unwrap_or(&"").trim().to_string();
+    let bytes = hex::decode(hex_key).ok()?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&arr).ok()?;
+    Some(AuthorizedKeyEntry { key, comment })
+}
+
 fn load_authorized_keys(shard_dir: &Path) -> Result<Vec<ed25519_dalek::VerifyingKey>> {
     let path = authorized_keys_path(shard_dir);
     if !path.exists() {
@@ -1622,16 +1915,9 @@ fn load_authorized_keys(shard_dir: &Path) -> Result<Vec<ed25519_dalek::Verifying
     let content = fs::read_to_string(&path)?;
     let mut keys = Vec::new();
     for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+        if let Some(entry) = parse_authorized_key_line(line) {
+            keys.push(entry.key);
         }
-        let bytes = hex::decode(line)?;
-        let arr: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Invalid public key length in authorized_keys"))?;
-        keys.push(ed25519_dalek::VerifyingKey::from_bytes(&arr)?);
     }
     Ok(keys)
 }
@@ -1652,7 +1938,13 @@ pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> 
         String::new()
     };
     // Check if key already exists
-    if content.lines().any(|l| l.trim() == public_key_hex) {
+    if content.lines().any(|l| {
+        if let Some(entry) = parse_authorized_key_line(l) {
+            entry.key.to_bytes().to_vec() == arr.to_vec()
+        } else {
+            false
+        }
+    }) {
         info!("Key already authorized");
         return Ok(());
     }
@@ -1660,6 +1952,89 @@ pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> 
     content.push('\n');
     fs::write(&path, content)?;
     info!("Authorized key added");
+    Ok(())
+}
+
+pub fn remove_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> {
+    let path = authorized_keys_path(shard_dir);
+    if !path.exists() {
+        anyhow::bail!("authorized_keys file does not exist");
+    }
+    let content = fs::read_to_string(&path)?;
+    let new_content: Vec<&str> = content
+        .lines()
+        .filter(|l| {
+            if let Some(entry) = parse_authorized_key_line(l) {
+                hex::encode(entry.key.to_bytes()) != public_key_hex
+            } else {
+                true
+            }
+        })
+        .collect();
+    if new_content.len() == content.lines().count() {
+        anyhow::bail!("Key not found in authorized_keys");
+    }
+    let has_keys = new_content
+        .iter()
+        .any(|l| parse_authorized_key_line(l).is_some());
+    if has_keys {
+        fs::write(&path, new_content.join("\n") + "\n")?;
+    } else {
+        fs::remove_file(&path)?;
+    }
+    info!("Authorized key removed");
+    Ok(())
+}
+
+pub fn list_authorized_keys(shard_dir: &Path, json: bool) -> Result<()> {
+    let path = authorized_keys_path(shard_dir);
+    if !path.exists() {
+        if json {
+            info!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({"keys": []}))?
+            );
+        } else {
+            println!("No authorized keys.");
+        }
+        return Ok(());
+    }
+    let content = fs::read_to_string(&path)?;
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        if let Some(entry) = parse_authorized_key_line(line) {
+            entries.push(serde_json::json!({
+                "key": hex::encode(entry.key.to_bytes()),
+                "comment": entry.comment,
+            }));
+        }
+    }
+    if entries.is_empty() {
+        if json {
+            info!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({"keys": []}))?
+            );
+        } else {
+            println!("No authorized keys.");
+        }
+        return Ok(());
+    }
+    if json {
+        info!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"keys": entries}))?
+        );
+    } else {
+        for e in &entries {
+            let comment = e["comment"].as_str().unwrap_or("");
+            if comment.is_empty() {
+                println!("  {}", e["key"].as_str().unwrap_or(""));
+            } else {
+                println!("  {}  {}", e["key"].as_str().unwrap_or(""), comment);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1873,11 +2248,15 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
         if pk.verify(nonce, &sig).is_err() {
             return false;
         }
-        // Check authorized_keys if the file exists
-        if let Ok(keys) = load_authorized_keys(&self.shard_dir) {
-            if !keys.is_empty() {
+        // Check authorized_keys if the file exists.
+        // If authorized_keys does not exist, repo is open (backward compat).
+        // If it exists, the key MUST be in the list.
+        let auth_path = self.shard_dir.join("authorized_keys");
+        if auth_path.exists() {
+            if let Ok(keys) = load_authorized_keys(&self.shard_dir) {
                 return keys.contains(&pk);
             }
+            return false;
         }
         true
     }
@@ -2022,6 +2401,8 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
     let config = load_config(&shard_dir)?;
     let repo_id = config.get("repo_id").cloned().unwrap_or_default();
     let repo_name = config.get("repo_name").cloned().unwrap_or_default();
+    let rate_limit_max = config::config_get_rate_limit_max(&config);
+    let _rate_limit_window = config::config_get_rate_limit_window(&config);
     let ann_topic = shard_net::libp2p::gossipsub::IdentTopic::new("shard:ann");
     let repo_topic =
         shard_net::libp2p::gossipsub::IdentTopic::new(format!("/shard/repo/{}", repo_id));
@@ -2216,10 +2597,10 @@ pub async fn sync(path: &Path, _json: bool) -> Result<()> {
                             request, channel, ..
                         } = message
                         {
-                            // Per-peer request rate limiting: max 50 requests in any 60s window
+                            // Per-peer request rate limiting: max rate_limit_max in rate_limit_window window
                             let req_count = request_counts.entry(peer).or_insert(0u32);
                             *req_count += 1;
-                            if *req_count > 50 {
+                            if *req_count > rate_limit_max {
                                 warn!("Dropping request from {}: rate limit exceeded", peer);
                                 // Reset counter periodically (cooldown via interval tick)
                             } else {
@@ -2334,6 +2715,7 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str, json: bool) -> Resul
     let cipher = maybe_load_cipher(&shard_dir)?;
 
     let mut node = shard_net::p2p::Node::new().await?;
+    let _ = node.listen("/ip4/0.0.0.0/tcp/0").await;
 
     // Parse peer multiaddr
     let multiaddr: shard_net::libp2p::Multiaddr = peer.parse()?;
@@ -2620,6 +3002,9 @@ pub fn transfer_remove(path: &Path, commit_id: &str) -> Result<()> {
 }
 
 pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Write, "push".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -2692,6 +3077,7 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
 
     // Connect and send all objects
     let mut node = shard_net::p2p::Node::new().await?;
+    let _ = node.listen("/ip4/0.0.0.0/tcp/0").await;
     let multiaddr: shard_net::libp2p::Multiaddr = peer.parse()?;
     let peer_id = match multiaddr.iter().last() {
         Some(shard_net::libp2p::multiaddr::Protocol::P2p(peer_id)) => peer_id,

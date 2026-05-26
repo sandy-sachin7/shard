@@ -1,6 +1,6 @@
 [package]
 name = "shard-cli"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "CLI for shard distributed VCS — content-addressed version control for large ML artifacts"
 license = "MIT"
@@ -21,7 +21,7 @@ clap = { workspace = true }
 clap_complete = "4.4"
 anyhow = { workspace = true }
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["json"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

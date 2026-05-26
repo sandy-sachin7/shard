@@ -1,6 +1,6 @@
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
-use std::sync::Mutex;
 
 /// Trait for content-addressed storage backends used by Shard.
 pub trait StorageBackend: Send + Sync {
@@ -65,30 +65,37 @@ impl StorageBackend for SledBackend {
     }
 }
 
-/// SQLite-based storage backend. Persists to a single `.db` file.
+/// SQLite-based storage backend with connection pooling. Persists to a single `.db` file.
 pub struct SqliteBackend {
-    conn: Mutex<Connection>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl SqliteBackend {
-    /// Open or create a SQLite database at `path`.
+    /// Open or create a SQLite database at `path` with a connection pool.
+    /// Pool size defaults to 8 connections.
     pub fn new(path: &Path) -> anyhow::Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS shard_store (
-                key   TEXT PRIMARY KEY,
-                value BLOB NOT NULL
-            );",
-        )?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        let manager = SqliteConnectionManager::file(path);
+        let pool = Pool::builder().max_size(8).build(manager)?;
+        {
+            let conn = pool.get()?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS shard_store (
+                    key   TEXT PRIMARY KEY,
+                    value BLOB NOT NULL
+                );",
+            )?;
+        }
+        Ok(Self { pool })
+    }
+
+    pub fn pool(&self) -> &Pool<SqliteConnectionManager> {
+        &self.pool
     }
 }
 
 impl StorageBackend for SqliteBackend {
     fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()?;
         conn.execute(
             "INSERT OR REPLACE INTO shard_store (key, value) VALUES (?1, ?2)",
             [key, value],
@@ -97,7 +104,7 @@ impl StorageBackend for SqliteBackend {
     }
 
     fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()?;
         let mut stmt = conn.prepare("SELECT value FROM shard_store WHERE key = ?1")?;
         let mut rows = stmt.query([key])?;
         match rows.next()? {
@@ -107,26 +114,26 @@ impl StorageBackend for SqliteBackend {
     }
 
     fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()?;
         conn.execute("DELETE FROM shard_store WHERE key = ?1", [key])?;
         Ok(())
     }
 
     fn contains(&self, key: &[u8]) -> anyhow::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()?;
         let mut stmt = conn.prepare("SELECT 1 FROM shard_store WHERE key = ?1")?;
         let exists = stmt.exists([key])?;
         Ok(exists)
     }
 
     fn flush(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()?;
         let pattern = format!("{}%", std::str::from_utf8(prefix).unwrap_or(""));
         let mut stmt =
             conn.prepare("SELECT key, value FROM shard_store WHERE key LIKE ?1 ORDER BY key")?;

@@ -2,7 +2,10 @@ use blake3;
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
+use tokio::time::sleep;
 use tracing::{error, info};
+
+const MAX_RETRIES: u32 = 10;
 
 use crate::protocol::{ShardRequest, ShardResponse};
 use anyhow::Result;
@@ -368,10 +371,25 @@ impl Node {
         data: Vec<u8>,
     ) -> Result<()> {
         self.swarm.add_peer_address(peer, multiaddr.clone());
-        self.swarm.dial(multiaddr.clone())?;
         let mut request_id = None;
+        let mut attempts = 0u32;
 
         loop {
+            if request_id.is_none() {
+                if attempts > 0 {
+                    if attempts >= MAX_RETRIES {
+                        anyhow::bail!(
+                            "max retries ({}) exceeded connecting to {}",
+                            MAX_RETRIES,
+                            peer
+                        );
+                    }
+                    let delay = Duration::from_millis(100 * (1u64 << (attempts - 1).min(5)));
+                    sleep(delay).await;
+                }
+                self.swarm.dial(multiaddr.clone())?;
+                attempts += 1;
+            }
             match self.swarm.select_next_some().await {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
                     let rid = self.swarm.behaviour_mut().request_response.send_request(
@@ -411,13 +429,13 @@ impl Node {
                 }
                 SwarmEvent::ConnectionClosed { peer_id, cause, .. } if peer_id == peer => {
                     error!("Connection closed to {}: {:?}", peer_id, cause);
-                    let _ = self.swarm.dial(multiaddr.clone());
+                    request_id = None;
                 }
                 SwarmEvent::OutgoingConnectionError {
                     peer_id: Some(p), ..
                 } if p == peer => {
                     error!("Outgoing connection error: {:?}", p);
-                    let _ = self.swarm.dial(multiaddr.clone());
+                    request_id = None;
                 }
                 _ => {}
             }
@@ -434,12 +452,26 @@ impl Node {
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<()> {
         self.swarm.add_peer_address(peer, multiaddr.clone());
-        self.swarm.dial(multiaddr.clone())?;
-
         let mut state = 0u8;
         let mut request_id = None;
+        let mut attempts = 0u32;
 
         loop {
+            if request_id.is_none() && state == 0 {
+                if attempts > 0 {
+                    if attempts >= MAX_RETRIES {
+                        anyhow::bail!(
+                            "max retries ({}) exceeded connecting to {}",
+                            MAX_RETRIES,
+                            peer
+                        );
+                    }
+                    let delay = Duration::from_millis(100 * (1u64 << (attempts - 1).min(5)));
+                    sleep(delay).await;
+                }
+                self.swarm.dial(multiaddr.clone())?;
+                attempts += 1;
+            }
             match self.swarm.select_next_some().await {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
                     let rid = self.swarm.behaviour_mut().request_response.send_request(
@@ -494,13 +526,15 @@ impl Node {
                 }
                 SwarmEvent::ConnectionClosed { peer_id, cause, .. } if peer_id == peer => {
                     error!("Connection closed to {}: {:?}", peer_id, cause);
-                    let _ = self.swarm.dial(multiaddr.clone());
+                    state = 0;
+                    request_id = None;
                 }
                 SwarmEvent::OutgoingConnectionError {
                     peer_id: Some(p), ..
                 } if p == peer => {
                     error!("Outgoing connection error: {:?}", p);
-                    let _ = self.swarm.dial(multiaddr.clone());
+                    state = 0;
+                    request_id = None;
                 }
                 _ => {}
             }
@@ -514,10 +548,25 @@ impl Node {
         request: ShardRequest,
     ) -> Result<Vec<u8>> {
         self.swarm.add_peer_address(peer, multiaddr.clone());
-        self.swarm.dial(multiaddr.clone())?;
         let mut request_id = None;
+        let mut attempts = 0u32;
 
         loop {
+            if request_id.is_none() {
+                if attempts > 0 {
+                    if attempts >= MAX_RETRIES {
+                        anyhow::bail!(
+                            "max retries ({}) exceeded connecting to {}",
+                            MAX_RETRIES,
+                            peer
+                        );
+                    }
+                    let delay = Duration::from_millis(100 * (1u64 << (attempts - 1).min(5)));
+                    sleep(delay).await;
+                }
+                self.swarm.dial(multiaddr.clone())?;
+                attempts += 1;
+            }
             match self.swarm.select_next_some().await {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
                     let rid = self
@@ -554,13 +603,13 @@ impl Node {
                 }
                 SwarmEvent::ConnectionClosed { peer_id, cause, .. } if peer_id == peer => {
                     error!("Connection closed to {}: {:?}", peer_id, cause);
-                    let _ = self.swarm.dial(multiaddr.clone());
+                    request_id = None;
                 }
                 SwarmEvent::OutgoingConnectionError {
                     peer_id: Some(p), ..
                 } if p == peer => {
                     error!("Outgoing connection error: {:?}", p);
-                    let _ = self.swarm.dial(multiaddr.clone());
+                    request_id = None;
                 }
                 SwarmEvent::Behaviour(ShardBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, multiaddr) in list {
@@ -586,14 +635,28 @@ impl Node {
         requests: Vec<(String, ShardRequest)>,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         self.swarm.add_peer_address(peer, multiaddr.clone());
-        self.swarm.dial(multiaddr.clone())?;
-
         let mut request_map: HashMap<libp2p::request_response::OutboundRequestId, String> =
             HashMap::new();
         let mut results: Vec<(String, Vec<u8>)> = Vec::with_capacity(requests.len());
         let mut sent = false;
+        let mut attempts = 0u32;
 
         loop {
+            if !sent {
+                if attempts > 0 {
+                    if attempts >= MAX_RETRIES {
+                        anyhow::bail!(
+                            "max retries ({}) exceeded connecting to {}",
+                            MAX_RETRIES,
+                            peer
+                        );
+                    }
+                    let delay = Duration::from_millis(100 * (1u64 << (attempts - 1).min(5)));
+                    sleep(delay).await;
+                }
+                self.swarm.dial(multiaddr.clone())?;
+                attempts += 1;
+            }
             match self.swarm.select_next_some().await {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == peer => {
                     sent = true;
@@ -650,7 +713,8 @@ impl Node {
                 SwarmEvent::OutgoingConnectionError {
                     peer_id: Some(p), ..
                 } if p == peer => {
-                    let _ = self.swarm.dial(multiaddr.clone());
+                    error!("Outgoing connection error: {:?}", p);
+                    sent = false;
                 }
                 _ => {}
             }
