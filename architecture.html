@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-fa2a3422.js";
+            window.path_to_searchindex_js = "searchindex-69d8d7f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-50be9360.js"></script>
@@ -187,28 +187,46 @@
     CLI["shard CLI&lt;br/&gt;(clap argument parsing)"]
     
     subgraph Core ["core crate"]
+        OpQueue["Operation Queue&lt;br/&gt;(read/write locking)"]
+        Config["Config System&lt;br/&gt;(env overrides + validation)"]
+        GC["Garbage Collector&lt;br/&gt;(DAG reachability scan)"]
+        Tracing["Distributed Tracing&lt;br/&gt;(thread-local trace IDs)"]
+        Metrics["Runtime Metrics&lt;br/&gt;(atomic counters)"]
         Chunker["Chunker&lt;br/&gt;(Fixed / Rabin)"]
         Compression["Compression&lt;br/&gt;(Zstd / Zlib)"]
         Store["Store&lt;br/&gt;(Sled / SQLite)"]
-        CommitDAG["Commit DAG&lt;br/&gt;Manifest / Index / WAL"]
+        CommitDAG["Commit DAG&lt;br/&gt;Manifest / Index / WAL&lt;br/&gt;Branch / Merge / Push"]
+        API["HTTP API&lt;br/&gt;(axum /api/v1/*)"]
     end
     
     subgraph Net ["net crate"]
-        LibP2P["libp2p Node&lt;br/&gt;TCP+Noise+Yamux&lt;br/&gt;mDNS / Kademlia&lt;br/&gt;Gossipsub"]
+        LibP2P["libp2p Node&lt;br/&gt;TCP+Noise+Yamux&lt;br/&gt;mDNS / Kademlia&lt;br/&gt;Gossipsub&lt;br/&gt;Relay / DCUtR / AutoNAT&lt;br/&gt;Rate Limiting"]
     end
     
     subgraph Crypto ["crypto crate"]
-        KeyGen["ed25519 key generation&lt;br/&gt;Signing &amp; Verification"]
+        KeyGen["ed25519 key generation&lt;br/&gt;Signing &amp; Verification&lt;br/&gt;Passphrase encryption&lt;br/&gt;Key rotation"]
+    end
+    
+    subgraph Storage ["storage crate"]
+        SledBackend["Sled Backend"]
+        SQLiteBackend["SQLite Backend&lt;br/&gt;(r2d2 connection pool)"]
     end
     
     CLI --&gt; Core
     CLI --&gt; Net
     Core --&gt; Crypto
+    Core --&gt; Storage
     Net --&gt; Crypto
+    Core -.-&gt; OpQueue
+    Core -.-&gt; Config
+    Core -.-&gt; GC
+    Core -.-&gt; Tracing
+    Core -.-&gt; Metrics
     Core -.-&gt; Chunker
     Core -.-&gt; Compression
     Core -.-&gt; Store
     Core -.-&gt; CommitDAG
+    Core -.-&gt; API
 </pre>
 
 <h2 id="storage-layout"><a class="header" href="#storage-layout">Storage Layout</a></h2>
@@ -244,9 +262,14 @@
 <tr><td style="text-align: left"><strong>Compression</strong></td><td style="text-align: left">Zstd or Zlib</td><td style="text-align: left">Runtime selection; zstd is faster with better ratios</td></tr>
 <tr><td style="text-align: left"><strong>Hashing</strong></td><td style="text-align: left">Blake3</td><td style="text-align: left">Fastest cryptographic hash, SIMD-accelerated</td></tr>
 <tr><td style="text-align: left"><strong>Signatures</strong></td><td style="text-align: left">ed25519</td><td style="text-align: left">Proven, fast, small signatures (64 bytes)</td></tr>
-<tr><td style="text-align: left"><strong>Storage</strong></td><td style="text-align: left">Sled or Flat file</td><td style="text-align: left">Sled embedded (zero deps); flat file for portability</td></tr>
-<tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">libp2p TCP+Noise+Yamux</td><td style="text-align: left">Mature, NAT traversal via relay/WebRTC planned</td></tr>
-<tr><td style="text-align: left"><strong>Wire format</strong></td><td style="text-align: left">JSON</td><td style="text-align: left">Serde JSON over request-response</td></tr>
+<tr><td style="text-align: left"><strong>Storage</strong></td><td style="text-align: left">Sled, SQLite, or Flat file</td><td style="text-align: left">Sled/SQLite for indexed queries; flat for portability</td></tr>
+<tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">libp2p TCP+Noise+Yamux</td><td style="text-align: left">Mature, NAT traversal via relay/DCUtR/AutoNAT</td></tr>
+<tr><td style="text-align: left"><strong>Wire format</strong></td><td style="text-align: left">JSON / CBOR</td><td style="text-align: left">Serde over request-response + Gossipsub</td></tr>
+<tr><td style="text-align: left"><strong>Concurrency</strong></td><td style="text-align: left">Per-repo read-write queue</td><td style="text-align: left">Reads parallel, writes exclusive; no global lock</td></tr>
+<tr><td style="text-align: left"><strong>Config</strong></td><td style="text-align: left">JSON + env var overrides</td><td style="text-align: left">12-factor friendly; <code>SHARD_*</code> env vars take precedence</td></tr>
+<tr><td style="text-align: left"><strong>Tracing</strong></td><td style="text-align: left">Thread-local trace IDs</td><td style="text-align: left">Correlate logs across operations</td></tr>
+<tr><td style="text-align: left"><strong>GC</strong></td><td style="text-align: left">DAG reachability scan</td><td style="text-align: left">Marks all reachable from HEAD/branches/tags/index, prunes rest</td></tr>
+<tr><td style="text-align: left"><strong>Metrics</strong></td><td style="text-align: left">Static atomic counters</td><td style="text-align: left">Runtime operation counters with JSON snapshot</td></tr>
 </tbody>
 </table>
 </div>

@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-fa2a3422.js";
+            window.path_to_searchindex_js = "searchindex-69d8d7f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-50be9360.js"></script>
@@ -287,7 +287,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 <tr><th style="text-align: left">Command</th><th style="text-align: left">What it does</th><th style="text-align: left">Key flags</th></tr>
 </thead>
 <tbody>
-<tr><td style="text-align: left"><code>init</code></td><td style="text-align: left">Initialize a repository</td><td style="text-align: left"><code>--private</code>, <code>--compression zstd|zlib|none</code>, <code>--chunker fixed|rabin</code></td></tr>
+<tr><td style="text-align: left"><code>init</code></td><td style="text-align: left">Initialize a repository</td><td style="text-align: left"><code>--private</code>, <code>--db flat|sled|sqlite</code>, <code>--compression zstd|zlib|none</code>, <code>--chunker fixed|rabin</code>, <code>--passphrase</code></td></tr>
 <tr><td style="text-align: left"><code>add &lt;path&gt;</code></td><td style="text-align: left">Stage files for commit</td><td style="text-align: left">(recursive for directories)</td></tr>
 <tr><td style="text-align: left"><code>commit</code></td><td style="text-align: left">Create a signed commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
 <tr><td style="text-align: left"><code>log</code></td><td style="text-align: left">Show commit history</td><td style="text-align: left"><code>--json</code></td></tr>
@@ -295,21 +295,27 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 <tr><td style="text-align: left"><code>status</code></td><td style="text-align: left">Show working tree state</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>verify &lt;commit&gt;</code></td><td style="text-align: left">Verify integrity + signature</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>diff &lt;commit1&gt; &lt;commit2&gt;</code></td><td style="text-align: left">Compare two commits</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>prune</code></td><td style="text-align: left">Remove unreachable objects</td><td style="text-align: left"></td></tr>
+<tr><td style="text-align: left"><code>prune</code></td><td style="text-align: left">Remove unreachable objects</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>tag</code></td><td style="text-align: left">Manage commit tags</td><td style="text-align: left"><code>add</code>, <code>list</code>, <code>delete</code></td></tr>
 <tr><td style="text-align: left"><code>branch</code></td><td style="text-align: left">Manage branches</td><td style="text-align: left"><code>create</code>, <code>delete</code>, <code>list</code></td></tr>
 <tr><td style="text-align: left"><code>merge &lt;branch&gt;</code></td><td style="text-align: left">Merge branch into current HEAD</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
 <tr><td style="text-align: left"><code>config</code></td><td style="text-align: left">View/edit configuration</td><td style="text-align: left"><code>get</code>, <code>set</code></td></tr>
-<tr><td style="text-align: left"><code>share</code></td><td style="text-align: left">Announce commits to P2P network</td><td style="text-align: left"></td></tr>
-<tr><td style="text-align: left"><code>sync</code></td><td style="text-align: left">Discover + fetch from peers</td><td style="text-align: left"></td></tr>
-<tr><td style="text-align: left"><code>pull &lt;peer&gt; &lt;commit&gt;</code></td><td style="text-align: left">Pull commit from specific peer</td><td style="text-align: left"></td></tr>
-<tr><td style="text-align: left"><code>push &lt;peer&gt;</code></td><td style="text-align: left">Push commits to peer</td><td style="text-align: left"></td></tr>
+<tr><td style="text-align: left"><code>share</code></td><td style="text-align: left">Announce commits to P2P network</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>sync</code></td><td style="text-align: left">Discover + fetch from peers</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>pull &lt;peer&gt; &lt;commit&gt;</code></td><td style="text-align: left">Pull commit from specific peer</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>push &lt;peer&gt;</code></td><td style="text-align: left">Push commits to peer</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>peer add &lt;multiaddr&gt;</code></td><td style="text-align: left">Add a known peer</td><td style="text-align: left"><code>--public-key &lt;hex&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>backup &lt;output&gt;</code></td><td style="text-align: left">Create a tar.gz backup</td><td style="text-align: left"></td></tr>
-<tr><td style="text-align: left"><code>restore &lt;backup&gt;</code></td><td style="text-align: left">Restore repo from backup</td><td style="text-align: left"></td></tr>
+<tr><td style="text-align: left"><code>backup &lt;output&gt;</code></td><td style="text-align: left">Create a tar.gz backup</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>restore &lt;backup&gt;</code></td><td style="text-align: left">Restore repo from backup</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>export &lt;commit&gt; &lt;dir&gt;</code></td><td style="text-align: left">Reconstruct commit to directory</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>import &lt;dir&gt;</code></td><td style="text-align: left">Ingest directory as commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>recover</code></td><td style="text-align: left">Recover from WAL crash</td><td style="text-align: left"></td></tr>
+<tr><td style="text-align: left"><code>recover</code></td><td style="text-align: left">Recover from WAL crash</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>health</code></td><td style="text-align: left">Show repository diagnostics + metrics</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>serve</code></td><td style="text-align: left">Start HTTP API server</td><td style="text-align: left"><code>--addr &lt;host:port&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>unlock</code></td><td style="text-align: left">Cache passphrase for session</td><td style="text-align: left"><code>--passphrase</code></td></tr>
+<tr><td style="text-align: left"><code>relay</code></td><td style="text-align: left">Start P2P relay node</td><td style="text-align: left"><code>--listen &lt;multiaddr&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>transfer</code></td><td style="text-align: left">Manage P2P transfer queue</td><td style="text-align: left"><code>list</code>, <code>remove</code></td></tr>
+<tr><td style="text-align: left"><code>key</code></td><td style="text-align: left">Manage signing keys</td><td style="text-align: left"><code>rotate</code>, <code>list</code>, <code>verify</code>, <code>add-authorized</code>, <code>remove-authorized</code>, <code>list-authorized</code></td></tr>
 <tr><td style="text-align: left"><code>completions</code></td><td style="text-align: left">Generate shell completions</td><td style="text-align: left"><code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>elvish</code>, <code>powershell</code></td></tr>
 </tbody>
 </table>
@@ -322,6 +328,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 </thead>
 <tbody>
 <tr><td style="text-align: left"><code>--json</code></td><td style="text-align: left">Machine-readable JSON output</td></tr>
+<tr><td style="text-align: left"><code>--log-format</code></td><td style="text-align: left">Log output format: <code>plain</code> (default) or <code>json</code></td></tr>
 <tr><td style="text-align: left"><code>--verbose</code></td><td style="text-align: left">Debug-level logging</td></tr>
 </tbody>
 </table>
@@ -334,28 +341,46 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
     CLI["shard CLI&lt;br/&gt;(clap argument parsing)"]
     
     subgraph Core ["core crate"]
+        OpQueue["Operation Queue&lt;br/&gt;(read/write locking)"]
+        Config["Config System&lt;br/&gt;(env overrides + validation)"]
+        GC["Garbage Collector&lt;br/&gt;(DAG reachability scan)"]
+        Tracing["Distributed Tracing&lt;br/&gt;(thread-local trace IDs)"]
+        Metrics["Runtime Metrics&lt;br/&gt;(atomic counters)"]
         Chunker["Chunker&lt;br/&gt;(Fixed / Rabin)"]
         Compression["Compression&lt;br/&gt;(Zstd / Zlib)"]
         Store["Store&lt;br/&gt;(Sled / SQLite)"]
-        CommitDAG["Commit DAG&lt;br/&gt;Manifest / Index / WAL"]
+        CommitDAG["Commit DAG&lt;br/&gt;Manifest / Index / WAL&lt;br/&gt;Branch / Merge / Push"]
+        API["HTTP API&lt;br/&gt;(axum /api/v1/*)"]
     end
     
     subgraph Net ["net crate"]
-        LibP2P["libp2p Node&lt;br/&gt;TCP+Noise+Yamux&lt;br/&gt;mDNS / Kademlia&lt;br/&gt;Gossipsub"]
+        LibP2P["libp2p Node&lt;br/&gt;TCP+Noise+Yamux&lt;br/&gt;mDNS / Kademlia&lt;br/&gt;Gossipsub&lt;br/&gt;Relay / DCUtR / AutoNAT&lt;br/&gt;Rate Limiting"]
     end
     
     subgraph Crypto ["crypto crate"]
-        KeyGen["ed25519 key generation&lt;br/&gt;Signing &amp; Verification"]
+        KeyGen["ed25519 key generation&lt;br/&gt;Signing &amp; Verification&lt;br/&gt;Passphrase encryption&lt;br/&gt;Key rotation"]
+    end
+    
+    subgraph Storage ["storage crate"]
+        SledBackend["Sled Backend"]
+        SQLiteBackend["SQLite Backend&lt;br/&gt;(r2d2 connection pool)"]
     end
     
     CLI --&gt; Core
     CLI --&gt; Net
     Core --&gt; Crypto
+    Core --&gt; Storage
     Net --&gt; Crypto
+    Core -.-&gt; OpQueue
+    Core -.-&gt; Config
+    Core -.-&gt; GC
+    Core -.-&gt; Tracing
+    Core -.-&gt; Metrics
     Core -.-&gt; Chunker
     Core -.-&gt; Compression
     Core -.-&gt; Store
     Core -.-&gt; CommitDAG
+    Core -.-&gt; API
 </pre>
 
 <h2 id="storage-layout"><a class="header" href="#storage-layout">Storage Layout</a></h2>
@@ -391,9 +416,14 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 <tr><td style="text-align: left"><strong>Compression</strong></td><td style="text-align: left">Zstd or Zlib</td><td style="text-align: left">Runtime selection; zstd is faster with better ratios</td></tr>
 <tr><td style="text-align: left"><strong>Hashing</strong></td><td style="text-align: left">Blake3</td><td style="text-align: left">Fastest cryptographic hash, SIMD-accelerated</td></tr>
 <tr><td style="text-align: left"><strong>Signatures</strong></td><td style="text-align: left">ed25519</td><td style="text-align: left">Proven, fast, small signatures (64 bytes)</td></tr>
-<tr><td style="text-align: left"><strong>Storage</strong></td><td style="text-align: left">Sled or Flat file</td><td style="text-align: left">Sled embedded (zero deps); flat file for portability</td></tr>
-<tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">libp2p TCP+Noise+Yamux</td><td style="text-align: left">Mature, NAT traversal via relay/WebRTC planned</td></tr>
-<tr><td style="text-align: left"><strong>Wire format</strong></td><td style="text-align: left">JSON</td><td style="text-align: left">Serde JSON over request-response</td></tr>
+<tr><td style="text-align: left"><strong>Storage</strong></td><td style="text-align: left">Sled, SQLite, or Flat file</td><td style="text-align: left">Sled/SQLite for indexed queries; flat for portability</td></tr>
+<tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">libp2p TCP+Noise+Yamux</td><td style="text-align: left">Mature, NAT traversal via relay/DCUtR/AutoNAT</td></tr>
+<tr><td style="text-align: left"><strong>Wire format</strong></td><td style="text-align: left">JSON / CBOR</td><td style="text-align: left">Serde over request-response + Gossipsub</td></tr>
+<tr><td style="text-align: left"><strong>Concurrency</strong></td><td style="text-align: left">Per-repo read-write queue</td><td style="text-align: left">Reads parallel, writes exclusive; no global lock</td></tr>
+<tr><td style="text-align: left"><strong>Config</strong></td><td style="text-align: left">JSON + env var overrides</td><td style="text-align: left">12-factor friendly; <code>SHARD_*</code> env vars take precedence</td></tr>
+<tr><td style="text-align: left"><strong>Tracing</strong></td><td style="text-align: left">Thread-local trace IDs</td><td style="text-align: left">Correlate logs across operations</td></tr>
+<tr><td style="text-align: left"><strong>GC</strong></td><td style="text-align: left">DAG reachability scan</td><td style="text-align: left">Marks all reachable from HEAD/branches/tags/index, prunes rest</td></tr>
+<tr><td style="text-align: left"><strong>Metrics</strong></td><td style="text-align: left">Static atomic counters</td><td style="text-align: left">Runtime operation counters with JSON snapshot</td></tr>
 </tbody>
 </table>
 </div>
