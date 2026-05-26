@@ -3455,7 +3455,7 @@ dependencies = [
 
 [[package]]
 name = "shard-cli"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "shard-core"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3506,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "shard-crypto"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3518,7 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "shard-net"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3537,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "shard-storage"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "r2d2",
