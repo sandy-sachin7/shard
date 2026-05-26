@@ -1,6 +1,6 @@
 [package]
 name = "shard-storage"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 description = "Storage backends for shard distributed VCS (sled, sqlite, flat file)"
 license = "MIT"

@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.2.1
+
+### Bug fixes
+
+- **Flaky test**: `test_three_node_pull` marked `#[ignore]` due to P2P race condition in test environment.
+
 ## v2.2.0 — Enterprise Hardening
 
 ### Concurrency Control (#6)
@@ -51,8 +57,6 @@
 - **API versioning**: HTTP API uses `/api/v1/*` routes.
 - **Dependency cleanup**: OnceCell for global state, UUID for tracing.
 - **Code quality**: `#[derive(Default)]` on metrics, unified `promote_pending` logic, `&Path` instead of `&PathBuf` in API, `#[allow(clippy::too_many_arguments)]` on `init_with_passphrase`.
-- **Flaky test**: `test_three_node_pull` marked `#[ignore]` due to P2P race condition in test environment.
-
 ## v2.1.1
 
 ### Bug fixes
