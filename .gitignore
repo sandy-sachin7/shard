@@ -46,3 +46,9 @@ criterion/
 # Generated benchmark fixtures
 benches/fixtures/medium/
 benches/fixtures/large/
+
+# Large test data / models
+test_simulation/
+scripts/gif_demo/*.gif
+scripts/gif_demo/shard_test/
+scripts/gif_demo/git_test/

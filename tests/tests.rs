@@ -62,7 +62,7 @@ fn workspace_log_after_commit() {
 #[test]
 fn workspace_status_after_init() {
     let (_dir, repo) = init_repo();
-    shard_core::status(&repo, false).unwrap();
+    shard_core::status(&repo, false, false).unwrap();
 }
 
 #[test]

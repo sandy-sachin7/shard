@@ -69,6 +69,8 @@ enum Commands {
         command: KeyCommands,
     },
     Share {
+        #[arg(long, default_value = "/ip4/0.0.0.0/tcp/0")]
+        listen: String,
         #[arg(long)]
         json: bool,
     },
@@ -104,6 +106,8 @@ enum Commands {
     Status {
         #[arg(long)]
         json: bool,
+        #[arg(long, conflicts_with = "json")]
+        porcelain: bool,
     },
     Config {
         #[command(subcommand)]
@@ -177,6 +181,10 @@ enum Commands {
     Completions {
         shell: String,
     },
+    Hf {
+        #[command(subcommand)]
+        command: HfCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -243,6 +251,24 @@ enum PeerCommands {
         multiaddr: String,
         #[arg(long)]
         public_key: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum HfCommands {
+    Push {
+        dataset_id: String,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Pull {
+        dataset_id: String,
+        #[arg(long)]
+        token: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -370,9 +396,9 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Share { json } => {
+        Commands::Share { listen, json } => {
             let current_dir = env::current_dir()?;
-            shard_core::share(&current_dir, *json).await?;
+            shard_core::share(&current_dir, listen, *json).await?;
         }
         Commands::Pull {
             peer,
@@ -403,9 +429,9 @@ async fn main() -> Result<()> {
             let current_dir = env::current_dir()?;
             shard_core::checkout(&current_dir, target, *json)?;
         }
-        Commands::Status { json } => {
+        Commands::Status { json, porcelain } => {
             let current_dir = env::current_dir()?;
-            shard_core::status(&current_dir, *json)?;
+            shard_core::status(&current_dir, *json, *porcelain)?;
         }
         Commands::Tag { command } => match command {
             TagCommands::Add { name, commit_id } => {
@@ -494,6 +520,24 @@ async fn main() -> Result<()> {
             let shell: Shell = shell.parse().map_err(|e| anyhow::anyhow!("{}", e))?;
             generate(shell, &mut cmd, "shard", &mut io::stdout());
         }
+        Commands::Hf { command } => match command {
+            HfCommands::Push {
+                dataset_id,
+                token,
+                json,
+            } => {
+                let current_dir = env::current_dir()?;
+                shard_core::hf_push(&current_dir, dataset_id, token.as_deref(), *json)?;
+            }
+            HfCommands::Pull {
+                dataset_id,
+                token,
+                json,
+            } => {
+                let current_dir = env::current_dir()?;
+                shard_core::hf_pull(&current_dir, dataset_id, token.as_deref(), *json)?;
+            }
+        },
     }
 
     Ok(())

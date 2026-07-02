@@ -1,9 +1,9 @@
 use blake3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const MAX_RETRIES: u32 = 10;
 
@@ -40,6 +40,8 @@ pub struct Node {
     pub swarm: Swarm<ShardBehaviour>,
     /// Pending auth challenges: (public_key, nonce) indexed by peer_id.
     pending_auth: HashMap<libp2p::PeerId, (Vec<u8>, Vec<u8>)>,
+    /// Peers that have authenticated via simple key-based auth.
+    authenticated_peers: HashSet<libp2p::PeerId>,
 }
 
 impl Node {
@@ -128,6 +130,7 @@ impl Node {
         Ok(Self {
             swarm,
             pending_auth: HashMap::new(),
+            authenticated_peers: HashSet::new(),
         })
     }
 }
@@ -140,6 +143,15 @@ pub trait ShardContentProvider {
     fn verify_auth(&self, public_key: &[u8], nonce: &[u8], signature: &[u8]) -> bool;
     /// Return the repo's public key (if auth is required for this repo).
     fn repo_public_key(&self) -> Option<Vec<u8>>;
+    /// Whether this provider requires peers to authenticate before serving content.
+    fn auth_required(&self) -> bool {
+        false // default: no auth required
+    }
+    /// Authenticate a peer by its public key.
+    /// Return true if the peer should be granted access.
+    fn authenticate(&self, _peer_id: &PeerId, _public_key: &[u8]) -> bool {
+        true // default: all peers allowed
+    }
 }
 
 impl Node {
@@ -153,6 +165,15 @@ impl Node {
     ) {
         match request {
             ShardRequest::GetManifest(id) => {
+                if provider.auth_required() && !self.authenticated_peers.contains(peer) {
+                    warn!("Unauthenticated peer {} requested manifest", peer);
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, ShardResponse::NotFound);
+                    return;
+                }
                 if let Some(data) = provider.get_manifest(&id) {
                     let _ = self
                         .swarm
@@ -168,6 +189,15 @@ impl Node {
                 }
             }
             ShardRequest::GetChunk(id) => {
+                if provider.auth_required() && !self.authenticated_peers.contains(peer) {
+                    warn!("Unauthenticated peer {} requested chunk", peer);
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, ShardResponse::NotFound);
+                    return;
+                }
                 if let Some(data) = provider.get_chunk(&id) {
                     let piece = crate::protocol::ChunkPiece {
                         hash: id.clone(),
@@ -189,6 +219,15 @@ impl Node {
                 }
             }
             ShardRequest::PutChunk(piece) => {
+                if provider.auth_required() && !self.authenticated_peers.contains(peer) {
+                    warn!("Unauthenticated peer {} tried to put chunk", peer);
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, ShardResponse::NotFound);
+                    return;
+                }
                 let ok = provider.put_chunk(&piece.hash, &piece.data);
                 let _ = self.swarm.behaviour_mut().request_response.send_response(
                     channel,
@@ -200,15 +239,15 @@ impl Node {
                 );
             }
             ShardRequest::Authenticate { public_key } => {
-                let nonce = blake3::hash(&[peer.to_bytes(), public_key.clone()].concat());
-                let nonce_bytes = nonce.as_bytes().to_vec();
-                self.pending_auth
-                    .insert(*peer, (public_key, nonce_bytes.clone()));
+                let allowed = provider.authenticate(peer, &public_key);
+                if allowed {
+                    self.authenticated_peers.insert(*peer);
+                }
                 let _ = self
                     .swarm
                     .behaviour_mut()
                     .request_response
-                    .send_response(channel, ShardResponse::AuthChallenge { nonce: nonce_bytes });
+                    .send_response(channel, ShardResponse::AuthAnswer { success: allowed });
             }
             ShardRequest::AuthAnswer { signature } => {
                 let result = self

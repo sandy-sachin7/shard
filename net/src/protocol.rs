@@ -62,6 +62,8 @@ pub enum ShardResponse {
     AuthGranted,
     /// Peer denied our authentication.
     AuthDenied,
+    /// Direct authentication answer (simple key-based auth, no challenge).
+    AuthAnswer { success: bool },
 }
 
 #[cfg(test)]
@@ -123,6 +125,8 @@ mod tests {
             },
             ShardResponse::AuthGranted,
             ShardResponse::AuthDenied,
+            ShardResponse::AuthAnswer { success: true },
+            ShardResponse::AuthAnswer { success: false },
         ];
         for resp in cases {
             let json = serde_json::to_vec(&resp).unwrap();

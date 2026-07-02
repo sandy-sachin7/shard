@@ -27,7 +27,12 @@
 ---
 
 <div align="center">
-  <img src="demo.gif" alt="Shard Demo" width="80%">
+  <h3>Day 1: Initial Checkpoint (500MB)</h3>
+  <img src="initial_add_demo.gif" alt="Shard Demo Initial" width="80%">
+  
+  <h3>Day 2: Incremental Checkpoint (Appending 1MB to a 500MB file)</h3>
+  <img src="incremental_demo.gif" alt="Shard Demo Incremental" width="80%">
+  <p><i>While Git LFS has to copy the entire file again, Shard's Rabin CDC detects only the modified chunks, finishing instantly.</i></p>
 </div>
 
 ---
