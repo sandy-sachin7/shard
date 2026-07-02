@@ -1,6 +1,6 @@
 [package]
 name = "shard-core"
-version = "2.2.1"
+version = "2.3.0"
 edition = "2021"
 description = "Core library for shard distributed VCS: chunking, compression, commits, branching, merging, WAL"
 license = "MIT"
@@ -22,7 +22,6 @@ shard-net = { path = "../net", version = "2.1.0" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 time = { workspace = true }
-walkdir = { workspace = true }
 zstd = { version = "0.13", default-features = false }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 tar = { workspace = true }
@@ -36,6 +35,7 @@ tower-http = { workspace = true }
 once_cell = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
+ignore = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"

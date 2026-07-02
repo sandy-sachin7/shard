@@ -416,6 +416,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1217,6 +1227,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1655,6 +1678,22 @@ dependencies = [
  "tokio",
  "url",
  "xmltree",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
 ]
 
 [[package]]
@@ -3455,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "shard-cli"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3472,7 +3511,7 @@ dependencies = [
 
 [[package]]
 name = "shard-core"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3483,6 +3522,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
+ "ignore",
  "once_cell",
  "parking_lot 0.12.5",
  "rand 0.8.6",
@@ -3500,13 +3540,12 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
- "walkdir",
  "zstd",
 ]
 
 [[package]]
 name = "shard-crypto"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3518,7 +3557,7 @@ dependencies = [
 
 [[package]]
 name = "shard-net"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3537,7 +3576,7 @@ dependencies = [
 
 [[package]]
 name = "shard-storage"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "r2d2",

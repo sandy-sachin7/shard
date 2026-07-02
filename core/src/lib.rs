@@ -91,38 +91,6 @@ fn get_cached_passphrase() -> Option<String> {
     PASSPHRASE_CACHE.lock().unwrap().clone()
 }
 
-fn load_shardignore(path: &Path) -> Vec<String> {
-    let ignore_path = path.join(".shardignore");
-    if ignore_path.exists() {
-        fs::read_to_string(&ignore_path)
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
-            .map(|l| l.trim().to_string())
-            .collect()
-    } else {
-        Vec::new()
-    }
-}
-
-fn matches_ignore(path: &Path, patterns: &[String]) -> bool {
-    let path_str = path.to_string_lossy();
-    for pattern in patterns {
-        let pattern = pattern.trim_end_matches('/');
-        if pattern == "*" {
-            return true;
-        }
-        if let Some(glob) = pattern.strip_prefix("**/") {
-            if path_str.contains(glob) {
-                return true;
-            }
-        } else if path_str == pattern || path_str.ends_with(&format!("/{}", pattern)) {
-            return true;
-        }
-    }
-    false
-}
-
 pub fn init(
     path: &Path,
     backend: &str,
@@ -494,10 +462,13 @@ pub fn health(path: &Path, json: bool) -> Result<()> {
 }
 
 fn dir_size(path: &Path) -> u64 {
-    walkdir::WalkDir::new(path)
-        .into_iter()
+    ignore::WalkBuilder::new(path)
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .build()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
         .filter_map(|e| e.metadata().ok())
         .map(|m| m.len())
         .sum()
@@ -535,25 +506,26 @@ pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
     let mut index = Index::load(&shard_dir.join("index"), &fmt)?;
 
     let cipher = maybe_load_cipher(&shard_dir)?;
-    let ignore_patterns = load_shardignore(path);
+    let include_hidden = config
+        .get("hidden_files_enabled")
+        .map(|s| s.as_str() == "true")
+        .unwrap_or(false);
 
     if file_path.is_dir() {
-        for entry in walkdir::WalkDir::new(file_path)
-            .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                if name == ".shard" || name == ".git" {
-                    return false;
-                }
-                let rel = e.path().strip_prefix(file_path).unwrap_or(e.path());
-                if matches_ignore(rel, &ignore_patterns) {
-                    return false;
-                }
-                true
-            })
-        {
-            let entry = entry?;
-            if entry.file_type().is_file() {
+        let mut builder = ignore::WalkBuilder::new(file_path);
+        builder.hidden(!include_hidden);
+        builder.add_custom_ignore_filename(".shardignore");
+        builder.filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            if name == ".shard" || name == ".git" {
+                return false;
+            }
+            true
+        });
+
+        for entry in builder.build() {
+            let entry = entry.map_err(|e| anyhow::anyhow!("{}", e))?;
+            if entry.file_type().is_some_and(|ft| ft.is_file()) {
                 add_file(
                     path,
                     entry.path(),
@@ -1221,7 +1193,7 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn status(path: &Path, json: bool) -> Result<()> {
+pub fn status(path: &Path, json: bool, porcelain: bool) -> Result<()> {
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
@@ -1234,20 +1206,20 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
     let mut commit_id: Option<String> = None;
     if let Some(cid) = head_commit {
         commit_id = Some(cid);
-        if !json {
+        if !json && !porcelain {
             if let Some(ref branch) = current_branch {
                 info!("On branch: {}", branch);
             } else {
                 info!("HEAD detached at {}", commit_id.as_ref().unwrap());
             }
         }
-    } else if !json {
+    } else if !json && !porcelain {
         info!("No commits yet.");
     }
 
     let index = Index::load(&shard_dir.join("index"), &fmt)?;
     let staged: Vec<String> = index.files.keys().cloned().collect();
-    if !json {
+    if !json && !porcelain {
         if staged.is_empty() {
             info!("Nothing staged.");
         } else {
@@ -1280,7 +1252,7 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
         std::collections::HashSet::new()
     };
 
-    if !json && !deleted.is_empty() {
+    if !json && !porcelain && !deleted.is_empty() {
         info!("\nDeleted files:");
         for name in &deleted {
             info!("  {} (deleted)", name);
@@ -1288,36 +1260,59 @@ pub fn status(path: &Path, json: bool) -> Result<()> {
     }
 
     let mut untracked = Vec::new();
-    let ignore_patterns = load_shardignore(path);
-    for entry in walkdir::WalkDir::new(path)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() || entry.file_type().is_dir() {
+    let config = load_config(&shard_dir)?;
+    let include_hidden = config
+        .get("hidden_files_enabled")
+        .map(|s| s.as_str() == "true")
+        .unwrap_or(false);
+
+    let mut builder = ignore::WalkBuilder::new(path);
+    builder.hidden(!include_hidden);
+    builder.add_custom_ignore_filename(".shardignore");
+
+    for entry in builder.build().filter_map(|e| e.ok()) {
+        if entry.depth() > 0
+            && (entry
+                .file_type()
+                .is_some_and(|ft| ft.is_file() || ft.is_dir()))
+        {
             let rel_path = entry.path().strip_prefix(path).unwrap_or(entry.path());
             let name = rel_path.to_string_lossy().to_string();
+
             let is_hidden = rel_path.components().any(|c| {
                 let name = c.as_os_str().to_string_lossy();
                 name == ".shard" || name == ".git"
             });
+
             if !is_hidden
                 && entry.path() != shard_dir
                 && !entry.path().starts_with(&shard_dir)
                 && !index.files.contains_key(&name)
                 && !tracked_names.contains(&name)
-                && entry.file_type().is_file()
-                && !matches_ignore(rel_path, &ignore_patterns)
+                && entry.file_type().is_some_and(|ft| ft.is_file())
             {
                 untracked.push(name);
             }
         }
     }
-    if !json && !untracked.is_empty() {
+    if !json && !porcelain && !untracked.is_empty() {
         info!("\nUntracked files:");
         for name in &untracked {
             info!("  {}", name);
         }
+    }
+
+    if porcelain {
+        for name in &staged {
+            println!("A  {}", name);
+        }
+        for name in &deleted {
+            println!(" D {}", name);
+        }
+        for name in &untracked {
+            println!("?? {}", name);
+        }
+        return Ok(());
     }
 
     if json {
@@ -2138,17 +2133,15 @@ pub fn import(
     if !source_dir.is_dir() {
         anyhow::bail!("Source must be a directory");
     }
-    for entry in walkdir::WalkDir::new(source_dir)
-        .into_iter()
-        .filter_entry(|e| {
-            e.file_name()
-                .to_str()
-                .map(|s| !s.starts_with('.'))
-                .unwrap_or(false)
-        })
-    {
-        let entry = entry?;
-        if entry.file_type().is_file() {
+    let include_hidden = config
+        .get("hidden_files_enabled")
+        .map(|s| s.as_str() == "true")
+        .unwrap_or(false);
+    let mut builder = ignore::WalkBuilder::new(source_dir);
+    builder.hidden(!include_hidden);
+    for entry in builder.build() {
+        let entry = entry.map_err(|e| anyhow::anyhow!("{}", e))?;
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
             add_file(
                 path,
                 entry.path(),
@@ -2210,6 +2203,27 @@ struct RepoProvider {
 }
 
 impl shard_net::p2p::ShardContentProvider for RepoProvider {
+    fn auth_required(&self) -> bool {
+        self.shard_dir.join("authorized_keys").exists()
+    }
+    fn authenticate(&self, _peer_id: &shard_net::libp2p::PeerId, public_key: &[u8]) -> bool {
+        let auth_path = self.shard_dir.join("authorized_keys");
+        if !auth_path.exists() {
+            return true; // open repo
+        }
+        let content = match std::fs::read_to_string(&auth_path) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        content.lines().any(|line| {
+            let line = line.trim();
+            !line.is_empty()
+                && !line.starts_with('#')
+                && hex::decode(line)
+                    .map(|bytes| bytes.as_slice() == public_key)
+                    .unwrap_or(false)
+        })
+    }
     fn get_manifest(&self, id: &str) -> Option<Vec<u8>> {
         self.store.get_chunk(id).ok()
     }
@@ -2283,54 +2297,77 @@ fn commit_stats(shard_dir: &Path, commit_id: &str) -> Result<(u64, u64)> {
     Ok((file_count, total_size))
 }
 
-pub async fn share(path: &Path, json: bool) -> Result<()> {
+pub async fn share(path: &Path, listen_addr: &str, json: bool) -> Result<()> {
+    let _guard = OP_QUEUES
+        .get_or_create(&path.to_path_buf())
+        .acquire(ops::OpKind::Read, "share".to_string());
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
         anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
+    let config = load_config(&shard_dir)?;
+    let repo_id = config.get("repo_id").cloned().unwrap_or_default();
+    let repo_name = config.get("repo_name").cloned().unwrap_or_default();
+
     let mut node = shard_net::p2p::Node::new().await?;
 
-    // Subscribe to global announcement topic
+    // Subscribe to global announcement topic and repo-specific topic
     let ann_topic = shard_net::libp2p::gossipsub::IdentTopic::new("shard:ann");
+    let repo_topic =
+        shard_net::libp2p::gossipsub::IdentTopic::new(format!("/shard/repo/{}", repo_id));
     node.subscribe(&ann_topic)?;
+    node.subscribe(&repo_topic)?;
 
     // Bootstrap from peers
     let peers = load_peers(&shard_dir)?;
     for peer in peers {
         if let Ok(addr) = peer.parse::<shard_net::libp2p::Multiaddr>() {
-            let _ = node.swarm.dial(addr);
+            if let Err(e) = node.swarm.dial(addr.clone()) {
+                tracing::warn!("Failed to dial peer {}: {}", addr, e);
+            }
         }
     }
 
     // Trigger Kademlia DHT bootstrap
     node.swarm.behaviour_mut().kademlia.bootstrap().ok();
 
-    node.listen("/ip4/0.0.0.0/tcp/0").await?;
+    node.listen(listen_addr).await?;
     let listen_addrs: Vec<String> = node.swarm.listeners().map(|a| a.to_string()).collect();
+    if listen_addrs.is_empty() {
+        tracing::warn!("No external listen addresses available — peers may not be able to connect");
+    }
     let peer_multiaddr = listen_addrs.first().cloned().unwrap_or_default();
 
-    let config = load_config(&shard_dir)?;
-    let repo_name = config.get("repo_name").cloned().unwrap_or_default();
-
     let store = Store::open(&shard_dir)?;
-    let provider = RepoProvider {
+    let mut provider = RepoProvider {
         store,
         shard_dir: shard_dir.clone(),
     };
 
-    // Publish announcement for HEAD commit
-    if let Some(head) = branch::resolve_head(&shard_dir)?.1 {
-        let (file_count, total_size) = commit_stats(&shard_dir, &head)?;
+    // Helper to publish announcement to both global and repo-specific topics
+    let publish_ann = |node: &mut shard_net::p2p::Node, ann: &shard_net::protocol::Announcement| {
+        if let Ok(payload) = serde_json::to_vec(ann) {
+            if let Err(e) = node.publish(&ann_topic, payload.clone()) {
+                tracing::warn!("Failed to publish announcement: {}", e);
+            }
+            if let Err(e) = node.publish(&repo_topic, payload) {
+                tracing::warn!("Failed to publish announcement: {}", e);
+            }
+        }
+    };
+
+    // Initial announce of HEAD
+    if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
+        let (file_count, total_size) = commit_stats(&shard_dir, head).unwrap_or_default();
         let ann = shard_net::protocol::Announcement {
-            commit_id: head,
+            commit_id: head.clone(),
             file_count,
             total_size,
             repo_name: repo_name.clone(),
             peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
         };
-        let payload = serde_json::to_vec(&ann)?;
-        let _ = node.publish(&ann_topic, payload);
+        publish_ann(&mut node, &ann);
     }
 
     if json {
@@ -2343,10 +2380,208 @@ pub async fn share(path: &Path, json: bool) -> Result<()> {
         );
     } else {
         info!("Sharing repository...");
+        info!("Peer ID: {}", node.local_peer_id());
     }
-    node.run(provider).await;
 
-    Ok(())
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    let mut address_book: HashMap<shard_net::libp2p::PeerId, Vec<shard_net::libp2p::Multiaddr>> =
+        HashMap::new();
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("\nShare shutting down...");
+                break Ok(());
+            }
+            _ = interval.tick() => {
+                // Periodic health log and re-announce
+                if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
+                    let (fc, ts) = commit_stats(&shard_dir, head).unwrap_or_default();
+                    let ann = shard_net::protocol::Announcement {
+                        commit_id: head.clone(),
+                        file_count: fc,
+                        total_size: ts,
+                        repo_name: repo_name.clone(),
+                        peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+                    };
+                    publish_ann(&mut node, &ann);
+                }
+            }
+            event = node.swarm.select_next_some() => {
+                match event {
+                    shard_net::libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
+                        info!("Listening on {address:?}");
+                        let _ = std::io::stdout().flush();
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Mdns(
+                            shard_net::libp2p::mdns::Event::Discovered(list),
+                        ),
+                    ) => {
+                        for (peer_id, multiaddr) in list {
+                            info!("mDNS discovered: {peer_id} {multiaddr}");
+                            address_book.entry(peer_id).or_default().push(multiaddr.clone());
+                            node.swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .add_explicit_peer(&peer_id);
+                            node.swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer_id, multiaddr);
+                        }
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Mdns(shard_net::libp2p::mdns::Event::Expired(
+                            list,
+                        )),
+                    ) => {
+                        for (peer_id, _multiaddr) in list {
+                            info!("mDNS expired: {peer_id}");
+                            node.swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .remove_explicit_peer(&peer_id);
+                        }
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Gossipsub(
+                            shard_net::libp2p::gossipsub::Event::Message {
+                                propagation_source,
+                                message,
+                                ..
+                            },
+                        ),
+                    ) => {
+                        if let Ok(ann) = serde_json::from_slice::<shard_net::protocol::Announcement>(&message.data) {
+                            info!(
+                                "Peer {} announced commit: {} (repo: {}, {} files, {} bytes)",
+                                propagation_source, ann.commit_id, ann.repo_name, ann.file_count, ann.total_size,
+                            );
+                            // Store announcer's multiaddr if we don't have it yet
+                            if !ann.peer_multiaddr.is_empty() && !address_book.contains_key(&propagation_source) {
+                                if let Ok(addr) = ann.peer_multiaddr.parse::<shard_net::libp2p::Multiaddr>() {
+                                    address_book.entry(propagation_source).or_default().push(addr);
+                                }
+                            }
+                            // Reply with our HEAD if different
+                            if let Ok((_, Some(our_head))) = branch::resolve_head(&shard_dir) {
+                                if our_head != ann.commit_id {
+                                    let (fc, ts) = commit_stats(&shard_dir, &our_head).unwrap_or_default();
+                                    let reply = shard_net::protocol::Announcement {
+                                        commit_id: our_head,
+                                        file_count: fc,
+                                        total_size: ts,
+                                        repo_name: repo_name.clone(),
+                                        peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+                                    };
+                                    publish_ann(&mut node, &reply);
+                                }
+                            }
+                        }
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::RequestResponse(
+                            shard_net::libp2p::request_response::Event::Message { peer, message },
+                        ),
+                    ) => {
+                        if let shard_net::libp2p::request_response::Message::Request {
+                            request, channel, ..
+                        } = message
+                        {
+                            node.serve_request(&peer, &mut provider, request, channel);
+                        } else {
+                            info!("Received Response from {}", peer);
+                        }
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::RequestResponse(
+                            shard_net::libp2p::request_response::Event::OutboundFailure {
+                                peer, error, ..
+                            },
+                        ),
+                    ) => {
+                        error!("Outbound failure to {}: {:?}", peer, error);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::RequestResponse(
+                            shard_net::libp2p::request_response::Event::InboundFailure {
+                                peer, error, ..
+                            },
+                        ),
+                    ) => {
+                        error!("Inbound failure from {}: {:?}", peer, error);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Identify(
+                            shard_net::libp2p::identify::Event::Received { peer_id, info },
+                        ),
+                    ) => {
+                        info!("Identify received from {}: {:?}", peer_id, info.listen_addrs);
+                        for addr in info.listen_addrs {
+                            address_book.entry(peer_id).or_default().push(addr);
+                        }
+                        let _ = std::io::stdout().flush();
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Identify(event),
+                    ) => {
+                        info!("Identify event: {:?}", event);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                        info!("Connection established with {}", peer_id);
+                        if let shard_net::libp2p::core::ConnectedPoint::Dialer { address, .. } = &endpoint {
+                            address_book.entry(peer_id).or_default().push(address.clone());
+                        }
+                        node.swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .add_explicit_peer(&peer_id);
+                        // Announce HEAD to the newly connected peer
+                        if let Some(ref head) = branch::resolve_head(&shard_dir)?.1 {
+                            let (fc, ts) = commit_stats(&shard_dir, head).unwrap_or_default();
+                            let ann = shard_net::protocol::Announcement {
+                                commit_id: head.clone(),
+                                file_count: fc,
+                                total_size: ts,
+                                repo_name: repo_name.clone(),
+                                peer_multiaddr: format!("{}/p2p/{}", peer_multiaddr, node.local_peer_id()),
+                            };
+                            publish_ann(&mut node, &ann);
+                        }
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Relay(event),
+                    ) => {
+                        info!("Relay event: {:?}", event);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Dcutr(event),
+                    ) => {
+                        info!("DCUtR event: {:?}", event);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::Behaviour(
+                        shard_net::p2p::ShardBehaviourEvent::Autonat(event),
+                    ) => {
+                        info!("AutoNAT event: {:?}", event);
+                    }
+                    shard_net::libp2p::swarm::SwarmEvent::IncomingConnection {
+                        local_addr,
+                        send_back_addr,
+                        ..
+                    } => {
+                        info!(
+                            "Incoming connection from {} to {}",
+                            send_back_addr, local_addr
+                        );
+                    }
+                    e => {
+                        info!("Event: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Start a circuit relay v2 server for NAT traversal.
@@ -2724,6 +2959,12 @@ pub async fn pull(path: &Path, peer: &str, commit_id: &str, json: bool) -> Resul
         _ => anyhow::bail!("Multiaddr must end with /p2p/<peer_id>"),
     };
 
+    // Authenticate with remote peer before pulling data
+    let keypair = load_keypair(&shard_dir)?;
+    let public_key = keypair.verifying_key.to_bytes().to_vec();
+    node.request_authenticate(&multiaddr, peer_id, public_key, &keypair.signing_key)
+        .await?;
+
     // 1. Get Commit (sequential — single request)
     if !json {
         info!("Pulling commit {} from {}...", commit_id, peer);
@@ -3084,6 +3325,12 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
         _ => anyhow::bail!("Multiaddr must end with /p2p/<peer_id>"),
     };
 
+    // Authenticate with remote peer before pushing data
+    let keypair = load_keypair(&shard_dir)?;
+    let public_key = keypair.verifying_key.to_bytes().to_vec();
+    node.request_authenticate(&multiaddr, peer_id, public_key, &keypair.signing_key)
+        .await?;
+
     for (id, data) in &objects {
         node.request_put_chunk(&multiaddr, peer_id, id.clone(), data.clone())
             .await?;
@@ -3221,5 +3468,99 @@ pub fn key_verify(path: &Path, json: bool) -> Result<()> {
             anyhow::bail!("Keychain verification failed ({} errors).", errors.len());
         }
     }
+    Ok(())
+}
+
+pub fn hf_push(
+    path: &std::path::Path,
+    dataset_id: &str,
+    token: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if !shard_dir.exists() {
+        anyhow::bail!("not a shard repository");
+    }
+
+    if !json {
+        tracing::info!("Pushing .shard to HuggingFace dataset: {}", dataset_id);
+    }
+
+    let mut cmd = std::process::Command::new("huggingface-cli");
+    cmd.arg("upload");
+    cmd.arg(dataset_id);
+    cmd.arg(&shard_dir);
+    cmd.arg(".shard");
+    cmd.arg("--repo-type").arg("dataset");
+
+    if let Some(t) = token {
+        cmd.arg("--token").arg(t);
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run huggingface-cli: {}", e))?;
+    if !status.success() {
+        anyhow::bail!("huggingface-cli upload failed with status: {}", status);
+    }
+
+    if json {
+        tracing::info!(
+            "{}",
+            serde_json::to_string(
+                &serde_json::json!({"status": "hf_pushed", "dataset": dataset_id})
+            )?
+        );
+    } else {
+        tracing::info!("Successfully pushed to HuggingFace!");
+    }
+
+    Ok(())
+}
+
+pub fn hf_pull(
+    path: &std::path::Path,
+    dataset_id: &str,
+    token: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let shard_dir = path.join(".shard");
+    if shard_dir.exists() {
+        anyhow::bail!("repository already exists at this path");
+    }
+
+    if !json {
+        tracing::info!("Pulling .shard from HuggingFace dataset: {}", dataset_id);
+    }
+
+    let mut cmd = std::process::Command::new("huggingface-cli");
+    cmd.arg("download");
+    cmd.arg(dataset_id);
+    cmd.arg(".shard");
+    cmd.arg("--local-dir").arg(path);
+    cmd.arg("--repo-type").arg("dataset");
+
+    if let Some(t) = token {
+        cmd.arg("--token").arg(t);
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to run huggingface-cli: {}", e))?;
+    if !status.success() {
+        anyhow::bail!("huggingface-cli download failed with status: {}", status);
+    }
+
+    if json {
+        tracing::info!(
+            "{}",
+            serde_json::to_string(
+                &serde_json::json!({"status": "hf_pulled", "dataset": dataset_id})
+            )?
+        );
+    } else {
+        tracing::info!("Successfully pulled from HuggingFace!");
+    }
+
     Ok(())
 }

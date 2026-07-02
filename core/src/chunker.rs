@@ -255,6 +255,26 @@ impl Chunker {
     }
 }
 
+// ── Validation ─────────────────────────────────────────────────────────────
+
+/// Validate that a chunk size is within the acceptable range (1 to 16 MiB inclusive).
+///
+/// Returns `Ok(())` if `size` is between 1 and 16 MiB, or an error message otherwise.
+pub fn validate_chunk_size(size: usize) -> Result<(), String> {
+    const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+    if size == 0 {
+        Err("chunk size must be greater than 0".to_string())
+    } else if size > MAX_CHUNK_SIZE {
+        Err(format!(
+            "chunk size {} exceeds maximum of {}",
+            size, MAX_CHUNK_SIZE
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -405,6 +425,22 @@ mod tests {
                 max: 1_048_576
             }
         );
+    }
+
+    #[test]
+    fn test_validate_chunk_size_valid() {
+        assert!(validate_chunk_size(1).is_ok());
+        assert!(validate_chunk_size(4 * 1024 * 1024).is_ok());
+        assert!(validate_chunk_size(16 * 1024 * 1024).is_ok());
+    }
+
+    #[test]
+    fn test_validate_chunk_size_invalid() {
+        let err_zero = validate_chunk_size(0).unwrap_err();
+        assert!(!err_zero.is_empty());
+
+        let err_too_large = validate_chunk_size(16 * 1024 * 1024 + 1).unwrap_err();
+        assert!(!err_too_large.is_empty());
     }
 
     #[test]

@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
 
     // 6. Show status
     println!("\n6. Checking status...");
-    shard_core::status(repo, false)?;
+    shard_core::status(repo, false, false)?;
 
     // 7. Modify file and commit again
     println!("\n7. Creating a second commit...");
