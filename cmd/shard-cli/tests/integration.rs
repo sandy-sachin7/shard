@@ -69,6 +69,39 @@ fn test_init_creates_dot_shard() {
 }
 
 #[test]
+fn test_parallel_init_creates_one_repo() {
+    let dir = repo_dir("parallel-init-test");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut handles = Vec::new();
+
+    for _ in 0..2 {
+        let barrier = barrier.clone();
+        let path = dir.path.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut command = Command::new(shard_bin());
+            command.args(["init"]).current_dir(path);
+            barrier.wait();
+            command.output().unwrap()
+        }));
+    }
+    barrier.wait();
+
+    let outputs: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|output| output.status.success())
+            .count(),
+        1
+    );
+    assert!(dir.path.join(".shard").is_dir());
+    assert!(dir.path.join(".shard.lock").is_file());
+}
+
+#[test]
 fn test_init_twice_fails() {
     let dir = repo_dir("init-twice");
     shard(&["init"], &dir).output().unwrap();
@@ -1679,8 +1712,12 @@ fn test_p2p_push_and_pull_zstd_and_private_with_resume() {
         .unwrap()
         .to_string();
 
+    let src_pub = fs::read(dir_src.join(".shard/keys/public.key")).unwrap();
+    let src_pub_hex: String = src_pub.iter().map(|b| format!("{:02x}", b)).collect();
+    shard_ok(&["key", "add-authorized", &src_pub_hex], &dir_dst);
     let (mut dst_server, dst_addr) = spawn_share(&dir_dst);
-    shard_ok(&["push", &dst_addr], &dir_src);
+    let push_out = shard_ok(&["push", &dst_addr], &dir_src);
+    assert!(String::from_utf8_lossy(&push_out.stdout).contains(&cid));
     let _ = dst_server.kill();
     let _ = dst_server.wait();
 
@@ -1744,6 +1781,9 @@ fn test_p2p_push_and_pull_zstd_and_private_with_resume() {
         priv_c.join(".shard/keys/repo.key"),
     )
     .unwrap();
+    let priv_a_pub = fs::read(priv_a.join(".shard/keys/public.key")).unwrap();
+    let priv_a_pub_hex: String = priv_a_pub.iter().map(|b| format!("{:02x}", b)).collect();
+    shard_ok(&["key", "add-authorized", &priv_a_pub_hex], &priv_c);
     let (mut priv_c_server, priv_c_addr) = spawn_share(&priv_c);
     shard_ok(&["push", &priv_c_addr], &priv_a);
     let _ = priv_c_server.kill();

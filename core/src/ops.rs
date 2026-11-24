@@ -1,6 +1,6 @@
 use anyhow::Result;
 use fs2::FileExt;
-use parking_lot::{ArcRwLockReadGuard, ArcRwLockWriteGuard, RawRwLock, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -32,10 +32,10 @@ struct OpEntry {
 }
 
 /// Per-repository concurrency controller combining an in-process `RwLock` with
-/// OS-level cross-process advisory file locking on `.shard/repo.lock`.
+/// OS-level cross-process advisory file locking on `.shard.lock`.
 #[derive(Clone)]
 pub struct OpQueue {
-    rwlock: Arc<RwLock<()>>,
+    rwlock: Arc<RepoRwLock>,
     active: Arc<RwLock<Vec<OpEntry>>>,
     repo_path: Option<PathBuf>,
 }
@@ -49,7 +49,7 @@ impl Default for OpQueue {
 impl OpQueue {
     pub fn new() -> Self {
         Self {
-            rwlock: Arc::new(RwLock::new(())),
+            rwlock: Arc::new(RepoRwLock::default()),
             active: Arc::new(RwLock::new(Vec::new())),
             repo_path: None,
         }
@@ -57,25 +57,22 @@ impl OpQueue {
 
     pub fn for_repo(repo_path: PathBuf) -> Self {
         Self {
-            rwlock: Arc::new(RwLock::new(())),
+            rwlock: Arc::new(RepoRwLock::default()),
             active: Arc::new(RwLock::new(Vec::new())),
             repo_path: Some(repo_path),
         }
     }
 
-    /// Acquire a real read or write lock immediately (blocking until granted).
-    /// Acquires the in-process `RwLock` first, then the OS-level advisory file lock
-    /// on `.shard/repo.lock` (if `.shard` exists).
-    pub fn acquire(&self, kind: OpKind, description: String) -> OpGuard {
-        let mem_lock = match kind {
-            OpKind::Read => MemLockGuard::Read(self.rwlock.read_arc()),
-            OpKind::Write => MemLockGuard::Write(self.rwlock.write_arc()),
-        };
+    /// Acquire a read or write lock immediately (blocking until granted).
+    /// Acquires the in-process read-write lock first, then the OS-level file lock
+    /// on `.shard.lock`.
+    pub fn acquire(&self, kind: OpKind, description: String) -> Result<OpGuard> {
+        let mem_lock = self.rwlock.acquire(kind);
 
-        let file_lock = self
-            .repo_path
-            .as_deref()
-            .and_then(|root| acquire_os_lock(root, kind).ok().flatten());
+        let file_lock = match self.repo_path.as_deref() {
+            Some(root) => acquire_os_lock(root, kind)?,
+            None => None,
+        };
 
         let id = uuid::Uuid::new_v4().to_string();
         self.active.write().push(OpEntry {
@@ -85,13 +82,13 @@ impl OpQueue {
             description,
         });
 
-        OpGuard {
+        Ok(OpGuard {
             active: self.active.clone(),
             _file_lock: file_lock,
             _mem_lock: mem_lock,
             id,
             kind,
-        }
+        })
     }
 
     /// Snapshot of currently executing operations on this repository.
@@ -113,11 +110,16 @@ impl OpQueue {
 }
 
 fn acquire_os_lock(repo_root: &Path, kind: OpKind) -> Result<Option<File>> {
-    let shard_dir = repo_root.join(".shard");
-    if !shard_dir.exists() {
-        return Ok(None);
+    if !repo_root.exists() {
+        // Only a write op (typically `init`) may create a repository directory.
+        // Read-only commands on a mistyped path must fail without side effects.
+        if kind != OpKind::Write {
+            return Ok(None);
+        }
+        fs::create_dir_all(repo_root)?;
     }
-    let lock_path = shard_dir.join("repo.lock");
+    let canonical_root = fs::canonicalize(repo_root)?;
+    let lock_path = canonical_root.join(".shard.lock");
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -131,13 +133,62 @@ fn acquire_os_lock(repo_root: &Path, kind: OpKind) -> Result<Option<File>> {
     Ok(Some(file))
 }
 
-#[allow(dead_code)]
-enum MemLockGuard {
-    Read(ArcRwLockReadGuard<RawRwLock, ()>),
-    Write(ArcRwLockWriteGuard<RawRwLock, ()>),
+#[derive(Default)]
+struct RepoLockState {
+    readers: usize,
+    waiting_writers: usize,
+    writer: bool,
 }
 
-/// RAII lock guard holding both the OS-level `.shard/repo.lock` advisory lock
+#[derive(Default)]
+struct RepoRwLock {
+    state: Mutex<RepoLockState>,
+    changed: Condvar,
+}
+
+impl RepoRwLock {
+    fn acquire(self: &Arc<Self>, kind: OpKind) -> MemLockGuard {
+        let mut state = self.state.lock();
+        match kind {
+            OpKind::Read => {
+                while state.writer || state.waiting_writers > 0 {
+                    self.changed.wait(&mut state);
+                }
+                state.readers += 1;
+            }
+            OpKind::Write => {
+                state.waiting_writers += 1;
+                while state.writer || state.readers > 0 {
+                    self.changed.wait(&mut state);
+                }
+                state.waiting_writers -= 1;
+                state.writer = true;
+            }
+        }
+        MemLockGuard {
+            lock: self.clone(),
+            kind,
+        }
+    }
+}
+
+struct MemLockGuard {
+    lock: Arc<RepoRwLock>,
+    kind: OpKind,
+}
+
+impl Drop for MemLockGuard {
+    fn drop(&mut self) {
+        let mut state = self.lock.state.lock();
+        match self.kind {
+            OpKind::Read => state.readers -= 1,
+            OpKind::Write => state.writer = false,
+        }
+        self.lock.changed.notify_all();
+    }
+}
+
+/// RAII lock guard holding both the OS-level `.shard.lock` advisory lock
 /// and the in-process `RwLock` guard. Releases cleanly on drop.
 pub struct OpGuard {
     active: Arc<RwLock<Vec<OpEntry>>>,
@@ -257,7 +308,8 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let _guard = q
                     .get_or_create(&path)
-                    .acquire(OpKind::Write, format!("w{}", i));
+                    .acquire(OpKind::Write, format!("w{}", i))
+                    .unwrap();
                 let now = aw.fetch_add(1, Ordering::SeqCst) + 1;
                 mc.fetch_max(now, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(15));
@@ -280,11 +332,35 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".shard")).unwrap();
         let queue = OpQueue::for_repo(dir.path().to_path_buf());
-        let g1 = queue.acquire(OpKind::Read, "r1".into());
-        let g2 = queue.acquire(OpKind::Read, "r2".into());
+        let g1 = queue.acquire(OpKind::Read, "r1".into()).unwrap();
+        let g2 = queue.acquire(OpKind::Read, "r2".into()).unwrap();
         assert_eq!(queue.snapshot().running.len(), 2);
         drop(g1);
         drop(g2);
         assert_eq!(queue.snapshot().running.len(), 0);
+    }
+
+    #[test]
+    fn test_os_lock_failure_is_returned() {
+        let dir = tempdir().unwrap();
+        let lock_path = dir.path().join(".shard.lock");
+        fs::create_dir_all(&lock_path).unwrap();
+        let queue = OpQueue::for_repo(dir.path().to_path_buf());
+
+        assert!(queue
+            .acquire(OpKind::Write, "write with invalid lock path".into())
+            .is_err());
+        assert!(queue.snapshot().running.is_empty());
+    }
+
+    #[test]
+    fn test_lock_exists_before_repo_initialization() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path().join("new-repo");
+        let queue = OpQueue::for_repo(repo_root.clone());
+        let _guard = queue.acquire(OpKind::Write, "init".into()).unwrap();
+
+        assert!(repo_root.join(".shard.lock").is_file());
+        assert!(!repo_root.join(".shard").exists());
     }
 }

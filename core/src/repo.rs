@@ -299,6 +299,9 @@ pub(crate) fn add_file(
     }
 
     let name = relative_path(base_root, file_path);
+    if name == ".shard.lock" {
+        anyhow::bail!("cannot add the internal repository lock file");
+    }
     let manifest = FileManifest {
         name: name.clone(),
         size: total_size,
@@ -510,7 +513,7 @@ pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
             builder.add_custom_ignore_filename(".shardignore");
             builder.filter_entry(|e| {
                 let name = e.file_name().to_string_lossy();
-                name != ".shard" && name != ".git"
+                name != ".shard" && name != ".git" && name != ".shard.lock"
             });
 
             for entry in builder.build() {
@@ -1446,7 +1449,7 @@ pub fn status(path: &Path, json: bool, porcelain: bool) -> Result<()> {
 
                 let is_internal = rel_path.components().any(|c| {
                     let seg = c.as_os_str().to_string_lossy();
-                    seg == ".shard" || seg == ".git"
+                    seg == ".shard" || seg == ".git" || seg == ".shard.lock"
                 });
 
                 if !is_internal

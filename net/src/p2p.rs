@@ -16,7 +16,7 @@ use libp2p::{
     tcp, yamux, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
 use rand::RngCore;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::signal;
 use tokio::time::sleep;
@@ -51,7 +51,7 @@ pub struct Node {
     /// Pending auth challenges keyed by peer_id with expiration TTL.
     pending_auth: HashMap<PeerId, PendingAuth>,
     /// Peers that have successfully completed Ed25519 challenge-response auth.
-    authenticated_peers: HashSet<PeerId>,
+    authenticated_peers: HashMap<PeerId, Vec<u8>>,
 }
 
 impl Node {
@@ -130,7 +130,7 @@ impl Node {
         Ok(Self {
             swarm,
             pending_auth: HashMap::new(),
-            authenticated_peers: HashSet::new(),
+            authenticated_peers: HashMap::new(),
         })
     }
 
@@ -138,6 +138,17 @@ impl Node {
     pub fn on_connection_closed(&mut self, peer: &PeerId) {
         self.authenticated_peers.remove(peer);
         self.pending_auth.remove(peer);
+    }
+
+    fn peer_is_authorized(&mut self, peer: &PeerId, provider: &impl ShardContentProvider) -> bool {
+        let Some(public_key) = self.authenticated_peers.get(peer).cloned() else {
+            return false;
+        };
+        if provider.auth_required() && provider.authenticate(peer, &public_key) {
+            return true;
+        }
+        self.authenticated_peers.remove(peer);
+        false
     }
 
     /// Remove expired pending auth challenges to avoid unbounded map growth.
@@ -177,7 +188,7 @@ impl Node {
     ) {
         match request {
             ShardRequest::GetManifest(id) => {
-                if provider.auth_required() && !self.authenticated_peers.contains(peer) {
+                if provider.auth_required() && !self.peer_is_authorized(peer, provider) {
                     warn!("Unauthenticated peer {} requested manifest", peer);
                     let _ = self
                         .swarm
@@ -206,7 +217,7 @@ impl Node {
                     .send_response(channel, resp);
             }
             ShardRequest::GetChunk(id) => {
-                if provider.auth_required() && !self.authenticated_peers.contains(peer) {
+                if provider.auth_required() && !self.peer_is_authorized(peer, provider) {
                     warn!("Unauthenticated peer {} requested chunk", peer);
                     let _ = self
                         .swarm
@@ -240,8 +251,13 @@ impl Node {
                     .send_response(channel, resp);
             }
             ShardRequest::PutChunk(piece) => {
-                if provider.auth_required() && !self.authenticated_peers.contains(peer) {
-                    warn!("Unauthenticated peer {} tried to put chunk", peer);
+                // Writes require an explicit allowlist and proof of private-key
+                // possession. Open repositories remain read-only to P2P peers.
+                if !self.peer_is_authorized(peer, provider) {
+                    warn!(
+                        "Unauthorized or unauthenticated peer {} tried to put chunk",
+                        peer
+                    );
                     let _ = self
                         .swarm
                         .behaviour_mut()
@@ -318,26 +334,22 @@ impl Node {
             ShardRequest::AuthAnswer { signature } => {
                 self.purge_expired_auth();
                 let local_peer = self.local_peer_id();
-                let verified = self
-                    .pending_auth
-                    .remove(peer)
-                    .map(|pending| {
-                        if pending.created_at.elapsed() > AUTH_CHALLENGE_TTL {
-                            return false;
-                        }
-                        if provider.auth_required()
-                            && !provider.authenticate(peer, &pending.public_key)
-                        {
-                            return false;
-                        }
-                        let payload =
-                            build_auth_challenge_payload(peer, &local_peer, &pending.nonce);
-                        provider.verify_auth(&pending.public_key, &payload, &signature)
-                    })
-                    .unwrap_or(false);
+                let authenticated_key = self.pending_auth.remove(peer).and_then(|pending| {
+                    if pending.created_at.elapsed() > AUTH_CHALLENGE_TTL
+                        || (provider.auth_required()
+                            && !provider.authenticate(peer, &pending.public_key))
+                    {
+                        return None;
+                    }
+                    let payload = build_auth_challenge_payload(peer, &local_peer, &pending.nonce);
+                    provider
+                        .verify_auth(&pending.public_key, &payload, &signature)
+                        .then_some(pending.public_key)
+                });
 
-                if verified {
-                    self.authenticated_peers.insert(*peer);
+                let verified = authenticated_key.is_some();
+                if let Some(public_key) = authenticated_key {
+                    self.authenticated_peers.insert(*peer, public_key);
                 } else {
                     self.authenticated_peers.remove(peer);
                 }

@@ -93,6 +93,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    #[command(about = "Transfer objects reachable from HEAD to a peer without changing its refs")]
     Push {
         peer: String,
         #[arg(long)]

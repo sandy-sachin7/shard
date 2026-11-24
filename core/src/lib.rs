@@ -12,6 +12,7 @@ pub mod error;
 pub mod fs_util;
 pub mod gc;
 pub mod hf;
+mod inbound_pins;
 pub mod index;
 pub mod keychain;
 pub mod manifest;
@@ -37,11 +38,11 @@ pub(crate) fn with_write_op<T>(
     desc: &str,
     f: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let trace_id = ops::generate_trace_id();
-    ops::set_trace_id(&trace_id);
     let _guard = OP_QUEUES
         .get_or_create(path)
-        .acquire(ops::OpKind::Write, desc.to_string());
+        .acquire(ops::OpKind::Write, desc.to_string())?;
+    let trace_id = ops::generate_trace_id();
+    ops::set_trace_id(&trace_id);
     let result = f();
     if let Err(ref e) = result {
         metrics::METRICS
@@ -54,11 +55,11 @@ pub(crate) fn with_write_op<T>(
 }
 
 pub(crate) fn with_read_op<T>(path: &Path, desc: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let trace_id = ops::generate_trace_id();
-    ops::set_trace_id(&trace_id);
     let _guard = OP_QUEUES
         .get_or_create(path)
-        .acquire(ops::OpKind::Read, desc.to_string());
+        .acquire(ops::OpKind::Read, desc.to_string())?;
+    let trace_id = ops::generate_trace_id();
+    ops::set_trace_id(&trace_id);
     let result = f();
     if let Err(ref e) = result {
         metrics::METRICS

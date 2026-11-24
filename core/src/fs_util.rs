@@ -20,7 +20,7 @@ pub fn validate_object_id(id: &str) -> Result<()> {
 /// Safely join a relative repository path `rel` onto `root`, preventing:
 /// - empty paths or NUL bytes
 /// - absolute paths, Windows prefixes, or `..` traversal components
-/// - writes into `.shard` or `.git` internal directories
+/// - writes into `.shard`, `.shard.lock`, or `.git` internal paths
 /// - symlink escapes outside `root`
 pub fn safe_repo_join(root: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
@@ -54,10 +54,12 @@ pub fn safe_repo_join(root: &Path, rel: &str) -> Result<PathBuf> {
                     )
                     .into());
                 }
-                if first_component && (seg_str == ".shard" || seg_str == ".git") {
+                if first_component
+                    && (seg_str == ".shard" || seg_str == ".git" || seg_str == ".shard.lock")
+                {
                     return Err(ShardError::PathTraversal(
                         rel.to_string(),
-                        format!("access to internal directory '{}' is forbidden", seg_str),
+                        format!("access to internal path '{}' is forbidden", seg_str),
                     )
                     .into());
                 }

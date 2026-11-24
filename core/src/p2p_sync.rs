@@ -194,18 +194,21 @@ impl shard_net::p2p::ShardContentProvider for RepoProvider {
             return false;
         };
         let hash = blake3::Hash::from_bytes(hash_arr);
-        let ok = self
-            .store
-            .put_chunk(&Chunk {
+        let Some(repo_root) = self.shard_dir.parent() else {
+            return false;
+        };
+        let object_id = id.to_string();
+        crate::with_write_op(repo_root, "p2p_put_chunk", || {
+            self.store.put_chunk(&Chunk {
                 hash,
                 data: data.to_vec(),
                 offset: 0,
-            })
-            .is_ok();
-        if ok {
-            let _ = self.store.flush();
-        }
-        ok
+            })?;
+            self.store.flush()?;
+            crate::inbound_pins::pin_object(&self.shard_dir, &object_id)?;
+            Ok(())
+        })
+        .is_ok()
     }
 
     fn verify_auth(&self, public_key: &[u8], challenge_payload: &[u8], signature: &[u8]) -> bool {
@@ -447,7 +450,11 @@ pub async fn share(path: &Path, listen_addr: &str, json: bool) -> Result<()> {
                         if !rate_limiter.allow(peer) {
                             warn!("Dropping request from {} in share: rate limit exceeded", peer);
                         } else {
-                            node.serve_request(&peer, &mut provider, request, channel);
+                            // `PutChunk` takes a blocking repo write guard; do not
+                            // stall the runtime while another task owns it.
+                            tokio::task::block_in_place(|| {
+                                node.serve_request(&peer, &mut provider, request, channel);
+                            });
                         }
                     }
                     shard_net::libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, .. } => {
@@ -770,7 +777,12 @@ pub async fn sync(path: &Path, json: bool) -> Result<()> {
                         if !rate_limiter.allow(peer) {
                             warn!("Dropping request from {}: rate limit exceeded", peer);
                         } else {
-                            node.serve_request(&peer, &mut provider, request, channel);
+                            // `PutChunk` acquires a blocking repo write guard. Keep the
+                            // event-loop worker from blocking the runtime while an
+                            // auto-pull owns that guard across network awaits.
+                            tokio::task::block_in_place(|| {
+                                node.serve_request(&peer, &mut provider, request, channel);
+                            });
                         }
                     }
                     shard_net::libp2p::swarm::SwarmEvent::Behaviour(
@@ -837,6 +849,14 @@ async fn pull_inner(
     if !shard_dir.exists() {
         repo::init(path, "flat", "zstd", "fixed", None, false, false)?;
     }
+
+    // Keep GC and other repository mutations out for the full transfer. The lock
+    // must remain held while network fetches and worktree reconstruction are in flight.
+    let queue = crate::OP_QUEUES.get_or_create(path);
+    let _repo_guard = tokio::task::spawn_blocking(move || {
+        queue.acquire(crate::ops::OpKind::Write, "pull".to_string())
+    })
+    .await??;
 
     let store = Store::open(&shard_dir)?;
     let cipher = auth::maybe_load_cipher(&shard_dir)?;
@@ -1099,6 +1119,13 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
         return Err(ShardError::NotARepo.into());
     }
 
+    // Keep local GC and mutations from changing the object graph during transfer.
+    let queue = crate::OP_QUEUES.get_or_create(path);
+    let _repo_guard = tokio::task::spawn_blocking(move || {
+        queue.acquire(crate::ops::OpKind::Read, "push".to_string())
+    })
+    .await??;
+
     let (_, head_id) = branch::resolve_head(&shard_dir)?;
     let head_id = head_id.ok_or_else(|| anyhow::anyhow!("No commits to push"))?;
     let store = Store::open(&shard_dir)?;
@@ -1107,7 +1134,10 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
     let mut object_ids: Vec<String> = Vec::new();
     let mut seen_objects: HashSet<String> = HashSet::new();
     let mut seen_commits: HashSet<String> = HashSet::new();
-    let mut stack = vec![head_id];
+    // Rotation objects not yet in the store are streamed from memory instead of
+    // written here: this function holds only a read guard on the repository.
+    let mut extra_objects: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut stack = vec![head_id.clone()];
 
     while let Some(cid) = stack.pop() {
         if !seen_commits.insert(cid.clone()) {
@@ -1126,11 +1156,7 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
                     let rh = blake3::hash(&rj);
                     let rh_hex = rh.to_hex().to_string();
                     if !store.has_chunk(&rh_hex) {
-                        store.put_chunk(&Chunk {
-                            hash: rh,
-                            data: rj,
-                            offset: 0,
-                        })?;
+                        extra_objects.insert(rh_hex.clone(), rj);
                     }
                     if seen_objects.insert(rh_hex.clone()) {
                         object_ids.push(rh_hex);
@@ -1174,7 +1200,10 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
 
     // Stream each object directly from the store one at a time
     for id in &object_ids {
-        let data = store.get_chunk(id)?;
+        let data = match extra_objects.get(id) {
+            Some(data) => data.clone(),
+            None => store.get_chunk(id)?,
+        };
         node.request_put_chunk(&multiaddr, peer_id, id.clone(), data)
             .await?;
     }
@@ -1184,11 +1213,47 @@ pub async fn push(path: &Path, peer: &str, json: bool) -> Result<()> {
             "{}",
             serde_json::to_string(&serde_json::json!({
                 "status": "push complete",
+                "commit_id": head_id,
                 "objects": object_ids.len(),
             }))?
         );
     } else {
-        println!("Push complete ({} objects).", object_ids.len());
+        println!(
+            "Push complete ({} objects, HEAD {}).",
+            object_ids.len(),
+            head_id
+        );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shard_net::p2p::ShardContentProvider;
+
+    #[test]
+    fn inbound_object_survives_gc_before_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        repo::init(temp.path(), "flat", "none", "fixed", None, false, false).unwrap();
+        let shard_dir = temp.path().join(".shard");
+        let store = Store::open(&shard_dir).unwrap();
+        let mut provider = RepoProvider {
+            store,
+            shard_dir: shard_dir.clone(),
+            cipher: None,
+        };
+        let plaintext = b"an incoming object that is not yet checked out";
+        let object_id = blake3::hash(plaintext).to_hex().to_string();
+        let wire_data =
+            chunk_codec::encode_chunk(&object_id, plaintext, Compression::None, None).unwrap();
+
+        assert!(provider.put_chunk(&object_id, &wire_data));
+        crate::gc::gc(temp.path(), false).unwrap();
+
+        assert_eq!(provider.store.get_chunk(&object_id).unwrap(), wire_data);
+        assert!(crate::inbound_pins::active_object_ids(&shard_dir)
+            .unwrap()
+            .contains(&object_id));
+    }
 }

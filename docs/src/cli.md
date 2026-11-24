@@ -20,7 +20,7 @@ Shard exposes a unified CLI with Git-like ergonomics. All commands support a `--
 | `share` | Announce commits to P2P network | `--json` |
 | `sync` | Discover + fetch from peers | `--json` |
 | `pull <peer> <commit>` | Pull commit from specific peer | `--json` |
-| `push <peer>` | Push commits to peer | `--json` |
+| `push <peer>` | Transfer objects reachable from HEAD to a peer. The receiver can check out the reported commit ID; push does not move its refs. | `--json` |
 | `peer add <multiaddr>` | Add a known peer | `--public-key <hex>` |
 | `backup <output>` | Create a tar.gz backup | `--json` |
 | `restore <backup>` | Restore repo from backup | `--json` |
@@ -34,6 +34,8 @@ Shard exposes a unified CLI with Git-like ergonomics. All commands support a `--
 | `transfer` | Manage P2P transfer queue | `list`, `remove` |
 | `key` | Manage signing keys | `rotate`, `list`, `verify`, `add-authorized`, `remove-authorized`, `list-authorized` |
 | `completions` | Generate shell completions | `bash`, `zsh`, `fish`, `elvish`, `powershell` |
+
+Before a peer can push, add its public key on the receiving repo with `shard key add-authorized <public-key-hex>`. Repos without authorized keys allow P2P reads and reject P2P writes.
 
 ### Global flags
 

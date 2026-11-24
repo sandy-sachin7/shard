@@ -87,7 +87,7 @@ graph LR
 | **Storage** | Sled, SQLite, or Flat file | Sled/SQLite for indexed queries; flat for portability |
 | **P2P** | libp2p TCP+Noise+Yamux | Mature, NAT traversal via relay/DCUtR/AutoNAT |
 | **Wire format** | JSON / CBOR | Serde over request-response + Gossipsub |
-| **Concurrency** | Per-repo read-write queue | Reads parallel, writes exclusive; no global lock |
+| **Concurrency** | Per-repo read-write queue and `.shard.lock` OS lock | Reads parallel, writes exclusive; the root lock file exists before `.shard` so concurrent initialization is serialized |
 | **Config** | JSON + env var overrides | 12-factor friendly; `SHARD_*` env vars take precedence |
 | **Tracing** | Thread-local trace IDs | Correlate logs across operations |
 | **GC** | DAG reachability scan | Marks all reachable from HEAD/branches/tags/index, prunes rest |

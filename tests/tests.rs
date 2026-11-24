@@ -305,26 +305,56 @@ async fn workspace_p2p_forged_public_key_signature_rejected() {
 
     let authorized_kp = shard_crypto::KeyPair::generate();
     let attacker_kp = shard_crypto::KeyPair::generate();
+    let other_kp = shard_crypto::KeyPair::generate();
     let authorized_pk = authorized_kp.verifying_key;
+    let authorized_hex = hex::encode(authorized_pk.to_bytes());
+    let temp = tempfile::tempdir().unwrap();
+    let shard_dir = temp.path().join(".shard");
+    fs::create_dir_all(&shard_dir).unwrap();
+    shard_core::add_authorized_key(&shard_dir, &authorized_hex).unwrap();
+    shard_core::add_authorized_key(&shard_dir, &hex::encode(other_kp.verifying_key.to_bytes()))
+        .unwrap();
+    let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     struct AuthOnlyProvider {
         allowed: ed25519_dalek::VerifyingKey,
+        authorized_file: std::path::PathBuf,
+        allowed_hex: String,
+        writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl AuthOnlyProvider {
+        fn key_is_authorized(&self, public_key: &[u8]) -> bool {
+            public_key == self.allowed.to_bytes().as_slice()
+                && fs::read_to_string(&self.authorized_file)
+                    .map(|content| {
+                        content.lines().any(|line| {
+                            line.split_whitespace().next() == Some(self.allowed_hex.as_str())
+                        })
+                    })
+                    .unwrap_or(false)
+        }
     }
     impl ShardContentProvider for AuthOnlyProvider {
         fn get_manifest(&self, _id: &str) -> Option<Vec<u8>> {
-            None
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(b"manifest".to_vec())
         }
         fn get_chunk(&self, _id: &str) -> Option<Vec<u8>> {
-            None
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(b"chunk".to_vec())
         }
         fn put_chunk(&mut self, _id: &str, _data: &[u8]) -> bool {
-            false
-        }
-        fn auth_required(&self) -> bool {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             true
         }
+        fn auth_required(&self) -> bool {
+            self.authorized_file.exists()
+        }
         fn authenticate(&self, _peer_id: &shard_net::libp2p::PeerId, public_key: &[u8]) -> bool {
-            public_key == self.allowed.to_bytes().as_slice()
+            self.key_is_authorized(public_key)
         }
         fn verify_auth(&self, public_key: &[u8], payload: &[u8], signature: &[u8]) -> bool {
             use ed25519_dalek::Verifier;
@@ -338,7 +368,9 @@ async fn workspace_p2p_forged_public_key_signature_rejected() {
                 return false;
             };
             let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
-            pk == self.allowed && pk.verify(payload, &sig).is_ok()
+            pk == self.allowed
+                && self.key_is_authorized(public_key)
+                && pk.verify(payload, &sig).is_ok()
         }
         fn repo_public_key(&self) -> Option<Vec<u8>> {
             Some(self.allowed.to_bytes().to_vec())
@@ -359,9 +391,17 @@ async fn workspace_p2p_forged_public_key_signature_rejected() {
         .parse()
         .unwrap();
 
+    let provider_path = shard_dir.join("authorized_keys");
+    let provider_allowed_hex = authorized_hex.clone();
+    let provider_writes = writes.clone();
+    let provider_reads = reads.clone();
     let server_task = tokio::spawn(async move {
         let mut provider = AuthOnlyProvider {
             allowed: authorized_pk,
+            authorized_file: provider_path,
+            allowed_hex: provider_allowed_hex,
+            writes: provider_writes,
+            reads: provider_reads,
         };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
         while tokio::time::Instant::now() < deadline {
@@ -423,5 +463,171 @@ async fn workspace_p2p_forged_public_key_signature_rejected() {
         .await
         .expect("authorized key with valid signature must succeed");
 
+    let object_id = "c".repeat(64);
+    good_client
+        .request_manifest(&full_addr, server_peer_id, object_id.clone())
+        .await
+        .expect("authorized peer can read before revocation");
+    good_client
+        .request_parallel(
+            &full_addr,
+            server_peer_id,
+            vec![(
+                object_id.clone(),
+                shard_net::protocol::ShardRequest::GetChunk(object_id.clone()),
+            )],
+        )
+        .await
+        .expect("authorized peer can read chunks before revocation");
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    shard_core::remove_authorized_key(&shard_dir, &authorized_hex).unwrap();
+    let result = good_client
+        .request_manifest(&full_addr, server_peer_id, object_id.clone())
+        .await;
+    assert!(
+        result.is_err(),
+        "revoked keys must not retain manifest access"
+    );
+    let result = good_client
+        .request_parallel(
+            &full_addr,
+            server_peer_id,
+            vec![(
+                object_id.clone(),
+                shard_net::protocol::ShardRequest::GetChunk(object_id.clone()),
+            )],
+        )
+        .await;
+    assert!(result.is_err(), "revoked keys must not retain chunk access");
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "revoked peer must not reach the read methods"
+    );
+    let result = good_client
+        .request_put_chunk(&full_addr, server_peer_id, object_id, b"data".to_vec())
+        .await;
+    assert!(result.is_err(), "revoked keys must not retain write access");
+    assert_eq!(
+        writes.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "revoked peer must not reach the storage write"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn workspace_p2p_put_chunk_requires_authorization_and_authentication() {
+    use shard_net::libp2p::futures::StreamExt;
+    use shard_net::libp2p::swarm::SwarmEvent;
+    use shard_net::p2p::{Node, ShardBehaviourEvent, ShardContentProvider};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct DefaultProvider {
+        writes: Arc<AtomicUsize>,
+    }
+    impl ShardContentProvider for DefaultProvider {
+        fn get_manifest(&self, _id: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn get_chunk(&self, _id: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn put_chunk(&mut self, _id: &str, _data: &[u8]) -> bool {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+        fn verify_auth(&self, public_key: &[u8], payload: &[u8], signature: &[u8]) -> bool {
+            use ed25519_dalek::Verifier;
+            let Ok(pk_bytes) = <[u8; 32]>::try_from(public_key) else {
+                return false;
+            };
+            let Ok(pk) = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes) else {
+                return false;
+            };
+            let Ok(sig_bytes) = <[u8; 64]>::try_from(signature) else {
+                return false;
+            };
+            pk.verify(payload, &ed25519_dalek::Signature::from_bytes(&sig_bytes))
+                .is_ok()
+        }
+        fn repo_public_key(&self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    let writes = Arc::new(AtomicUsize::new(0));
+    let mut server = Node::new().await.unwrap();
+    server.listen("/ip4/127.0.0.1/tcp/0").await.unwrap();
+    let server_peer = server.local_peer_id();
+    let listen_addr = loop {
+        if let SwarmEvent::NewListenAddr { address, .. } = server.swarm.select_next_some().await {
+            break address;
+        }
+    };
+    let full_addr: shard_net::libp2p::Multiaddr = format!("{}/p2p/{}", listen_addr, server_peer)
+        .parse()
+        .unwrap();
+
+    let server_writes = writes.clone();
+    let server_task = tokio::spawn(async move {
+        let mut provider = DefaultProvider {
+            writes: server_writes,
+        };
+        loop {
+            match server.swarm.select_next_some().await {
+                SwarmEvent::Behaviour(ShardBehaviourEvent::RequestResponse(
+                    shard_net::libp2p::request_response::Event::Message {
+                        peer,
+                        message:
+                            shard_net::libp2p::request_response::Message::Request {
+                                request,
+                                channel,
+                                ..
+                            },
+                        ..
+                    },
+                )) => {
+                    server.serve_request(&peer, &mut provider, request, channel);
+                }
+                SwarmEvent::ConnectionClosed {
+                    peer_id,
+                    num_established: 0,
+                    ..
+                } => server.on_connection_closed(&peer_id),
+                _ => {}
+            }
+        }
+    });
+
+    let mut client = Node::new().await.unwrap();
+    let result = client
+        .request_put_chunk(&full_addr, server_peer, "a".repeat(64), b"data".to_vec())
+        .await;
+    assert!(result.is_err(), "anonymous P2P writes must be denied");
+
+    let peer_key = shard_crypto::KeyPair::generate();
+    client
+        .request_authenticate(
+            &full_addr,
+            server_peer,
+            peer_key.verifying_key.to_bytes().to_vec(),
+            &peer_key.signing_key,
+        )
+        .await
+        .unwrap();
+    let result = client
+        .request_put_chunk(&full_addr, server_peer, "b".repeat(64), b"data".to_vec())
+        .await;
+    assert!(
+        result.is_err(),
+        "a peer without an authorized_keys entry must not write"
+    );
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
     server_task.abort();
 }

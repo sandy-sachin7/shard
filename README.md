@@ -207,7 +207,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 | `share` | Announce commits to P2P network (Gossipsub) | `--json` |
 | `sync` | Discover + fetch from peers | `--json` |
 | `pull <peer> <commit>` | Pull commit from specific peer | `--json` |
-| `push <peer>` | Push commits to peer | `--json` |
+| `push <peer>` | Transfer objects reachable from HEAD to a peer. The receiver can check out the reported commit ID; push does not move its refs. | `--json` |
 | `peer add <multiaddr>` | Add a known peer | `--public-key <hex>` |
 | `backup <output>` | Create a tar.gz backup | `--json` |
 | `restore <backup>` | Restore repo from backup | `--json` |
@@ -221,6 +221,8 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 | `transfer` | Manage P2P transfer queue | `list`, `remove` |
 | `key` | Manage signing keys | `rotate`, `list`, `verify`, `add-authorized`, `remove-authorized`, `list-authorized` |
 | `completions` | Generate shell completions | `bash`, `zsh`, `fish`, `elvish`, `powershell` |
+
+Before a peer can push, add its public key on the receiving repo with `shard key add-authorized <public-key-hex>`. Repos without authorized keys allow P2P reads and reject P2P writes.
 
 ### Global flags
 
@@ -255,8 +257,8 @@ Supported config keys: `storage_backend` (`flat`/`sled`/`sqlite`), `compression`
 ### Concurrency Control
 
 All repository operations are serialized per-repo with read-write semantics:
-- **Read operations** (log, status, diff, verify) run concurrently with other reads.
-- **Write operations** (init, add, commit, checkout, merge, prune, push) are exclusive.
+- **Read operations** (log, status, diff, verify, push) run concurrently with other reads.
+- **Write operations** (init, add, commit, checkout, merge, prune) are exclusive.
 - Operation queue snapshots are available via `shard health --json`.
 
 ### Garbage Collection
@@ -402,7 +404,7 @@ curl -H "Authorization: Bearer $SHARD_API_TOKEN" http://127.0.0.1:8080/api/v1/st
 | **Storage** | Sled, SQLite, or Flat file | Sled/SQLite for indexed queries; flat for portability |
 | **P2P** | libp2p TCP+Noise+Yamux | Mature, NAT traversal via relay/WebRTC/DCUtR/AutoNAT |
 | **Wire format** | JSON / CBOR | Serde over request-response + Gossipsub |
-| **Concurrency** | Per-repo read-write queue | Reads parallel, writes exclusive; no global lock |
+| **Concurrency** | Per-repo read-write queue and `.shard.lock` OS lock | Reads parallel, writes exclusive; the root lock file exists before `.shard` so concurrent initialization is serialized |
 | **Config** | JSON + env var overrides | 12-factor friendly; `SHARD_*` env vars take precedence |
 | **Tracing** | Thread-local trace IDs | Correlate logs across operations without distributed context |
 | **GC** | DAG reachability scan | Marks all reachable from HEAD/branches/tags/index, prunes rest |

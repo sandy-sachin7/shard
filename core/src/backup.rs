@@ -129,7 +129,7 @@ pub fn import(
         builder.hidden(!include_hidden);
         builder.filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            name != ".shard" && name != ".git"
+            name != ".shard" && name != ".git" && name != ".shard.lock"
         });
 
         for entry in builder.build() {

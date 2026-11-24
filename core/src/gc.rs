@@ -181,7 +181,12 @@ fn gc_inner(path: &Path, json: bool) -> Result<()> {
         reachable.insert(obj_id);
     }
 
-    // 7. Sweep unreachable objects (only reached if 100% of mark phase succeeded!)
+    // Retain objects received from peers until their durable pins expire.
+    for object_id in crate::inbound_pins::active_object_ids(&shard_dir)? {
+        reachable.insert(object_id);
+    }
+
+    // 8. Sweep unreachable objects (only reached if 100% of mark phase succeeded!)
     let all_chunks = store.iter_chunks()?;
     let mut pruned = 0u64;
     let mut kept = 0u64;
@@ -245,6 +250,8 @@ mod tests {
     use crate::manifest::FileManifest;
     use crate::metadata;
     use tempfile::tempdir;
+
+    static GC_POLICY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn make_chunk(data: &[u8]) -> Chunk {
         let hash = blake3::hash(data);
@@ -328,6 +335,7 @@ mod tests {
 
     #[test]
     fn test_gc_policy_default() {
+        let _env_guard = GC_POLICY_ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let policy = GcPolicy::from_config(dir.path());
         assert_eq!(policy.interval_secs, 3600);
@@ -336,6 +344,7 @@ mod tests {
 
     #[test]
     fn test_gc_policy_from_config_file() {
+        let _env_guard = GC_POLICY_ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "7200".into());
@@ -350,6 +359,7 @@ mod tests {
 
     #[test]
     fn test_gc_policy_partial_config() {
+        let _env_guard = GC_POLICY_ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "1800".into());
@@ -363,6 +373,7 @@ mod tests {
 
     #[test]
     fn test_gc_policy_invalid_values_use_defaults() {
+        let _env_guard = GC_POLICY_ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "not-a-number".into());
@@ -377,6 +388,7 @@ mod tests {
 
     #[test]
     fn test_gc_policy_env_override_works() {
+        let _env_guard = GC_POLICY_ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "3600".into());
