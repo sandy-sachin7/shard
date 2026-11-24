@@ -1,3 +1,33 @@
+//! Core engine for **Shard** — a local-first, content-addressed, peer-to-peer
+//! version control system designed for large machine learning artifacts.
+//!
+//! `shard-core` implements chunking (fixed-size and Rabin CDC), self-describing
+//! `SHRD` v1 compression/encryption envelopes (Zstd/Zlib + AES-256-GCM with AAD),
+//! Ed25519-signed commit DAGs, branching/merging, CRC32-checksummed WAL recovery,
+//! per-repo dual read/write locking (`.shard.lock`), garbage collection, backup/restore,
+//! HuggingFace dataset export/import, an authenticated Axum HTTP API, and libp2p sync.
+//!
+//! # Quickstart
+//!
+//! ```rust
+//! use std::fs;
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let dir = tempfile::tempdir()?;
+//! let repo = dir.path();
+//!
+//! shard_core::init(repo, "flat", "zstd", "fixed", None, false, true)?;
+//! fs::write(repo.join("model.bin"), b"tensor weights v1")?;
+//! shard_core::add(repo, &repo.join("model.bin"), true)?;
+//! let commit_id = shard_core::commit(repo, "initial weights", "Alice <alice@example.com>", true)?;
+//!
+//! shard_core::verify(repo, &commit_id, true)?;
+//! let snap = shard_core::status_snapshot(repo)?;
+//! assert_eq!(snap.head.as_deref(), Some(commit_id.as_str()));
+//! # Ok(())
+//! # }
+//! ```
+
 pub mod api;
 pub mod auth;
 pub mod backup;
@@ -115,6 +145,6 @@ pub use p2p_sync::{peer_add, pull, push, relay, share, sync, transfer_list, tran
 pub use repo::{
     add, branch_create, branch_delete, branch_list, checkout, commit, config_get, config_set, diff,
     get_metrics, health, init, init_with_passphrase, key_list, key_rotate, key_verify, log_cmd,
-    log_entries, merge, prune, recover, status, tag_add, tag_list, verify, verify_with_options,
-    LogEntry,
+    log_entries, merge, prune, recover, status, status_snapshot, tag_add, tag_list, verify,
+    verify_with_options, LogEntry, StatusSnapshot,
 };

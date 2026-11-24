@@ -1,3 +1,28 @@
+//! Pluggable persistent key-value storage backends for the Shard distributed VCS.
+//!
+//! This crate provides the [`StorageBackend`] trait along with two embedded
+//! database implementations:
+//!
+//! - [`SledBackend`]: Lock-free embedded B-tree database with in-process handle
+//!   deduplication so nested opens on the same repository path never conflict.
+//! - [`SqliteBackend`]: Pooled SQLite database (`r2d2`) configured with WAL
+//!   journal mode, `synchronous=NORMAL`, and `busy_timeout=5000`.
+//!
+//! # Quickstart
+//!
+//! ```rust
+//! use shard_storage::{open_backend, StorageBackend};
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let dir = tempfile::tempdir()?;
+//! let store = open_backend(&dir.path().join("objects.db"), "sqlite")?;
+//! store.put(b"chunk-hash", b"payload")?;
+//! assert_eq!(store.get(b"chunk-hash")?.as_deref(), Some(b"payload".as_slice()));
+//! store.checkpoint_for_snapshot()?;
+//! # Ok(())
+//! # }
+//! ```
+
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
@@ -16,6 +41,11 @@ pub trait StorageBackend: Send + Sync {
     fn contains(&self, key: &[u8]) -> anyhow::Result<bool>;
     /// Flush any buffered writes to persistent storage.
     fn flush(&self) -> anyhow::Result<()>;
+    /// Flush and fully checkpoint on-disk state before creating a standalone file snapshot
+    /// (e.g., `PRAGMA wal_checkpoint(TRUNCATE)` on SQLite so `objects.db` is self-contained).
+    fn checkpoint_for_snapshot(&self) -> anyhow::Result<()> {
+        self.flush()
+    }
     /// Iterate over all key-value pairs whose keys start with `prefix`.
     fn iter_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>>;
     /// Iterate over all keys starting with `prefix` without loading blob values into memory.
@@ -191,6 +221,23 @@ impl StorageBackend for SqliteBackend {
     fn flush(&self) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
         conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+
+    fn checkpoint_for_snapshot(&self) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) =
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if busy != 0 || log_frames != checkpointed_frames {
+            anyhow::bail!(
+                "SQLite WAL truncate checkpoint incomplete (busy={}, log_frames={}, checkpointed_frames={})",
+                busy,
+                log_frames,
+                checkpointed_frames
+            );
+        }
         Ok(())
     }
 
@@ -389,5 +436,33 @@ mod tests {
         backend.put(b"k", b"v1").unwrap();
         backend.put(b"k", b"v2").unwrap();
         assert_eq!(backend.get(b"k").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn test_sqlite_checkpoint_for_snapshot_makes_db_standalone() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("objects.db");
+        let backend = SqliteBackend::new(&db_path).unwrap();
+        for i in 0..32 {
+            backend
+                .put(
+                    format!("key_{}", i).as_bytes(),
+                    format!("val_{}", i).as_bytes(),
+                )
+                .unwrap();
+        }
+        backend.checkpoint_for_snapshot().unwrap();
+
+        // Copy ONLY the main .db file (no -wal / -shm) to another directory and verify all rows
+        let copy_dir = tempdir().unwrap();
+        let copied_db = copy_dir.path().join("objects.db");
+        std::fs::copy(&db_path, &copied_db).unwrap();
+        let reopened = SqliteBackend::new(&copied_db).unwrap();
+        for i in 0..32 {
+            assert_eq!(
+                reopened.get(format!("key_{}", i).as_bytes()).unwrap(),
+                Some(format!("val_{}", i).into_bytes())
+            );
+        }
     }
 }

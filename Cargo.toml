@@ -13,8 +13,12 @@ resolver = "2"
 [workspace.package]
 version = "2.4.0"
 edition = "2021"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/sandy-sachin7/shard"
+homepage = "https://sandy-sachin7.github.io/shard/"
+documentation = "https://docs.rs/shard-core"
+readme = "README.md"
 
 [workspace.dependencies]
 tokio = { version = "1.45", features = ["full"] }

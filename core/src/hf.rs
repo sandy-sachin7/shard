@@ -36,8 +36,15 @@ pub fn stage_hf_export(shard_dir: &Path, staging_dir: &Path) -> Result<()> {
         }
     }
 
-    // Object database for Sled (directory) or SQLite (file) backends
+    // Flush/checkpoint Sled or SQLite backends BEFORE copying `objects.db` so
+    // standalone snapshots never miss uncheckpointed SQLite WAL frames or buffered Sled writes.
     let objects_db = shard_dir.join("objects.db");
+    if objects_db.exists() {
+        let store = crate::store::Store::open(shard_dir)?;
+        store.checkpoint_for_snapshot()?;
+    }
+
+    // Object database for Sled (directory) or SQLite (file) backends
     if objects_db.is_dir() {
         copy_dir_filtered(&objects_db, &staging_dir.join("objects.db"))?;
     } else if objects_db.is_file() {
@@ -114,7 +121,9 @@ pub fn hf_push(path: &Path, dataset_id: &str, token: Option<&str>, json: bool) -
 
     let staging = tempfile::tempdir()?;
     let staged_shard = staging.path().join(".shard");
-    crate::with_read_op(path, "hf_push_stage", || {
+    // Exclusive write lock ensures SQLite WAL truncate checkpoint and Sled flush
+    // capture a consistent standalone snapshot without racing concurrent writers.
+    crate::with_write_op(path, "hf_push_stage", || {
         stage_hf_export(&shard_dir, &staged_shard)
     })?;
 
@@ -286,5 +295,31 @@ mod tests {
             fs::write(out.join(".shard.lock"), b"").unwrap();
             assert!(assert_no_secrets_staged(&out).is_err());
         }
+    }
+
+    #[test]
+    fn test_hf_staging_sqlite_wal_checkpoint_is_standalone() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        crate::init(repo, "sqlite", "zstd", "fixed", None, false, false).unwrap();
+        let payload = b"freshly written sqlite weights across multiple blocks ".repeat(512);
+        fs::write(repo.join("model.safetensors"), &payload).unwrap();
+        crate::add(repo, &repo.join("model.safetensors"), false).unwrap();
+        let commit_id = crate::commit(repo, "sqlite wal commit", "Alice", false).unwrap();
+
+        // Stage export into a brand-new standalone directory (no -wal / -shm files copied)
+        let staged_root = tempdir().unwrap();
+        let staged_shard = staged_root.path().join(".shard");
+        stage_hf_export(&repo.join(".shard"), &staged_shard).unwrap();
+
+        assert!(staged_shard.join("objects.db").is_file());
+        assert!(!staged_shard.join("objects.db-wal").exists());
+        assert!(!staged_shard.join("objects.db-shm").exists());
+
+        // Copy staged .shard into an isolated repo and verify + checkout standalone
+        crate::verify(staged_root.path(), &commit_id, false).unwrap();
+        crate::checkout(staged_root.path(), &commit_id, false).unwrap();
+        let restored = fs::read(staged_root.path().join("model.safetensors")).unwrap();
+        assert_eq!(restored, payload);
     }
 }

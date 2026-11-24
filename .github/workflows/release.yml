@@ -147,10 +147,44 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p shard-net
 
+      - name: Wait for crates.io index propagation (leaf crates)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for crate in shard-crypto shard-storage shard-net; do
+            echo "Waiting for ${crate} ${VERSION} on crates.io..."
+            for i in $(seq 1 30); do
+              if curl -fsSL "https://crates.io/api/v1/crates/${crate}/${VERSION}" >/dev/null 2>&1; then
+                echo "${crate} ${VERSION} is live."
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "Timed out waiting for ${crate} ${VERSION} on crates.io" >&2
+                exit 1
+              fi
+              sleep 10
+            done
+          done
+
       - name: Publish shard-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p shard-core
+
+      - name: Wait for crates.io index propagation (shard-core)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Waiting for shard-core ${VERSION} on crates.io..."
+          for i in $(seq 1 30); do
+            if curl -fsSL "https://crates.io/api/v1/crates/shard-core/${VERSION}" >/dev/null 2>&1; then
+              echo "shard-core ${VERSION} is live."
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Timed out waiting for shard-core ${VERSION} on crates.io" >&2
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Publish shard-cli
         env:

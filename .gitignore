@@ -7,9 +7,6 @@ python/shard-py/Cargo.lock
 # Shard repository data
 .shard/
 
-# Design doc (internal, not for public)
-ANTIGRAVITY.md
-
 # Editor and IDE files
 .idea/
 .vscode/

@@ -28,6 +28,20 @@ use tracing::{debug, error, info, warn};
 
 const MAX_CONCURRENT_AUTO_PULLS: usize = 4;
 
+/// Execute a blocking closure with `tokio::task::block_in_place` when running on a
+/// multi-threaded Tokio runtime, falling back gracefully on `CurrentThread` runtimes
+/// (where `block_in_place` would panic).
+fn run_blocking_in_runtime<F: FnOnce()>(f: F) {
+    if matches!(
+        tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+    ) {
+        tokio::task::block_in_place(f);
+    } else {
+        f();
+    }
+}
+
 /// Sliding-window per-peer rate limiter honoring `rate_limit_max_requests` and
 /// `rate_limit_window_secs` in both `share` and `sync`.
 struct PeerRateLimiter {
@@ -453,7 +467,7 @@ pub async fn share(path: &Path, listen_addr: &str, json: bool) -> Result<()> {
                         } else {
                             // `PutChunk` takes a blocking repo write guard; do not
                             // stall the runtime while another task owns it.
-                            tokio::task::block_in_place(|| {
+                            run_blocking_in_runtime(|| {
                                 node.serve_request(&peer, &mut provider, request, channel);
                             });
                         }
@@ -784,7 +798,7 @@ pub async fn sync(path: &Path, json: bool) -> Result<()> {
                             // `PutChunk` acquires a blocking repo write guard. Keep the
                             // event-loop worker from blocking the runtime while an
                             // auto-pull owns that guard across network awaits.
-                            tokio::task::block_in_place(|| {
+                            run_blocking_in_runtime(|| {
                                 node.serve_request(&peer, &mut provider, request, channel);
                             });
                         }
@@ -1261,5 +1275,14 @@ mod tests {
         assert!(crate::inbound_pins::active_object_ids(&shard_dir)
             .unwrap()
             .contains(&object_id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_blocking_in_runtime_does_not_panic_on_current_thread() {
+        let mut ran = false;
+        run_blocking_in_runtime(|| {
+            ran = true;
+        });
+        assert!(ran);
     }
 }

@@ -1,7 +1,6 @@
 use crate::branch;
 use crate::fs_util::safe_repo_join;
-use crate::index::Index;
-use crate::metadata::{self, MetadataFormat};
+use crate::metadata;
 use crate::store::Store;
 use anyhow::Result;
 use axum::{
@@ -307,25 +306,14 @@ async fn status_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let repo_path = state.repo_path.clone();
-    let shard_dir = state.shard_dir.clone();
     let res = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
-        crate::with_read_op(&repo_path, "api_status", || {
-            if !shard_dir.exists() {
-                anyhow::bail!("not a shard repository");
-            }
-            let config = crate::load_config(&shard_dir)?;
-            let fmt = MetadataFormat::from_config(&config);
-            let (current_branch, head) = branch::resolve_head(&shard_dir).unwrap_or((None, None));
-            let index = Index::load(&shard_dir.join("index"), &fmt)?;
-            let mut staged: Vec<String> = index.files.keys().cloned().collect();
-            staged.sort();
-            Ok(serde_json::json!({
-                "status": "ok",
-                "current_branch": current_branch,
-                "head": head,
-                "staged": staged,
-            }))
-        })
+        let snap = crate::status_snapshot(&repo_path)?;
+        Ok(serde_json::json!({
+            "status": "ok",
+            "current_branch": snap.current_branch,
+            "head": snap.head,
+            "staged": snap.staged,
+        }))
     })
     .await;
 

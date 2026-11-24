@@ -2,9 +2,13 @@
 name = "shard-crypto"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Ed25519 key generation, signing, verification, and encrypted key storage for shard distributed VCS"
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shard-crypto"
+readme.workspace = true
 keywords = ["vcs", "version-control", "mlops", "distributed", "ed25519"]
 categories = ["cryptography"]
 

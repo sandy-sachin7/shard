@@ -47,7 +47,9 @@ jobs:
         run: cargo build --release --locked
 
       - name: cargo doc
-        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps --locked
 
   lint:
     name: Lint

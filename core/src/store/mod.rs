@@ -86,6 +86,16 @@ impl Store {
             Store::Sqlite(s) => s.flush(),
         }
     }
+
+    /// Flush and fully checkpoint backend files so an external copy of `.shard`
+    /// (e.g. `hf push` or backup) captures all committed data standalone.
+    pub fn checkpoint_for_snapshot(&self) -> Result<()> {
+        match self {
+            Store::Flat(s) => s.flush(),
+            Store::Sled(s) => s.checkpoint_for_snapshot(),
+            Store::Sqlite(s) => s.checkpoint_for_snapshot(),
+        }
+    }
 }
 
 #[cfg(test)]

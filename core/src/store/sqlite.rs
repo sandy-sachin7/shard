@@ -67,6 +67,10 @@ impl SqliteStore {
     pub fn flush(&self) -> Result<()> {
         self.backend.flush()
     }
+
+    pub fn checkpoint_for_snapshot(&self) -> Result<()> {
+        self.backend.checkpoint_for_snapshot()
+    }
 }
 
 #[cfg(test)]

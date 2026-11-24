@@ -34,7 +34,7 @@ audit:
 dev-ci: check fmt clippy test bench
 
 doc:
-	cargo doc --no-deps
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 clean:
 	cargo clean
@@ -43,7 +43,7 @@ install:
 	cargo install --path cmd/shard-cli
 
 uninstall:
-	cargo uninstall shard
+	cargo uninstall shard-cli
 
 example:
-	cargo run --example shard-basics -p shard-core
+	cargo run -p shard-core --example shard-basics

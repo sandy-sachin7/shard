@@ -1,3 +1,24 @@
+//! Cryptographic primitives and key storage for the Shard distributed VCS.
+//!
+//! Provides Ed25519 [`KeyPair`] generation, atomic `0o600` secret persistence,
+//! and Argon2id + AES-256-GCM passphrase encryption ([`encrypt_secret_bytes`] /
+//! [`decrypt_secret_bytes`]) with automatic memory zeroization of key material.
+//!
+//! # Quickstart
+//!
+//! ```rust
+//! use shard_crypto::KeyPair;
+//!
+//! # fn main() -> anyhow::Result<()> {
+//! let dir = tempfile::tempdir()?;
+//! let kp = KeyPair::generate();
+//! kp.save_with_passphrase(dir.path(), "correct-horse-battery-staple")?;
+//! let loaded = KeyPair::load_with_passphrase(dir.path(), "correct-horse-battery-staple")?;
+//! assert_eq!(kp.verifying_key.to_bytes(), loaded.verifying_key.to_bytes());
+//! # Ok(())
+//! # }
+//! ```
+
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use anyhow::Result;

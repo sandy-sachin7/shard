@@ -1,24 +1,27 @@
 ## Summary
 
-<!-- One sentence: what does this change do? -->
+<!-- One or two sentences describing what this change does and why. -->
 
-## Related issue
+## Related Issue
 
 Closes #...
 
 ## Checklist
 
-- [ ] `cargo fmt --check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [ ] `cargo fmt --all -- --check` passes
+- [ ] `cargo clippy --all-targets -- -D warnings` passes
+- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` passes
+- [ ] `cargo test --workspace --locked` passes
 - [ ] `cargo audit` passes
-- [ ] Added tests for new functionality
-- [ ] Updated README if user-facing behavior changed
+- [ ] Zero non-test `.unwrap()` / `.expect()` introduced under `src/`
+- [ ] Added unit/integration tests covering the change
+- [ ] Updated `README.md` / `docs/src/` if CLI flags or user-facing behavior changed
 
-## Type of change
+## Type of Change
 
 - [ ] Bug fix
 - [ ] New feature
+- [ ] Security hardening
 - [ ] Performance improvement
 - [ ] Documentation
-- [ ] Infrastructure (CI, config, etc.)
+- [ ] Infrastructure (CI, packaging, config)

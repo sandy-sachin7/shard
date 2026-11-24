@@ -2,9 +2,13 @@
 name = "shard-storage"
 version.workspace = true
 edition.workspace = true
-description = "Storage backends for shard distributed VCS (sled, sqlite, flat file)"
+rust-version.workspace = true
+description = "Storage backends for shard distributed VCS (sled, sqlite)"
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shard-storage"
+readme.workspace = true
 keywords = ["vcs", "version-control", "mlops", "distributed", "storage"]
 categories = ["database"]
 

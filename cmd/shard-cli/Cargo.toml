@@ -2,9 +2,13 @@
 name = "shard-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "CLI for shard distributed VCS — content-addressed version control for large ML artifacts"
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/shard-cli"
+readme.workspace = true
 keywords = ["vcs", "version-control", "mlops", "distributed", "cli"]
 categories = ["command-line-utilities"]
 

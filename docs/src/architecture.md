@@ -1,94 +1,90 @@
 # Architecture
 
-Shard is structured as a collection of decoupled crates, tied together by the main CLI entrypoint. 
+Shard is structured as a workspace of five decoupled crates plus native Python bindings (`shard-py`), orchestrated by `shard-core`.
 
 ## Component Diagram
 
 ```mermaid
 graph TD
-    CLI["shard CLI<br/>(clap argument parsing)"]
-    
-    subgraph Core ["core crate"]
-        OpQueue["Operation Queue<br/>(read/write locking)"]
-        Config["Config System<br/>(env overrides + validation)"]
-        GC["Garbage Collector<br/>(DAG reachability scan)"]
+    CLI["shard-cli<br/>(clap CLI entrypoint)"]
+    PY["shard-py<br/>(PyO3 native Python bindings)"]
+
+    subgraph Core["shard-core"]
+        OpQueue["Operation Queue + .shard.lock<br/>(in-process RW + OS fs2 lock)"]
+        Config["Config System<br/>(config.json + SHARD_* env overrides)"]
+        GC["Garbage Collector<br/>(DAG reachability + inbound pins)"]
         Tracing["Distributed Tracing<br/>(thread-local trace IDs)"]
-        Metrics["Runtime Metrics<br/>(atomic counters)"]
-        Chunker["Chunker<br/>(Fixed / Rabin)"]
-        Compression["Compression<br/>(Zstd / Zlib)"]
-        Store["Store<br/>(Sled / SQLite)"]
-        CommitDAG["Commit DAG<br/>Manifest / Index / WAL<br/>Branch / Merge / Push"]
-        API["HTTP API<br/>(axum /api/v1/*)"]
+        Metrics["Runtime Metrics<br/>(32 atomic counters)"]
+        Chunker["Chunker<br/>(Fixed 4 MiB / Rabin CDC)"]
+        Codec["SHRD v1 Chunk Codec<br/>(Zstd / Zlib / AES-256-GCM AAD)"]
+        Store["Store Abstraction<br/>(FlatStore default / Sled / SQLite)"]
+        CommitDAG["Commit DAG · Manifest · Index<br/>CRC32 WAL · Branch · Merge · HF"]
+        API["HTTP API<br/>(Axum /api/v1/* + Bearer Auth)"]
     end
-    
-    subgraph Net ["net crate"]
-        LibP2P["libp2p Node<br/>TCP+Noise+Yamux<br/>mDNS / Kademlia<br/>Gossipsub<br/>Relay / DCUtR / AutoNAT<br/>Rate Limiting"]
+
+    subgraph Net["shard-net"]
+        LibP2P["libp2p Node<br/>TCP + QUIC · Noise · Yamux<br/>mDNS · Kademlia · Gossipsub<br/>CBOR Req/Resp · 2-step Auth<br/>Circuit Relay v2 · DCUtR · AutoNAT"]
     end
-    
-    subgraph Crypto ["crypto crate"]
-        KeyGen["ed25519 key generation<br/>Signing & Verification<br/>Passphrase encryption<br/>Key rotation"]
+
+    subgraph Crypto["shard-crypto"]
+        KeyGen["Ed25519 KeyPair<br/>Argon2id + AES-256-GCM<br/>0o600 Atomic Persistence · Zeroize"]
     end
-    
-    subgraph Storage ["storage crate"]
-        SledBackend["Sled Backend"]
-        SQLiteBackend["SQLite Backend<br/>(r2d2 connection pool)"]
+
+    subgraph Storage["shard-storage"]
+        SledBackend["SledBackend<br/>(in-process handle cache)"]
+        SQLiteBackend["SqliteBackend<br/>(WAL + r2d2 pool + truncate checkpoint)"]
     end
-    
+
     CLI --> Core
-    CLI --> Net
+    CLI --> Crypto
+    PY --> Core
+    Core --> Net
     Core --> Crypto
     Core --> Storage
-    Net --> Crypto
-    Core -.-> OpQueue
-    Core -.-> Config
-    Core -.-> GC
-    Core -.-> Tracing
-    Core -.-> Metrics
-    Core -.-> Chunker
-    Core -.-> Compression
-    Core -.-> Store
-    Core -.-> CommitDAG
-    Core -.-> API
 ```
 
 ## Storage Layout
 
-Shard stores all its data in a `.shard/` directory at the root of the repository.
+Shard stores repository state inside `.shard/` and places the advisory OS lock file `.shard.lock` at the repository root (so even concurrent `shard init` calls are serialized).
 
 ```mermaid
 graph LR
-    Root[".shard/"] --> Objects["objects/"]
-    Objects --> Prefix["<2-prefix>/"]
-    Prefix --> Hash["<hash> (content-addressed chunks)"]
-    
-    Root --> HEAD["HEAD (current commit reference)"]
+    Repo["&lt;repo_root&gt;/"] --> Lock[".shard.lock (OS fs2 advisory lock)"]
+    Repo --> Root[".shard/"]
+
+    Root --> Objects["objects/&lt;2-hex&gt;/&lt;64-hex&gt;<br/>(FlatStore, default)"]
+    Root --> ObjectsDB["objects.db<br/>(Sled dir or SQLite WAL db)"]
+    Root --> HEAD["HEAD (branch ref or commit ID)"]
     Root --> Config["config.json (repository config)"]
     Root --> Index["index (staging area)"]
-    Root --> Wal["wal.log (crash recovery)"]
-    
+    Root --> Wal["wal.log (CRC32 crash recovery WAL)"]
+    Root --> Partial["partial/ (resumable P2P transfers)"]
+
     Root --> Keys["keys/"]
-    Keys --> Sec["secret.key"]
+    Keys --> Sec["secret.key (0o600, optional Argon2id+AES-GCM)"]
     Keys --> Pub["public.key"]
-    
+    Keys --> RepoKey["repo.key (private AES-256-GCM key)"]
+    Keys --> Current["current (active key_id)"]
+    Keys --> Records["records/ &amp; rotations/ &amp; archive/"]
+
     Root --> Refs["refs/heads/ (branch pointers)"]
-    Root --> Auth["authorized_keys (P2P auth whitelist)"]
-    Root --> Peers["peers.json (known P2P peers)"]
-    Root --> Tags["tags.json (named commit pointers)"]
+    Root --> Auth["authorized_keys (P2P auth allowlist)"]
+    Root --> Peers["peers.json (trusted P2P peer multiaddrs)"]
+    Root --> Tags["tags.json (named commit tags)"]
 ```
 
 ## Key Design Decisions
 
 | Decision | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Chunking** | Fixed (default) or Rabin (`--chunker rabin`) | Fixed for predictable sizes and peak throughput; Rabin/FastCDC improves dedup across versions |
-| **Compression** | Zstd or Zlib | Runtime selection; zstd is faster with better ratios |
-| **Hashing** | Blake3 | Fastest cryptographic hash, SIMD-accelerated |
-| **Signatures** | ed25519 | Proven, fast, small signatures (64 bytes) |
-| **Storage** | Sled, SQLite, or Flat file | Sled/SQLite for indexed queries; flat for portability |
-| **P2P** | libp2p TCP+Noise+Yamux | Mature, NAT traversal via relay/DCUtR/AutoNAT |
-| **Wire format** | JSON / CBOR | Serde over request-response + Gossipsub |
-| **Concurrency** | Per-repo read-write queue and `.shard.lock` OS lock | Reads parallel, writes exclusive; the root lock file exists before `.shard` so concurrent initialization is serialized |
-| **Config** | JSON + env var overrides | 12-factor friendly; `SHARD_*` env vars take precedence |
-| **Tracing** | Thread-local trace IDs | Correlate logs across operations |
-| **GC** | DAG reachability scan | Marks all reachable from HEAD/branches/tags/index, prunes rest |
-| **Metrics** | Static atomic counters | Runtime operation counters with JSON snapshot |
+| **Chunking** | Fixed 4 MiB (default) or Rabin CDC (`--chunker rabin`) | Fixed for predictable I/O and peak throughput; Rabin CDC for byte-shift-resilient checkpoint dedup |
+| **Compression & Encryption** | `SHRD` v1 self-describing 8-byte envelope (Zstd/Zlib/None + AES-256-GCM AAD) | Safe dedup across compression changes; AAD binds ciphertext to `chunk_id` |
+| **Hashing** | Blake3 | SIMD-accelerated 256-bit cryptographic hash for content addressing and Merkle roots |
+| **Signatures** | Ed25519 | Fast, compact 64-byte signatures with signed key rotation and trust-anchor verification |
+| **Storage** | `FlatStore` (default), `Sled`, or `SQLite` | `FlatStore` for simple zero-dependency portability; `Sled`/`SQLite` for indexed single-DB storage |
+| **P2P** | libp2p TCP + QUIC + Noise + Yamux | Mature encrypted transports with Circuit Relay v2, DCUtR, and AutoNAT |
+| **Wire Format** | CBOR (request-response) + JSON (Gossipsub) | Compact binary framing for object transfer; inspectable pubsub announcements |
+| **Concurrency** | In-process `RwLock` + `.shard.lock` OS advisory lock | Readers run in parallel, writers are exclusive across threads and processes |
+| **Config** | JSON + `SHARD_*` env var overrides | 12-factor friendly with schema validation before repository mutation |
+| **Tracing & Metrics** | Thread-local trace IDs + 32 static atomic counters | Correlate diagnostic logs on `stderr` and export health snapshots via `--json` |
+| **GC** | DAG reachability + inbound pin scan | Marks reachable objects from HEAD, branches, tags, index, and active P2P pushes before pruning |

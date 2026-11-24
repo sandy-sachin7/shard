@@ -278,7 +278,29 @@ pub(crate) fn verify_commit_signature(
     Ok(Some(verifying_key))
 }
 
+fn repo_root_from_shard_dir(shard_dir: &Path) -> Option<PathBuf> {
+    if shard_dir.file_name() == Some(std::ffi::OsStr::new(".shard")) {
+        let parent = shard_dir.parent()?;
+        if parent.as_os_str().is_empty() {
+            Some(PathBuf::from("."))
+        } else {
+            Some(parent.to_path_buf())
+        }
+    } else {
+        None
+    }
+}
+
 pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> {
+    if let Some(repo_root) = repo_root_from_shard_dir(shard_dir) {
+        return crate::with_write_op(&repo_root, "add_authorized_key", || {
+            add_authorized_key_inner(shard_dir, public_key_hex)
+        });
+    }
+    add_authorized_key_inner(shard_dir, public_key_hex)
+}
+
+fn add_authorized_key_inner(shard_dir: &Path, public_key_hex: &str) -> Result<()> {
     let bytes = hex::decode(public_key_hex.trim())?;
     let arr: [u8; 32] = bytes
         .as_slice()
@@ -308,6 +330,15 @@ pub fn add_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> 
 }
 
 pub fn remove_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<()> {
+    if let Some(repo_root) = repo_root_from_shard_dir(shard_dir) {
+        return crate::with_write_op(&repo_root, "remove_authorized_key", || {
+            remove_authorized_key_inner(shard_dir, public_key_hex)
+        });
+    }
+    remove_authorized_key_inner(shard_dir, public_key_hex)
+}
+
+fn remove_authorized_key_inner(shard_dir: &Path, public_key_hex: &str) -> Result<()> {
     let path = authorized_keys_path(shard_dir);
     if !path.exists() {
         anyhow::bail!("authorized_keys file does not exist");
@@ -340,6 +371,15 @@ pub fn remove_authorized_key(shard_dir: &Path, public_key_hex: &str) -> Result<(
 }
 
 pub fn list_authorized_keys(shard_dir: &Path, json: bool) -> Result<()> {
+    if let Some(repo_root) = repo_root_from_shard_dir(shard_dir) {
+        return crate::with_read_op(&repo_root, "list_authorized_keys", || {
+            list_authorized_keys_inner(shard_dir, json)
+        });
+    }
+    list_authorized_keys_inner(shard_dir, json)
+}
+
+fn list_authorized_keys_inner(shard_dir: &Path, json: bool) -> Result<()> {
     let path = authorized_keys_path(shard_dir);
     if !path.exists() {
         if json {

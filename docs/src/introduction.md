@@ -27,9 +27,9 @@ Shard solves this by providing:
 | **Compression** | zlib (default) | Zstd or Zlib (runtime selectable) |
 | **Hashing** | SHA-1 / SHA-256 | Blake3 |
 | **P2P** | Remote-centric | Native P2P (mDNS, Kademlia, Gossipsub) |
-| **Storage backend** | Flat files + packfiles | Sled or SQLite indexed store |
-| **Signing** | GPG (optional) | ed25519 (built-in, every commit) |
-| **Transport** | SSH/HTTPS | libp2p TCP + Noise + Yamux |
+| **Storage backend** | Flat files + packfiles | FlatStore (default), Sled, or SQLite (WAL + pool) |
+| **Signing** | GPG (optional) | Ed25519 (built-in, every commit) |
+| **Transport** | SSH/HTTPS | libp2p TCP + QUIC + Noise + Yamux |
 
 ## Performance
 

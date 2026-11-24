@@ -1345,6 +1345,35 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
     })
 }
 
+/// Lightweight locked snapshot of repository branch, HEAD, and staged paths.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusSnapshot {
+    pub current_branch: Option<String>,
+    pub head: Option<String>,
+    pub staged: Vec<String>,
+}
+
+/// Read branch, HEAD, and staged index entries under a shared repository read lock.
+pub fn status_snapshot(path: &Path) -> Result<StatusSnapshot> {
+    crate::with_read_op(path, "status_snapshot", || {
+        let shard_dir = path.join(".shard");
+        if !shard_dir.exists() {
+            return Err(ShardError::NotARepo.into());
+        }
+        let config = crate::load_config(&shard_dir)?;
+        let fmt = MetadataFormat::from_config(&config);
+        let (current_branch, head) = branch::resolve_head(&shard_dir)?;
+        let index = Index::load(&shard_dir.join("index"), &fmt)?;
+        let mut staged: Vec<String> = index.files.keys().cloned().collect();
+        staged.sort();
+        Ok(StatusSnapshot {
+            current_branch,
+            head,
+            staged,
+        })
+    })
+}
+
 pub fn status(path: &Path, json: bool, porcelain: bool) -> Result<()> {
     crate::metrics::METRICS
         .ops_status

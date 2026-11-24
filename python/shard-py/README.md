@@ -1,6 +1,6 @@
 # Shard Python Bindings
 
-Python wrapper for [Shard](https://github.com/sandy-sachin7/shard) — the distributed VCS built for ML engineers by [Santhosh Sachin](https://github.com/sandy-sachin7).
+Native Python bindings (via PyO3) for [Shard](https://github.com/sandy-sachin7/shard) — the distributed VCS built for ML engineers by [Santhosh Sachin](https://github.com/sandy-sachin7).
 
 ## Installation
 
@@ -20,30 +20,34 @@ shard.init()
 shard.add("model.pt")
 
 # Commit after epoch
-shard.commit("epoch 50", message="epoch 50")
+result = shard.commit("epoch 50", author="trainer@ml.dev")
+print(result.commit_id)
 ```
 
 ## API Reference
 
-### `shard.init(repo_path=None, private=False, db=None)`
+### `shard.init(repo_path=None, private=False, db=None, compression=None, chunker=None, passphrase=None)`
 Initialize a Shard repository.
 
 - `repo_path` (str, optional): Path to repo. Defaults to current directory.
-- `private` (bool, optional): Enable encryption. Defaults to False.
-- `db` (str, optional): Storage backend ("flat", "sled", "sqlite"). Defaults to "flat".
+- `private` (bool, optional): Enable AES-256-GCM chunk encryption. Defaults to `False`.
+- `db` (str, optional): Storage backend (`"flat"`, `"sled"`, `"sqlite"`). Defaults to `"flat"`.
+- `compression` (str, optional): Compression codec (`"zstd"`, `"zlib"`, `"none"`). Defaults to `"zstd"`.
+- `chunker` (str, optional): Chunking mode (`"fixed"`, `"rabin"`). Defaults to `"fixed"`.
+- `passphrase` (str, optional): Passphrase for Argon2id + AES-256-GCM key protection.
 
-### `shard.add(repo_path=None, file_path)`
-Stage a file for commit.
+### `shard.add(file_path, repo_path=None)`
+Stage a file or directory for commit.
 
+- `file_path` (str): Path to file or directory to track.
 - `repo_path` (str, optional): Path to repo. Defaults to current directory.
-- `file_path` (str): Path to file to track.
 
-### `shard.commit(repo_path=None, message, author=None)`
-Commit staged changes.
+### `shard.commit(message, repo_path=None, author=None)`
+Commit staged changes with an Ed25519 signature.
 
-- `repo_path` (str, optional): Path to repo. Defaults to current directory.
 - `message` (str): Commit message.
-- `author` (str, optional): Author string. Defaults to "User <user@example.com>".
+- `repo_path` (str, optional): Path to repo. Defaults to current directory.
+- `author` (str, optional): Author string. Defaults to `"User <user@example.com>"`.
 
 Returns a `CommitResult` object with `commit_id`, `message`, `author`, and `timestamp`.
 
@@ -51,16 +55,16 @@ Returns a `CommitResult` object with `commit_id`, `message`, `author`, and `time
 Get commit history.
 
 - `repo_path` (str, optional): Path to repo.
-- `limit` (int, optional): Number of commits to return.
+- `limit` (int, optional): Maximum number of commits to return.
 
 ### `shard.status(repo_path=None)`
-Get repository status.
+Get repository status as a JSON string (`branch`, `head`, `staged`).
 
-### `shard.checkout(repo_path=None, target)`
-Checkout a commit or branch.
+### `shard.checkout(target, repo_path=None)`
+Checkout a commit ID or branch name.
 
-### `shard.verify(repo_path=None, commit_id)`
-Verify commit integrity and signature.
+### `shard.verify(commit_id, repo_path=None, allow_unsigned=False)`
+Verify commit content hashes, Merkle roots, and Ed25519 signature against local trust anchors.
 
 ## Example: Training Script Integration
 
@@ -70,6 +74,8 @@ import torch
 
 model = torch.nn.Linear(10, 2)
 optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+
+shard.init()
 
 for epoch in range(100):
     # ... training code ...
@@ -82,24 +88,23 @@ for epoch in range(100):
         # Track with Shard
         shard.add(f"checkpoint_epoch_{epoch}.pt")
         result = shard.commit(
-            message=f"epoch {epoch}",
-            author="trainer@ml.dev"
+            f"epoch {epoch}",
+            author="trainer@ml.dev",
         )
         print(f"Committed: {result.commit_id}")
 ```
 
 ## Features
 
+- **Native Rust extension**: Compiles directly against `shard-core` via PyO3 (no external CLI binary required)
 - **Zero-config**: Works out of the box, no server setup required
-- **Distributed**: Sync model checkpoints across machines via P2P
-- **Efficient**: Rabin CDC chunking only transfers changed pieces
-- **Secure**: Ed25519 commit signing and optional AES-256 repo encryption
+- **Efficient**: Rabin CDC chunking deduplicates across training checkpoints
+- **Secure**: Ed25519 commit signing and optional AES-256-GCM repo encryption
 
 ## Requirements
 
 - Python 3.8+
-- Rust toolchain (for building from source)
-- Shard binary installed and in PATH
+- Rust toolchain 1.89+ (only when building from source)
 
 ## Installation from Source
 

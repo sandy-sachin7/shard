@@ -182,34 +182,60 @@ pub fn restore(path: &Path, backup_file: &Path, json: bool) -> Result<()> {
         let decoder = flate2::read::GzDecoder::new(file);
         let mut archive = tar::Archive::new(decoder);
 
-        // Safely unpack entries validating against tar-slip path traversal
-        for entry_res in archive.entries()? {
-            let mut entry = entry_res?;
-            let entry_path = entry.path()?.into_owned();
-            if entry_path.is_absolute()
-                || entry_path.components().any(|c| {
-                    matches!(
-                        c,
-                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        // Safely unpack entries validating against tar-slip path traversal and
+        // strictly confining every entry inside `.shard/`.
+        let unpack_result: Result<()> = (|| {
+            for entry_res in archive.entries()? {
+                let mut entry = entry_res?;
+                let entry_path = entry.path()?.into_owned();
+                if entry_path.is_absolute()
+                    || entry_path.components().any(|c| {
+                        matches!(
+                            c,
+                            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(ShardError::PathTraversal(
+                        entry_path.display().to_string(),
+                        "unsafe path in backup archive".into(),
                     )
-                })
-            {
-                return Err(ShardError::PathTraversal(
-                    entry_path.display().to_string(),
-                    "unsafe path in backup archive".into(),
-                )
-                .into());
+                    .into());
+                }
+                let first_normal = entry_path.components().find_map(|c| match c {
+                    Component::Normal(os) => Some(os),
+                    _ => None,
+                });
+                if first_normal != Some(std::ffi::OsStr::new(".shard")) {
+                    return Err(ShardError::PathTraversal(
+                        entry_path.display().to_string(),
+                        "backup archive entries must be confined strictly inside .shard/".into(),
+                    )
+                    .into());
+                }
+                let entry_type = entry.header().entry_type();
+                if entry_type.is_symlink() || entry_type.is_hard_link() {
+                    return Err(ShardError::PathTraversal(
+                        entry_path.display().to_string(),
+                        "links are not permitted in backup archives".into(),
+                    )
+                    .into());
+                }
+                if !(entry_type.is_file() || entry_type.is_dir()) {
+                    return Err(ShardError::PathTraversal(
+                        entry_path.display().to_string(),
+                        "unsupported special file type in backup archive".into(),
+                    )
+                    .into());
+                }
+                entry.unpack_in(path)?;
             }
-            if entry.header().entry_type().is_symlink()
-                || entry.header().entry_type().is_hard_link()
-            {
-                return Err(ShardError::PathTraversal(
-                    entry_path.display().to_string(),
-                    "links are not permitted in backup archives".into(),
-                )
-                .into());
-            }
-            entry.unpack_in(path)?;
+            Ok(())
+        })();
+
+        if let Err(err) = unpack_result {
+            let _ = fs::remove_dir_all(&shard_dir);
+            return Err(err);
         }
 
         if !path.join(".shard").exists() {
@@ -236,4 +262,94 @@ pub fn restore(path: &Path, backup_file: &Path, json: bool) -> Result<()> {
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_crafted_tar_gz(archive_path: &Path, entries: &[(&str, &[u8])]) {
+        let file = fs::File::create(archive_path).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        for (name, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            // Write raw path bytes into header directly so `../` paths can be tested too
+            let name_bytes = name.as_bytes();
+            let raw = header.as_gnu_mut().unwrap();
+            raw.name[..name_bytes.len()].copy_from_slice(name_bytes);
+            raw.name[name_bytes.len()..].fill(0);
+            header.set_cksum();
+            builder.append(&header, *data).unwrap();
+        }
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+    }
+
+    #[test]
+    fn test_restore_rejects_entries_outside_shard_dir() {
+        for bad_path in [
+            "Makefile",
+            "./Makefile",
+            ".bashrc",
+            ".shard.lock",
+            "../evil",
+        ] {
+            let work = tempdir().unwrap();
+            let tar_path = work.path().join("evil.tar.gz");
+            write_crafted_tar_gz(
+                &tar_path,
+                &[
+                    (".shard/HEAD", b"ref: refs/heads/main\n"),
+                    (bad_path, b"pwned"),
+                ],
+            );
+
+            let restore_dir = tempdir().unwrap();
+            let res = restore(restore_dir.path(), &tar_path, true);
+            assert!(
+                res.is_err(),
+                "expected restore() to reject archive entry '{}'",
+                bad_path
+            );
+            assert!(
+                !restore_dir.path().join("Makefile").exists(),
+                "Makefile must never be extracted"
+            );
+            assert!(
+                !restore_dir.path().join(".bashrc").exists(),
+                ".bashrc must never be extracted"
+            );
+            assert!(
+                !restore_dir.path().join(".shard").exists(),
+                "partial .shard directory should be cleaned up on rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn test_backup_and_restore_roundtrip() {
+        let src = tempdir().unwrap();
+        crate::init(src.path(), "flat", "zstd", "fixed", None, false, true).unwrap();
+        fs::write(src.path().join("weights.bin"), b"backup payload").unwrap();
+        crate::add(src.path(), &src.path().join("weights.bin"), true).unwrap();
+        let cid = crate::commit(src.path(), "backup commit", "Alice", true).unwrap();
+
+        let archive_dir = tempdir().unwrap();
+        let archive = archive_dir.path().join("repo.tar.gz");
+        backup(src.path(), &archive, true).unwrap();
+
+        let dst = tempdir().unwrap();
+        restore(dst.path(), &archive, true).unwrap();
+        crate::verify(dst.path(), &cid, true).unwrap();
+        crate::checkout(dst.path(), &cid, true).unwrap();
+        assert_eq!(
+            fs::read(dst.path().join("weights.bin")).unwrap(),
+            b"backup payload"
+        );
+    }
 }

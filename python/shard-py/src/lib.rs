@@ -107,23 +107,13 @@ fn log(py: Python<'_>, repo_path: Option<String>, limit: Option<usize>) -> PyRes
 #[pyo3(signature = (repo_path=None))]
 fn status(py: Python<'_>, repo_path: Option<String>) -> PyResult<String> {
     let repo = PathBuf::from(repo_path.unwrap_or_else(|| ".".to_string()));
-    let shard_dir = repo.join(".shard");
 
     py.allow_threads(move || -> anyhow::Result<String> {
-        if !shard_dir.exists() {
-            anyhow::bail!("not a shard repository");
-        }
-        let (branch, head) = shard_core::branch::resolve_head(&shard_dir)?;
-        let index = shard_core::index::Index::load(
-            &shard_dir.join("index"),
-            &shard_core::metadata::MetadataFormat::Json,
-        )?;
-        let mut staged: Vec<String> = index.files.keys().cloned().collect();
-        staged.sort();
+        let snap = shard_core::status_snapshot(&repo)?;
         Ok(serde_json::to_string(&serde_json::json!({
-            "branch": branch,
-            "head": head,
-            "staged": staged,
+            "branch": snap.current_branch,
+            "head": snap.head,
+            "staged": snap.staged,
         }))?)
     })
     .map_err(to_py_err)
