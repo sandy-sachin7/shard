@@ -144,61 +144,41 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish shard-crypto
+      - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shard-crypto
-
-      - name: Publish shard-storage
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shard-storage
-
-      - name: Publish shard-net
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shard-net
-
-      - name: Wait for crates.io index propagation (leaf crates)
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          for crate in shard-crypto shard-storage shard-net; do
-            echo "Waiting for ${crate} ${VERSION} on crates.io..."
+          crate_url() { echo "https://crates.io/api/v1/crates/$1/${VERSION}"; }
+          is_live() { curl -fsSL -H "User-Agent: shard-release/${VERSION}" "$(crate_url "$1")" >/dev/null 2>&1; }
+          publish() {
+            if is_live "$1"; then
+              echo "$1 ${VERSION} already published; skipping"
+            else
+              cargo publish -p "$1"
+            fi
+          }
+          wait_live() {
+            echo "Waiting for $1 ${VERSION} on crates.io..."
             for i in $(seq 1 30); do
-              if curl -fsSL "https://crates.io/api/v1/crates/${crate}/${VERSION}" >/dev/null 2>&1; then
-                echo "${crate} ${VERSION} is live."
-                break
+              if is_live "$1"; then
+                echo "$1 ${VERSION} is live."
+                return 0
               fi
               if [ "$i" -eq 30 ]; then
-                echo "Timed out waiting for ${crate} ${VERSION} on crates.io" >&2
-                exit 1
+                echo "Timed out waiting for $1 ${VERSION} on crates.io" >&2
+                return 1
               fi
               sleep 10
             done
-          done
-
-      - name: Publish shard-core
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shard-core
-
-      - name: Wait for crates.io index propagation (shard-core)
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Waiting for shard-core ${VERSION} on crates.io..."
-          for i in $(seq 1 30); do
-            if curl -fsSL "https://crates.io/api/v1/crates/shard-core/${VERSION}" >/dev/null 2>&1; then
-              echo "shard-core ${VERSION} is live."
-              break
-            fi
-            if [ "$i" -eq 30 ]; then
-              echo "Timed out waiting for shard-core ${VERSION} on crates.io" >&2
-              exit 1
-            fi
-            sleep 10
-          done
-
-      - name: Publish shard-cli
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shard-cli
+          }
+          publish shard-crypto
+          publish shard-storage
+          publish shard-net
+          wait_live shard-crypto
+          wait_live shard-storage
+          wait_live shard-net
+          publish shard-core
+          wait_live shard-core
+          publish shard-cli
