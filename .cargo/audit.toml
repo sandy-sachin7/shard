@@ -1,7 +1,7 @@
 [advisories]
-# All active security and soundness advisories were resolved by upgrading libp2p
-# to 0.57.1 and quinn-proto to 0.11.19. Only unmaintained-crate informational
-# notices from upstream transitive dependencies remain below.
+# Active advisories were resolved by upgrading libp2p to 0.57.1, quinn-proto to
+# 0.11.19, and rusqlite to 0.42 (libsqlite3-sys 0.40). Only unmaintained-crate
+# informational notices from upstream transitive dependencies remain below.
 ignore = [
   "RUSTSEC-2024-0384",   # instant - unmaintained, transitive via sled -> parking_lot 0.11
   "RUSTSEC-2024-0436",   # paste - unmaintained proc-macro, transitive via libp2p -> if-watch -> netlink-packet-core
