@@ -6,8 +6,9 @@ Security fixes and advisories are actively maintained for the following versions
 
 | Version | Supported | Notes |
 | :--- | :--- | :--- |
-| `2.4.x` | ✅ Yes | Current production-hardened release series |
-| `< 2.4.0` | ❌ No | Upgrade to `2.4.0` or later for `SHRD` v1 AAD encryption, 2-step P2P auth, and hardened restore/API |
+| `2.4.1` | ✅ Yes | Current patched production-hardened release |
+| `2.4.0` | ❌ No | Upgrade to `2.4.1` for patched SQLite dependencies |
+| `< 2.4.0` | ❌ No | Upgrade to `2.4.1` for `SHRD` v1 AAD encryption, 2-step P2P auth, and hardened restore/API |
 
 ---
 

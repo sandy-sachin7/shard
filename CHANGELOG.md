@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.4.1 (2026-11-25) — Dependency Security Patch
+
+- Upgraded `rusqlite` to 0.42 and `r2d2_sqlite` to 0.37, moving `libsqlite3-sys` to 0.40 and clearing `RUSTSEC-2026-0459`.
+- Refreshed the lockfile and audit configuration comment.
+
 ## v2.4.0 (2026-11-24) — Production Security, Durability & Correctness Hardening
 
 ### Security & Trust Boundaries

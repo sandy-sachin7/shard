@@ -1,6 +1,6 @@
 # Shard — Agent Guide
 
-## Workspace (Cargo workspace, resolver `"2"`, `v2.4.0`)
+## Workspace (Cargo workspace, resolver `"2"`, `v2.4.1`)
 
 | Crate | Path | Description |
 |-------|------|-------------|

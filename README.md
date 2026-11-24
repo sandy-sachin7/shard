@@ -191,7 +191,7 @@ shard hf push your-org/my-model-repo
 
 ## Security & Enterprise Guarantees
 
-Shard v2.4.0 is engineered for verifiable, defense-in-depth ML artifact workflows:
+Shard v2.4.1 is engineered for verifiable, defense-in-depth ML artifact workflows:
 
 - **Cryptographic Provenance & Trust Anchors**: Every commit and manifest is canonicalized and signed with Ed25519. `shard verify` enforces trust-anchor membership (local keychain + `authorized_keys`), key rotation validity windows, Blake3 content hashes, and manifest Merkle roots (rejecting unsigned commits unless `--allow-unsigned` is explicitly passed).
 - **Authenticated Encryption at Rest (`SHRD` v1)**: Private repositories (`shard init --private`) encrypt each chunk inside an 8-byte self-describing `SHRD` v1 envelope using AES-256-GCM with `chunk_id` bound as Associated Authenticated Data (AAD), preventing cross-chunk swapping. Secret keys are encrypted with Argon2id + AES-256-GCM, persisted atomically with `0o600` permissions, and zeroized in memory (`zeroize`).
