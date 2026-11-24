@@ -1,11 +1,17 @@
 [package]
 name = "shard-tests"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 publish = false
 
 [dependencies]
 shard-core = { path = "../core" }
+shard-crypto = { path = "../crypto" }
+shard-net = { path = "../net" }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
 tempfile = { workspace = true }
 
 [[test]]

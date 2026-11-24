@@ -1,61 +1,56 @@
-version: "3.9"
-
 services:
   node-a:
     build: .
     hostname: node-a
+    working_dir: /data
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        set -e
+        set -eu
         echo "=== Node A ==="
-        shard init
-        echo "test content from A" > /data/file-a.txt
-        shard add /data/file-a.txt
-        shard commit -m "initial commit from A"
-        shard share
+        if [ ! -d /data/.shard ]; then
+          shard init
+          echo "test content from A" > /data/file-a.txt
+          shard add file-a.txt
+          shard commit -m "initial commit from A" --author "Node A"
+        fi
+        exec shard share --listen /ip4/0.0.0.0/tcp/9090
+    ports:
+      - "9090:9090"
     volumes:
       - shard-data-a:/data
 
   node-b:
     build: .
     hostname: node-b
+    working_dir: /data
     depends_on:
       - node-a
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        set -e
-        sleep 2
+        set -eu
         echo "=== Node B ==="
-        shard init
-        echo "test content from B" > /data/file-b.txt
-        shard add /data/file-b.txt
-        shard commit -m "initial commit from B"
-        shard share
+        if [ ! -d /data/.shard ]; then
+          shard init
+          echo "test content from B" > /data/file-b.txt
+          shard add file-b.txt
+          shard commit -m "initial commit from B" --author "Node B"
+        fi
+        exec shard share --listen /ip4/0.0.0.0/tcp/9091
+    ports:
+      - "9091:9091"
     volumes:
       - shard-data-b:/data
 
-  node-c:
+  relay:
     build: .
-    hostname: node-c
-    depends_on:
-      - node-a
-      - node-b
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -e
-        sleep 4
-        echo "=== Node C ==="
-        shard init
-        shard peer add /dns/node-a/tcp/9090/p2p/QmPeerA
-        shard pull /dns/node-a/tcp/9090/p2p/QmPeerA <commit_id>
-        echo "Pull complete"
-    volumes:
-      - shard-data-c:/data
+    hostname: relay
+    working_dir: /data
+    command: ["relay", "--listen", "/ip4/0.0.0.0/tcp/9092"]
+    ports:
+      - "9092:9092"
 
 volumes:
   shard-data-a:
   shard-data-b:
-  shard-data-c:

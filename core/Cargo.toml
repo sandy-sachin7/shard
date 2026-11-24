@@ -1,11 +1,10 @@
 [package]
 name = "shard-core"
-version = "2.3.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Core library for shard distributed VCS: chunking, compression, commits, branching, merging, WAL"
-license = "MIT"
-repository = "https://github.com/sandy-sachin7/shard"
-homepage = "https://github.com/sandy-sachin7/shard"
+license.workspace = true
+repository.workspace = true
 keywords = ["vcs", "version-control", "mlops", "distributed", "content-addressed"]
 categories = ["compression"]
 
@@ -16,9 +15,9 @@ serde_json = { workspace = true }
 blake3 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-shard-crypto = { path = "../crypto", version = "2.1.0" }
-shard-storage = { path = "../storage", version = "2.1.0" }
-shard-net = { path = "../net", version = "2.1.0" }
+shard-crypto = { path = "../crypto", version = "2.4.0" }
+shard-storage = { path = "../storage", version = "2.4.0" }
+shard-net = { path = "../net", version = "2.4.0" }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 time = { workspace = true }
@@ -36,10 +35,15 @@ once_cell = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 ignore = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+crc32fast = { workspace = true }
+fs2 = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
-tempfile = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "chunker"

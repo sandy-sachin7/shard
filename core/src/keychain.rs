@@ -1,9 +1,12 @@
+use crate::fs_util::{atomic_write, atomic_write_secret, validate_object_id};
 use anyhow::Result;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use shard_crypto::KeyPair;
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 const RECORDS_DIR: &str = "records";
 const ROTATIONS_DIR: &str = "rotations";
@@ -68,7 +71,10 @@ pub fn init_keychain(keys_dir: &Path) -> Result<String> {
         previous_key_id: None,
     };
     let record_path = keys_dir.join(RECORDS_DIR).join(format!("{}.json", key_id));
-    fs::write(&record_path, serde_json::to_string_pretty(&record)?)?;
+    atomic_write(
+        &record_path,
+        serde_json::to_string_pretty(&record)?.as_bytes(),
+    )?;
 
     set_current_key(keys_dir, &key_id)?;
     Ok(key_id)
@@ -85,32 +91,51 @@ pub fn get_current_key_id(keys_dir: &Path) -> Result<String> {
 }
 
 fn set_current_key(keys_dir: &Path, key_id: &str) -> Result<()> {
-    fs::write(keys_dir.join(CURRENT_REF), key_id)?;
+    atomic_write(&keys_dir.join(CURRENT_REF), key_id.as_bytes())?;
     Ok(())
 }
 
 /// Generate a new ed25519 signing keypair, archive the old one, and
-/// persist a signed rotation record.
+/// persist a signed rotation record. Supports unencrypted keys.
 pub fn rotate_signing_key(keys_dir: &Path) -> Result<KeyRotation> {
-    let old_secret = fs::read(keys_dir.join("secret.key"))?;
-    let old_signing_key = SigningKey::from_bytes(old_secret.as_slice().try_into()?);
-    let old_verifying_key = old_signing_key.verifying_key();
-    let old_key_id = get_current_key_id(keys_dir)?;
+    rotate_signing_key_with_passphrase(keys_dir, "")
+}
 
-    // Generate new keypair
+/// Generate a new ed25519 signing keypair, archive the old one (preserving encryption
+/// and `0o600` permissions), and persist a signed rotation record.
+pub fn rotate_signing_key_with_passphrase(
+    keys_dir: &Path,
+    passphrase: &str,
+) -> Result<KeyRotation> {
+    let was_encrypted = KeyPair::is_encrypted(keys_dir)?;
+    let old_kp = if was_encrypted {
+        KeyPair::load_with_passphrase(keys_dir, passphrase)?
+    } else {
+        KeyPair::load(keys_dir)?
+    };
+    let old_secret_raw = Zeroizing::new(fs::read(keys_dir.join("secret.key"))?);
+    let old_signing_key = old_kp.signing_key;
+    let old_verifying_key = old_kp.verifying_key;
+    let old_key_id = get_current_key_id(keys_dir)?;
+    validate_object_id(&old_key_id)?;
+
+    // Generate new keypair with zeroized seed buffer
     use rand::RngCore;
-    let mut bytes = [0u8; 32];
+    let mut bytes = Zeroizing::new([0u8; 32]);
     let mut csprng = rand::rngs::OsRng;
-    csprng.fill_bytes(&mut bytes);
+    csprng.fill_bytes(bytes.as_mut());
     let new_signing_key = SigningKey::from_bytes(&bytes);
     let new_verifying_key = new_signing_key.verifying_key();
     let new_key_id = key_id_from_public_key(&new_verifying_key);
 
-    // Archive old key
+    // Archive old key with 0o600 permissions on secret.key
     let archive_dir = keys_dir.join(ARCHIVE_DIR).join(&old_key_id);
     fs::create_dir_all(&archive_dir)?;
-    fs::write(archive_dir.join("secret.key"), &old_secret)?;
-    fs::write(archive_dir.join("public.key"), old_verifying_key.to_bytes())?;
+    atomic_write_secret(&archive_dir.join("secret.key"), &old_secret_raw)?;
+    atomic_write(
+        &archive_dir.join("public.key"),
+        &old_verifying_key.to_bytes(),
+    )?;
 
     // Create and sign the rotation
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
@@ -133,13 +158,16 @@ pub fn rotate_signing_key(keys_dir: &Path) -> Result<KeyRotation> {
         signature_hex: hex::encode(signature.to_bytes()),
     };
 
-    // Save rotation record
+    // Save rotation record atomically
     let rotation_path = keys_dir
         .join(ROTATIONS_DIR)
         .join(format!("{}.json", rotation.rotation_id));
-    fs::write(&rotation_path, serde_json::to_string_pretty(&rotation)?)?;
+    atomic_write(
+        &rotation_path,
+        serde_json::to_string_pretty(&rotation)?.as_bytes(),
+    )?;
 
-    // Create a record for the new key
+    // Create a record for the new key atomically
     let new_record = KeyRecord {
         key_id: new_key_id.clone(),
         public_key_hex: hex::encode(new_verifying_key.to_bytes()),
@@ -149,31 +177,44 @@ pub fn rotate_signing_key(keys_dir: &Path) -> Result<KeyRotation> {
     let record_path = keys_dir
         .join(RECORDS_DIR)
         .join(format!("{}.json", new_key_id));
-    fs::write(&record_path, serde_json::to_string_pretty(&new_record)?)?;
+    atomic_write(
+        &record_path,
+        serde_json::to_string_pretty(&new_record)?.as_bytes(),
+    )?;
 
-    // Save new keypair as current
-    fs::write(keys_dir.join("secret.key"), new_signing_key.to_bytes())?;
-    fs::write(keys_dir.join("public.key"), new_verifying_key.to_bytes())?;
+    // Save new keypair as current (preserving encryption if the repo key was encrypted)
+    let new_kp = KeyPair {
+        signing_key: new_signing_key,
+        verifying_key: new_verifying_key,
+    };
+    if was_encrypted {
+        new_kp.save_with_passphrase(keys_dir, passphrase)?;
+    } else {
+        new_kp.save(keys_dir)?;
+    }
     set_current_key(keys_dir, &new_key_id)?;
 
     Ok(rotation)
 }
 
 /// Walk the key rotation chain for a given key_id, returning all rotation
-/// records in order (newest first). Starts from the rotation whose new_key_id
-/// matches key_id, then follows previous_key_id backward to genesis.
+/// records in order (newest first).
 pub fn collect_rotation_chain(keys_dir: &Path, key_id: &str) -> Result<Vec<KeyRotation>> {
     let rotations = load_rotations(keys_dir)?;
-    // Build index: new_key_id -> rotation
     let new_to_old: std::collections::HashMap<&str, &KeyRotation> = rotations
         .iter()
         .map(|r| (r.new_key_id.as_str(), r))
         .collect();
     let mut chain = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut current = key_id;
-    while let Some(rot) = new_to_old.get(current) {
-        chain.push((*rot).clone());
-        current = &rot.old_key_id;
+    while seen.insert(current) {
+        if let Some(rot) = new_to_old.get(current) {
+            chain.push((*rot).clone());
+            current = &rot.old_key_id;
+        } else {
+            break;
+        }
     }
     Ok(chain)
 }
@@ -218,12 +259,65 @@ pub fn load_records(keys_dir: &Path) -> Result<Vec<KeyRecord>> {
     Ok(records)
 }
 
+/// Collect all public verifying keys known to this repository's local keychain
+/// (current key, archived keys, and recorded keys).
+pub fn load_all_local_public_keys(keys_dir: &Path) -> Result<Vec<VerifyingKey>> {
+    let mut keys = Vec::new();
+    let pub_path = keys_dir.join("public.key");
+    if pub_path.exists() {
+        if let Ok(bytes) = fs::read(&pub_path) {
+            if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                if let Ok(vk) = VerifyingKey::from_bytes(&arr) {
+                    keys.push(vk);
+                }
+            }
+        }
+    }
+    if let Ok(records) = load_records(keys_dir) {
+        for rec in records {
+            if let Ok(bytes) = hex::decode(&rec.public_key_hex) {
+                if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    if let Ok(vk) = VerifyingKey::from_bytes(&arr) {
+                        if !keys.contains(&vk) {
+                            keys.push(vk);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let archive_dir = keys_dir.join(ARCHIVE_DIR);
+    if archive_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&archive_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path().join("public.key");
+                if let Ok(bytes) = fs::read(&p) {
+                    if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                        if let Ok(vk) = VerifyingKey::from_bytes(&arr) {
+                            if !keys.contains(&vk) {
+                                keys.push(vk);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
+
 /// Walk every rotation and verify its signature. Returns a list of errors.
 pub fn verify_keychain(keys_dir: &Path) -> Result<Vec<String>> {
     let rotations = load_rotations(keys_dir)?;
     let mut errors = Vec::new();
     for rotation in &rotations {
-        let old_pk = resolve_public_key(keys_dir, &rotation.old_key_id)?;
+        let old_pk = match resolve_public_key(keys_dir, &rotation.old_key_id) {
+            Ok(pk) => pk,
+            Err(e) => {
+                errors.push(format!("rotation {}: {}", rotation.rotation_id, e));
+                continue;
+            }
+        };
         if let Err(e) = rotation.verify(&old_pk) {
             errors.push(format!("rotation {}: {}", rotation.rotation_id, e));
         }
@@ -234,6 +328,7 @@ pub fn verify_keychain(keys_dir: &Path) -> Result<Vec<String>> {
 /// Find the ed25519 public key for a given key_id by searching:
 /// current key, archived keys, and key records.
 pub fn resolve_public_key(keys_dir: &Path, key_id: &str) -> Result<VerifyingKey> {
+    validate_object_id(key_id)?;
     if let Ok(current_id) = get_current_key_id(keys_dir) {
         if current_id == key_id {
             let pub_bytes = fs::read(keys_dir.join("public.key"))?;
@@ -258,9 +353,7 @@ pub fn resolve_public_key(keys_dir: &Path, key_id: &str) -> Result<VerifyingKey>
     anyhow::bail!("key_id {} not found in keychain", key_id)
 }
 
-/// Verify that `key_id` was an active (non-expired) key at the given
-/// Unix timestamp (seconds).  Keychain timestamps are stored in
-/// milliseconds, so we compare at second precision.
+/// Verify that `key_id` was an active (non-expired) key at the given Unix timestamp (seconds).
 pub fn key_was_valid_at(keys_dir: &Path, key_id: &str, timestamp_secs: u64) -> Result<()> {
     let records = load_records(keys_dir)?;
     let record = records
@@ -268,7 +361,6 @@ pub fn key_was_valid_at(keys_dir: &Path, key_id: &str, timestamp_secs: u64) -> R
         .find(|r| r.key_id == key_id)
         .ok_or_else(|| anyhow::anyhow!("key_id {} not found in keychain", key_id))?;
 
-    // Compare at second precision (div 1000) to align with commit timestamps.
     let created_secs = record.created_at / 1000;
     if created_secs > timestamp_secs {
         anyhow::bail!(
@@ -282,8 +374,6 @@ pub fn key_was_valid_at(keys_dir: &Path, key_id: &str, timestamp_secs: u64) -> R
     for next in &records {
         if next.previous_key_id.as_deref() == Some(key_id) {
             let next_secs = next.created_at / 1000;
-            // A key is valid for the entire second in which it rotates. Only
-            // reject if the rotation finished *before* the commit second.
             if next_secs < timestamp_secs {
                 anyhow::bail!(
                     "key {} rotated at {} (secs) but commit is at {} — key was already stale",
@@ -305,23 +395,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_initial_keypair(keys_dir: &Path) {
-        use rand::RngCore;
-        let mut bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
-        let sk = SigningKey::from_bytes(&bytes);
-        let pk = sk.verifying_key();
-        fs::write(keys_dir.join("secret.key"), sk.to_bytes()).unwrap();
-        fs::write(keys_dir.join("public.key"), pk.to_bytes()).unwrap();
+        let kp = KeyPair::generate();
+        kp.save(keys_dir).unwrap();
     }
 
     #[test]
     fn test_key_id_deterministic() {
-        use rand::RngCore;
-        let mut bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
-        let sk = SigningKey::from_bytes(&bytes);
-        let pk = sk.verifying_key();
-        assert_eq!(key_id_from_public_key(&pk), key_id_from_public_key(&pk));
+        let kp = KeyPair::generate();
+        assert_eq!(
+            key_id_from_public_key(&kp.verifying_key),
+            key_id_from_public_key(&kp.verifying_key)
+        );
     }
 
     #[test]
@@ -345,6 +429,30 @@ mod tests {
     }
 
     #[test]
+    fn test_rotate_encrypted_signing_key() {
+        let dir = tempdir().unwrap();
+        let keys_dir = dir.path().join("keys");
+        fs::create_dir_all(&keys_dir).unwrap();
+        let kp = KeyPair::generate();
+        kp.save_with_passphrase(&keys_dir, "vault-pass").unwrap();
+        let old_id = init_keychain(&keys_dir).unwrap();
+
+        // Wrong passphrase must fail
+        assert!(rotate_signing_key_with_passphrase(&keys_dir, "wrong").is_err());
+
+        // Correct passphrase rotates and keeps new key encrypted
+        let rot = rotate_signing_key_with_passphrase(&keys_dir, "vault-pass").unwrap();
+        assert_eq!(rot.old_key_id, old_id);
+        assert!(KeyPair::is_encrypted(&keys_dir).unwrap());
+        let loaded = KeyPair::load_with_passphrase(&keys_dir, "vault-pass").unwrap();
+        assert_eq!(
+            key_id_from_public_key(&loaded.verifying_key),
+            rot.new_key_id
+        );
+        assert!(verify_keychain(&keys_dir).unwrap().is_empty());
+    }
+
+    #[test]
     fn test_rotate_signing_key_creates_rotation_and_updates_current() {
         let dir = tempdir().unwrap();
         let keys_dir = dir.path().join("keys");
@@ -352,7 +460,6 @@ mod tests {
         create_initial_keypair(&keys_dir);
 
         let old_key_id = init_keychain(&keys_dir).unwrap();
-
         let rotation = rotate_signing_key(&keys_dir).unwrap();
         assert_eq!(rotation.old_key_id, old_key_id);
         assert_ne!(rotation.new_key_id, old_key_id);
@@ -360,10 +467,20 @@ mod tests {
         let current_id = get_current_key_id(&keys_dir).unwrap();
         assert_eq!(current_id, rotation.new_key_id);
 
-        let rot_path = keys_dir
-            .join(ROTATIONS_DIR)
-            .join(format!("{}.json", rotation.rotation_id));
-        assert!(rot_path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = fs::metadata(keys_dir.join("secret.key")).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+            let arch_meta = fs::metadata(
+                keys_dir
+                    .join(ARCHIVE_DIR)
+                    .join(&old_key_id)
+                    .join("secret.key"),
+            )
+            .unwrap();
+            assert_eq!(arch_meta.permissions().mode() & 0o777, 0o600);
+        }
     }
 
     #[test]
@@ -392,7 +509,6 @@ mod tests {
 
         let old_key_id = init_keychain(&keys_dir).unwrap();
 
-        // Sleep to ensure rotation falls in a different second than init.
         std::thread::sleep(std::time::Duration::from_millis(1500));
         let rotation = rotate_signing_key(&keys_dir).unwrap();
 
@@ -405,22 +521,11 @@ mod tests {
             .created_at
             / 1000;
 
-        // Old key not valid before its creation second
         assert!(key_was_valid_at(&keys_dir, &old_key_id, old_created_secs - 1).is_err());
-
-        // Old key valid at its creation second (which is < rot_secs with 1.5s sleep)
         assert!(key_was_valid_at(&keys_dir, &old_key_id, old_created_secs).is_ok());
-
-        // Old key valid throughout the rotation second (grace window)
         assert!(key_was_valid_at(&keys_dir, &old_key_id, rot_secs).is_ok());
-
-        // Old key invalid starting the second AFTER rotation
         assert!(key_was_valid_at(&keys_dir, &old_key_id, rot_secs + 1).is_err());
-
-        // New key valid at rotation second onward
         assert!(key_was_valid_at(&keys_dir, &rotation.new_key_id, rot_secs).is_ok());
-
-        // New key not valid before rotation second
         assert!(key_was_valid_at(&keys_dir, &rotation.new_key_id, rot_secs - 1).is_err());
     }
 
@@ -434,11 +539,9 @@ mod tests {
         let old_key_id = init_keychain(&keys_dir).unwrap();
         let rotation = rotate_signing_key(&keys_dir).unwrap();
 
-        // Old key resolvable from archive
         let old_pk = resolve_public_key(&keys_dir, &old_key_id).unwrap();
         assert_eq!(key_id_from_public_key(&old_pk), old_key_id);
 
-        // New key resolvable from current
         let new_pk = resolve_public_key(&keys_dir, &rotation.new_key_id).unwrap();
         assert_eq!(key_id_from_public_key(&new_pk), rotation.new_key_id);
     }
@@ -453,7 +556,6 @@ mod tests {
         init_keychain(&keys_dir).unwrap();
         rotate_signing_key(&keys_dir).unwrap();
 
-        // Tamper every rotation file
         let rot_dir = keys_dir.join(ROTATIONS_DIR);
         for entry in fs::read_dir(&rot_dir).unwrap() {
             let entry = entry.unwrap();
@@ -500,15 +602,10 @@ mod tests {
         let r1s = rot1.timestamp / 1000;
         let r2s = rot2.timestamp / 1000;
 
-        // key1 valid throughout rot1 second (grace window)
         assert!(key_was_valid_at(&keys_dir, &key1, r1s).is_ok());
-        // key1 invalid the second after rot1
         assert!(key_was_valid_at(&keys_dir, &key1, r1s + 1).is_err());
-        // key2 valid during rot2 second
         assert!(key_was_valid_at(&keys_dir, &key2, r2s).is_ok());
-        // key2 invalid the second after rot2
         assert!(key_was_valid_at(&keys_dir, &key2, r2s + 1).is_err());
-        // key3 valid at rot2 second onward
         assert!(key_was_valid_at(&keys_dir, &key3, r2s).is_ok());
     }
 }

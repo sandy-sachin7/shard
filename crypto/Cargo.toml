@@ -1,20 +1,20 @@
 [package]
 name = "shard-crypto"
-version = "2.3.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Ed25519 key generation, signing, verification, and encrypted key storage for shard distributed VCS"
-license = "MIT"
-repository = "https://github.com/sandy-sachin7/shard"
-homepage = "https://github.com/sandy-sachin7/shard"
+license.workspace = true
+repository.workspace = true
 keywords = ["vcs", "version-control", "mlops", "distributed", "ed25519"]
 categories = ["cryptography"]
 
 [dependencies]
 ed25519-dalek = { workspace = true }
 anyhow = { workspace = true }
-rand = "0.8"
+rand = { workspace = true }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

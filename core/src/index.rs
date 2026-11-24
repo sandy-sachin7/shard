@@ -1,3 +1,4 @@
+use crate::fs_util::atomic_write;
 use crate::manifest::FileManifest;
 use crate::metadata::{self, MetadataFormat};
 use anyhow::Result;
@@ -9,6 +10,9 @@ use std::path::Path;
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct Index {
     pub files: HashMap<String, FileManifest>,
+    /// Files explicitly staged for removal from the next commit snapshot.
+    #[serde(default)]
+    pub removed: Vec<String>,
 }
 
 impl Index {
@@ -22,7 +26,7 @@ impl Index {
 
     pub fn save(&self, path: &Path, fmt: &MetadataFormat) -> Result<()> {
         let content = metadata::serialize(self, fmt);
-        fs::write(path, content)?;
+        atomic_write(path, &content)?;
         Ok(())
     }
 }
@@ -51,6 +55,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let idx = Index::load(&dir.path().join("index"), &MetadataFormat::Json).unwrap();
         assert!(idx.files.is_empty());
+        assert!(idx.removed.is_empty());
     }
 
     #[test]
@@ -82,7 +87,6 @@ mod tests {
         assert_eq!(loaded.files.len(), 1);
         assert!(loaded.files.contains_key("c.txt"));
 
-        // CBOR file should auto-detect format
         let loaded_auto = Index::load(&path, &MetadataFormat::Json).unwrap();
         assert_eq!(loaded_auto.files.len(), 1);
     }

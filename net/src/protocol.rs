@@ -1,4 +1,37 @@
+use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
+
+/// Maximum permitted wire payload size for a single chunk transfer (65 MiB).
+pub const MAX_WIRE_CHUNK_SIZE: usize = 65 * 1024 * 1024;
+
+/// Domain separation prefix for P2P Ed25519 challenge-response authentication.
+const AUTH_CHALLENGE_DOMAIN: &[u8] = b"shard-p2p-auth-v1:";
+
+/// Validate that `id` is a lowercase 64-character hexadecimal Blake3 object ID.
+pub fn is_valid_object_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Construct the canonical domain-separated payload signed during P2P authentication.
+/// Binds the client peer ID, server peer ID, and random 32-byte server challenge nonce.
+pub fn build_auth_challenge_payload(
+    client_peer: &PeerId,
+    server_peer: &PeerId,
+    nonce: &[u8],
+) -> Vec<u8> {
+    let client_bytes = client_peer.to_bytes();
+    let server_bytes = server_peer.to_bytes();
+    let mut payload = Vec::with_capacity(
+        AUTH_CHALLENGE_DOMAIN.len() + 4 + client_bytes.len() + 4 + server_bytes.len() + nonce.len(),
+    );
+    payload.extend_from_slice(AUTH_CHALLENGE_DOMAIN);
+    payload.extend_from_slice(&(client_bytes.len() as u32).to_be_bytes());
+    payload.extend_from_slice(&client_bytes);
+    payload.extend_from_slice(&(server_bytes.len() as u32).to_be_bytes());
+    payload.extend_from_slice(&server_bytes);
+    payload.extend_from_slice(nonce);
+    payload
+}
 
 /// A chunk transferred over the wire includes its content hash, file offset,
 /// data size, and raw bytes — enabling per-chunk verification before store.
@@ -25,7 +58,7 @@ pub enum ShardRequest {
     PutChunk(ChunkPiece),
     /// Initiate P2P authentication: send our public key to the peer.
     Authenticate { public_key: Vec<u8> },
-    /// Respond to an auth challenge with our signature over the nonce.
+    /// Respond to an auth challenge with our signature over the domain-separated challenge.
     AuthAnswer { signature: Vec<u8> },
 }
 
@@ -62,13 +95,37 @@ pub enum ShardResponse {
     AuthGranted,
     /// Peer denied our authentication.
     AuthDenied,
-    /// Direct authentication answer (simple key-based auth, no challenge).
+    /// Legacy variant retained for wire compatibility; never emitted by v2.4+ servers.
     AuthAnswer { success: bool },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_valid_object_id() {
+        let valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(is_valid_object_id(valid));
+        assert!(!is_valid_object_id(""));
+        assert!(!is_valid_object_id("/etc/passwd"));
+        assert!(!is_valid_object_id("../../../keys/secret.key"));
+        assert!(!is_valid_object_id(
+            "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!is_valid_object_id("éé"));
+    }
+
+    #[test]
+    fn test_auth_challenge_payload_binds_peers_and_nonce() {
+        let p1 = PeerId::random();
+        let p2 = PeerId::random();
+        let a = build_auth_challenge_payload(&p1, &p2, &[1u8; 32]);
+        let b = build_auth_challenge_payload(&p2, &p1, &[1u8; 32]);
+        let c = build_auth_challenge_payload(&p1, &p2, &[2u8; 32]);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
 
     #[test]
     fn test_chunk_piece_roundtrip() {

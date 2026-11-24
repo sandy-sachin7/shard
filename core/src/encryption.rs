@@ -1,12 +1,14 @@
-use aes_gcm::aead::{Aead, OsRng};
+use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use anyhow::Result;
 use rand::RngCore;
 use std::fs;
 use std::path::Path;
+use zeroize::Zeroizing;
 
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
+const ENCRYPTED_KEY_PREFIX: &str = "enc:";
 
 pub struct RepoCipher {
     cipher: Aes256Gcm,
@@ -27,40 +29,61 @@ impl RepoCipher {
         }
     }
 
+    /// Encrypt plaintext with empty AAD (legacy format).
     pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
+        self.encrypt_with_aad(plaintext, b"")
+            .expect("AES-256-GCM encryption failed")
+    }
+
+    /// Encrypt plaintext binding `aad` (e.g., chunk content hash) into the GCM authentication tag.
+    pub fn encrypt_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = self
             .cipher
-            .encrypt(nonce, plaintext)
-            .expect("encryption should never fail with given params");
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("chunk encryption failed"))?;
         let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
         result.extend_from_slice(&ciphertext);
-        result
+        Ok(result)
     }
 
+    /// Decrypt legacy ciphertext (empty AAD).
     pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
-        if data.len() < NONCE_SIZE {
+        self.decrypt_with_aad(data, b"")
+    }
+
+    /// Decrypt ciphertext authenticating `aad`.
+    pub fn decrypt_with_aad(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        if data.len() < NONCE_SIZE + 16 {
             anyhow::bail!(
-                "encrypted data too short (need {} bytes for nonce)",
-                NONCE_SIZE
+                "encrypted data too short (need at least {} bytes for nonce + auth tag)",
+                NONCE_SIZE + 16
             );
         }
         let (nonce_bytes, ciphertext) = data.split_at(NONCE_SIZE);
         let nonce = Nonce::from_slice(nonce_bytes);
         let plaintext = self
             .cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| anyhow::anyhow!("decryption failed — wrong key or corrupted data"))?;
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| {
+                anyhow::anyhow!("decryption failed — wrong key, AAD mismatch, or corrupted data")
+            })?;
         Ok(plaintext)
-    }
-
-    pub fn key_bytes(&self) -> [u8; KEY_SIZE] {
-        // Aes256Gcm doesn't expose the key directly. We re-generate from a stored copy.
-        // This is a placeholder — keys are managed externally via save/load functions.
-        unimplemented!("use save_repo_key / load_repo_key instead")
     }
 }
 
@@ -70,15 +93,49 @@ pub fn generate_repo_key() -> [u8; KEY_SIZE] {
     key
 }
 
+/// Save `repo.key` unencrypted with `0o600` permissions (backward compatible).
 pub fn save_repo_key(keys_dir: &Path, key: &[u8; KEY_SIZE]) -> Result<()> {
-    fs::write(keys_dir.join("repo.key"), hex::encode(key))?;
+    save_repo_key_with_passphrase(keys_dir, key, "")
+}
+
+/// Save `repo.key` atomically with `0o600` permissions.
+/// When `passphrase` is non-empty, wraps the key with Argon2id + AES-256-GCM.
+pub fn save_repo_key_with_passphrase(
+    keys_dir: &Path,
+    key: &[u8; KEY_SIZE],
+    passphrase: &str,
+) -> Result<()> {
+    let encoded = if passphrase.is_empty() {
+        Zeroizing::new(hex::encode(key))
+    } else {
+        let wrapped = shard_crypto::encrypt_secret_bytes(key, passphrase)?;
+        Zeroizing::new(format!("{}{}", ENCRYPTED_KEY_PREFIX, hex::encode(wrapped)))
+    };
+    shard_crypto::write_secret_file(&keys_dir.join("repo.key"), encoded.as_bytes())?;
     Ok(())
 }
 
+/// Load `repo.key` without passphrase (succeeds only for unencrypted `repo.key`).
 pub fn load_repo_key(keys_dir: &Path) -> Result<[u8; KEY_SIZE]> {
-    let hex_key = fs::read_to_string(keys_dir.join("repo.key"))?;
-    let key_hex = hex_key.trim();
-    let bytes = hex::decode(key_hex)?;
+    load_repo_key_with_passphrase(keys_dir, "")
+}
+
+/// Load `repo.key`, decrypting with `passphrase` if wrapped.
+pub fn load_repo_key_with_passphrase(keys_dir: &Path, passphrase: &str) -> Result<[u8; KEY_SIZE]> {
+    let raw = Zeroizing::new(fs::read_to_string(keys_dir.join("repo.key"))?);
+    let trimmed = raw.trim();
+    let bytes = if let Some(enc_hex) = trimmed.strip_prefix(ENCRYPTED_KEY_PREFIX) {
+        if passphrase.is_empty() {
+            anyhow::bail!(
+                "repo.key is encrypted but no passphrase provided. Set SHARD_PASSPHRASE or unlock the repository"
+            );
+        }
+        let enc_bytes = hex::decode(enc_hex)?;
+        shard_crypto::decrypt_secret_bytes(&enc_bytes, passphrase)?
+    } else {
+        Zeroizing::new(hex::decode(trimmed)?)
+    };
+
     if bytes.len() != KEY_SIZE {
         anyhow::bail!(
             "invalid repo.key: expected {} bytes, got {}",
@@ -104,6 +161,18 @@ mod tests {
         assert!(encrypted.len() > NONCE_SIZE);
         let decrypted = cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_with_aad_binds_chunk_id() {
+        let cipher = RepoCipher::generate();
+        let data = b"model weights chunk";
+        let aad = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let encrypted = cipher.encrypt_with_aad(data, aad).unwrap();
+        assert_eq!(cipher.decrypt_with_aad(&encrypted, aad).unwrap(), data);
+        // Different AAD (chunk swap attack) must fail
+        let wrong_aad = b"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        assert!(cipher.decrypt_with_aad(&encrypted, wrong_aad).is_err());
     }
 
     #[test]
@@ -133,7 +202,6 @@ mod tests {
         let cipher = RepoCipher::generate();
         let data = b"tamper me";
         let mut encrypted = cipher.encrypt(data);
-        // Flip a byte in the ciphertext portion (after nonce)
         if encrypted.len() > NONCE_SIZE + 1 {
             encrypted[NONCE_SIZE] ^= 0xFF;
         }
@@ -165,6 +233,18 @@ mod tests {
     }
 
     #[test]
+    fn test_key_save_load_with_passphrase_roundtrip() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let key = generate_repo_key();
+        save_repo_key_with_passphrase(dir.path(), &key, "strong-pass").unwrap();
+        assert!(load_repo_key(dir.path()).is_err());
+        assert!(load_repo_key_with_passphrase(dir.path(), "wrong").is_err());
+        let loaded = load_repo_key_with_passphrase(dir.path(), "strong-pass").unwrap();
+        assert_eq!(key, loaded);
+    }
+
+    #[test]
     fn test_from_key_roundtrip() {
         let key = generate_repo_key();
         let cipher = RepoCipher::from_key(&key);
@@ -173,7 +253,6 @@ mod tests {
         let decrypted = cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, data);
 
-        // Same key should produce decryptable ciphertext
         let cipher2 = RepoCipher::from_key(&key);
         let decrypted2 = cipher2.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted2, data);

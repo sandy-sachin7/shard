@@ -1,5 +1,39 @@
 # Changelog
 
+## v2.4.0 — Production Security, Durability & Correctness Hardening
+
+### Security & Trust Boundaries
+- **P2P Ed25519 challenge-response authentication**: Restored real challenge-response handshake using fresh 32-byte `OsRng` nonces with 30s TTL, domain separation bound to both client and server `PeerId`s, `authorized_keys` enforcement, and automatic session cleanup on `ConnectionClosed`.
+- **Strict ID & path validation**: Added `validate_object_id` (64 lowercase hex chars) at every `Store` backend, `PartialTransfer`, and P2P handler; added `safe_repo_join` preventing absolute paths, `..`, `.shard`/`.git`, and symlink escapes across `checkout`, `export`, `pull`, and `/api/v1/add`; added `validate_branch_name` blocking `../` traversal while supporting hierarchical branch names like `feature/foo`.
+- **HuggingFace push key protection**: `shard hf push` now stages only safe public repository artifacts into an isolated temp directory with a mandatory pre-flight assertion refusing `secret.key`, `repo.key`, `keys/archive/`, `wal.log`, `partial/`, and `repo.lock`; passes tokens via `HF_TOKEN` env var instead of CLI flags.
+- **Hardened HTTP API (`shard serve`)**: Removed `CorsLayer::permissive()`; added constant-time bearer token auth (`SHARD_API_TOKEN` or ephemeral `OsRng` token); confined `/api/v1/add` inside the repository; fixed `/api/v1/commit` to return real `commit_id` and `/api/v1/status` to load `.shard/index`; offloaded blocking operations via `tokio::task::spawn_blocking`.
+- **Signature trust & key hardening**: `verify` and `pull`/`sync` require valid signatures (with `--allow-unsigned` opt-in), verify `key_id == blake3(public_key)`, and anchor trust to local keychain + `authorized_keys`; all secret keys written atomically with `0o600` permissions; `repo.key` wrapped with Argon2id + AES-256-GCM when passphrase is set; `key rotate` supports encrypted keys; secret buffers zeroized with `zeroize`; AEAD AAD binds chunk hashes; removed panicking `RepoCipher::key_bytes()`; `SHARD_PASSPHRASE` env var supported across all commands.
+- **Dependency upgrades**: Upgraded `libp2p` to `0.57` (and transitive `hickory`, `rustls-webpki`, `ring`, `bytes`, `rand`, `time`), eliminating active security/soundness advisories and pruning `.cargo/audit.toml`.
+
+### Core Storage, Durability, Memory & Correctness
+- **Atomic writes & crash-safe WAL**: Added `atomic_write` (`write -> sync_all -> rename -> dir fsync`) across `FlatStore`, `Index`, refs, `HEAD`, `tags.json`, and `config.json`. WAL now backs up `HEAD`, active branch ref (`refs/heads/<branch>`), and `index` with per-record CRC32 checksums, `sync_all()`, and graceful recovery from truncated trailing records.
+- **Real cross-process locking**: Replaced polling `OpQueue` with OS-level advisory locking (`fs2` on `.shard/repo.lock`) combined with in-process `RwLock` across all operations.
+- **Eliminated OOM paths**: Replaced 1 GiB `zstd::bulk::decompress` and unbounded `zlib` decompression with bounded streaming decompression (64 MiB default cap); streamed `checkout`, `export`, and `pull` chunk-by-chunk via `BufWriter`; streamed `push` object-by-object from `Store`; added key-only `StorageBackend::iter_keys()` for Sled/SQLite GC.
+- **Self-describing `SHRD` v1 chunk envelopes**: Fixed `push` rejection and `pull` resume corruption for `zstd`/`zlib`/`--private` repos and prevented silent corruption when compression/privacy flags change.
+- **3-way LCA merge**: Rewrote `merge()` with DAG Lowest Common Ancestor computation, full `FileManifest` preservation (compression, size, content_type, merkle_root), and explicit conflict detection.
+- **Fail-closed GC**: Deduplicated `prune` -> `gc::gc()`; added recursive branch scanning for slashed branches, `KeyRotation` and `partial/` reachability marking, iterative DAG traversal, RAII panic-safe guard, and fail-closed abort on any mark-phase error.
+- **Backend & chunker fixes**: Removed buggy `objects.idx` from `FlatStore`; enabled SQLite WAL + `synchronous=NORMAL` + `busy_timeout=5000` on every pooled connection; reused open `Store` in `import`/`share`/`sync` to fix Sled double-open crashes; replaced broken rolling hash with true shift-invariant FastCDC (64-bit Gear hash + dual normalized masks).
+- **Commit snapshot semantics & `import()`**: Commits now carry forward unmodified manifests from parent commits; `import()` preserves source directory hierarchy.
+
+### Modularity, Bindings, CLI & Repo Hygiene
+- Decomposed 3,566-LOC `core/src/lib.rs` into focused submodules (`repo`, `auth`, `backup`, `p2p_sync`, `hf`, `chunk_codec`, `fs_util`, `error`).
+- Fixed `SHARD_*` env var key mapping (preserving underscores) and wired `validate_config()` (with `zlib` instead of `gzip`).
+- Rewrote `python/shard-py` to invoke `shard-core` directly with GIL release (`py.allow_threads`).
+- Routed CLI diagnostics strictly to `stderr` while keeping clean data/JSON on `stdout`; fixed `key verify --json` non-zero exit code on failure.
+- Un-ignored and stabilized `test_three_node_pull` and `test_sync_auto_pull`; added comprehensive security, P2P auth, merge, GC, and HTTP API tests.
+- Hardened `Dockerfile` (non-root user), `docker-compose.yml`, and `scripts/install.sh` (`mktemp -d` + `trap` + macOS `shasum`); cleaned root clutter.
+
+## v2.3.0
+
+- Added HuggingFace dataset push/pull (`shard hf push` / `shard hf pull`).
+- Added `--porcelain` flag to `shard status`.
+- Improved `.shardignore` filtering and hidden file handling.
+
 ## v2.2.1
 
 ### Bug fixes
@@ -57,6 +91,7 @@
 - **API versioning**: HTTP API uses `/api/v1/*` routes.
 - **Dependency cleanup**: OnceCell for global state, UUID for tracing.
 - **Code quality**: `#[derive(Default)]` on metrics, unified `promote_pending` logic, `&Path` instead of `&PathBuf` in API, `#[allow(clippy::too_many_arguments)]` on `init_with_passphrase`.
+
 ## v2.1.1
 
 ### Bug fixes
@@ -65,6 +100,7 @@
 - **Windows Build**: Resolved `LNK1181` linking error by ensuring PyO3 can accurately locate `python3.lib` in the host environment.
 - **Security**: Upgraded `pyo3` to `0.24.2` to resolve a known buffer overflow vulnerability (`RUSTSEC-2025-0020`).
 - **Docker**: Ensured `python3` is available in Alpine builder and fixed `.cargo` missing directory issues by updating `.dockerignore`.
+
 ## v2.1.0
 
 ### Bug fixes

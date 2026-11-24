@@ -1,38 +1,33 @@
 # Shard — Agent Guide
 
-## Workspace (Cargo workspace, resolver "2")
+## Workspace (Cargo workspace, resolver `"2"`, `v2.4.0`)
 
 | Crate | Path | Description |
 |-------|------|-------------|
-| `shard-cli` (bin) | `cmd/shard-cli/` | CLI entrypoint (clap derive, artifact: `shard`) |
-| `shard-core` | `core/` | Chunker, store, manifest, index, commit DAG, top-level API (init/add/commit/verify/share/pull) |
-| `shard-net` | `net/` | libp2p node (TCP+Noise+Yamux), protocol messages, mDNS+Kademlia+Gossipsub+Identify |
-| `shard-crypto` | `crypto/` | ed25519 key generation, save/load (`secret.key` + `public.key`) |
-| `shard-storage` | `storage/` | **Stub** — unused placeholder (only has `add(u64,u64)->u64`) |
+| `shard-cli` (`shard` bin) | `cmd/shard-cli/` | CLI entrypoint (`clap` derive), stderr tracing, clean stdout data/JSON |
+| `shard-core` | `core/` | Modular VCS engine: `repo`, `auth`, `backup`, `p2p_sync`, `hf`, `api`, `gc`, `wal`, `ops`, `branch`, `chunker`, `chunk_codec`, `compression`, `encryption`, `keychain`, `store/*` |
+| `shard-net` | `net/` | `libp2p` 0.57 node (TCP+QUIC+Noise+Yamux, mDNS, Kademlia, Gossipsub, Relay, DCUtR, AutoNAT) + Ed25519 challenge-response auth |
+| `shard-crypto` | `crypto/` | Ed25519 key generation, Argon2id + AES-256-GCM passphrase encryption, `0o600` atomic secret persistence, `zeroize` |
+| `shard-storage` | `storage/` | `StorageBackend` trait + `SledBackend` and pooled WAL-mode `SqliteBackend` with key-only `iter_keys()` |
+| `shard-tests` | `tests/` | Workspace-level library integration tests |
+| `shard-py` (standalone) | `python/shard-py/` | PyO3 native Python bindings calling `shard-core` directly with GIL release |
 
-## Commands
+## Verification Commands
 
 ```sh
-cargo build              # build workspace
-cargo test               # run all tests (only chunker unit tests exist)
-cargo install --path cmd/shard-cli  # install shard binary
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-No `tests/` integration tests exist yet. No CI workflows, no rustfmt/clippy configs.
+## Architecture Highlights
 
-## Architecture
-
-- **Object storage**: `.shard/objects/<2‑char prefix>/<full hex hash>` — git-like layout, via `core/src/store.rs`
-- **Chunking**: Fixed 4 MiB (`4 * 1024 * 1024`), Blake3 hashed, in `core/src/chunker.rs`
-- **Commits**: serde JSON, `commit_id` field is **excluded from the hashed content** (placeholder). Signed via ed25519-dalek.
-- **Networking**: libp2p 0.53 with TCP-only transport (`.with_quic()` commented out in `net/src/p2p.rs`)
-- **CLI commands**: `Init`, `Add {path}`, `Commit { -m msg --author }`, `Verify {commit_id}`, `Peer Add {multiaddr}`, `Share`, `Pull {peer} {commit_id}`
-
-## Key quirks
-
-- `Cargo.lock` is gitignored
-- `.shard/` and `ANTIGRAVITY.md` are gitignored
-- `ANTIGRAVITY.md` is the design/spec document (gitignored but present)
-- Only `core/src/chunker.rs` has unit tests
-- `core/src/store.rs` `get_chunk` first reads the file directly in `verify` (bypasses store method) — `verify` accesses `.shard/objects/` manually
-- The design doc (`ANTIGRAVITY.md`) references `nextest`, `sled`/`sqlite` storage, Rabin chunking, CBOR — none are implemented
+- **Content-addressed storage**: Flat (`objects/<2-hex>/<64-hex>`, atomic write + fsync), Sled, or pooled SQLite (WAL + `busy_timeout=5000`). All object IDs strictly validated as 64 lowercase hex characters.
+- **Self-describing chunk envelopes (`SHRD` v1)**: Encodes compression & encryption flags with AAD bound to `chunk_id` (backward compatible with legacy raw blobs). Enables safe dedup, `push`/`pull` resume across `zstd`/`zlib`/`--private`, and wire-level integrity verification.
+- **FastCDC chunking**: 64-bit Gear hash with dual normalized masks (`mask_s`/`mask_l`) and cursor-based buffer (shift-invariant deduplication).
+- **Concurrency & durability**: Per-repo in-process `RwLock` + OS-level `.shard/repo.lock` (`fs2`), CRC32-checksummed WAL backing up `HEAD`, active branch ref, and `index`, plus atomic write-fsync-rename for all metadata.
+- **Security**:
+  - Ed25519 challenge-response P2P auth with 32-byte `OsRng` nonces, 30s TTL, dual-PeerId domain separation, and `authorized_keys` enforcement.
+  - Strict `safe_repo_join` path containment & `validate_branch_name` traversal protection.
+  - Hardened HTTP API (`shard serve`): constant-time bearer auth (`SHARD_API_TOKEN`), no permissive CORS, `spawn_blocking` offload.
+  - `shard hf push` stages only sanitized public artifacts and refuses to upload private keys (`secret.key`, `repo.key`, `archive/`), WALs, or lock files.

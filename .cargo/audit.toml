@@ -1,21 +1,9 @@
 [advisories]
+# All active security and soundness advisories were resolved by upgrading libp2p
+# to 0.57.1 and quinn-proto to 0.11.19. Only unmaintained-crate informational
+# notices from upstream transitive dependencies remain below.
 ignore = [
-  "RUSTSEC-2026-0007",   # bytes - transitive via libp2p
-  "RUSTSEC-2026-0119",   # hickory-proto - transitive via libp2p
-  "RUSTSEC-2026-0037",   # quinn-proto - transitive via libp2p
-  "RUSTSEC-2025-0009",   # ring 0.16 - transitive via libp2p
-  "RUSTSEC-2026-0099",   # rustls-webpki - transitive via libp2p
-  "RUSTSEC-2026-0104",   # rustls-webpki - transitive via libp2p
-  "RUSTSEC-2026-0098",   # rustls-webpki - transitive via libp2p
-  "RUSTSEC-2026-0049",   # rustls-webpki - transitive via libp2p
-  "RUSTSEC-2026-0009",   # time - transitive via libp2p
-  "RUSTSEC-2024-0384",   # instant - unmaintained, transitive via libp2p
-  "RUSTSEC-2024-0436",   # paste - unmaintained, transitive via libp2p
-  "RUSTSEC-2025-0010",   # ring - unmaintained, transitive via libp2p
-  "RUSTSEC-2026-0002",   # lru - unsound, transitive via libp2p
-  "RUSTSEC-2026-0097",   # rand - unsound, transitive via libp2p
-  "RUSTSEC-2026-0105",   # core2 - unmaintained/yanked, transitive via libp2p
-  "RUSTSEC-2026-0185",   # quinn-proto 0.11.14 - remote mem exhaustion, transitive via libp2p
-  "RUSTSEC-2025-0057",   # fxhash - unmaintained, transitive via sled
-  "RUSTSEC-2025-0001",   # rustls-pemfile - unmaintained, transitive via libp2p
+  "RUSTSEC-2024-0384",   # instant - unmaintained, transitive via sled -> parking_lot 0.11
+  "RUSTSEC-2024-0436",   # paste - unmaintained proc-macro, transitive via libp2p -> if-watch -> netlink-packet-core
+  "RUSTSEC-2025-0057",   # fxhash - unmaintained, transitive via sled 0.34
 ]

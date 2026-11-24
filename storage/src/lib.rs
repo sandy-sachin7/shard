@@ -16,6 +16,8 @@ pub trait StorageBackend: Send + Sync {
     fn flush(&self) -> anyhow::Result<()>;
     /// Iterate over all key-value pairs whose keys start with `prefix`.
     fn iter_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    /// Iterate over all keys starting with `prefix` without loading blob values into memory.
+    fn iter_keys(&self, prefix: &[u8]) -> anyhow::Result<Vec<Vec<u8>>>;
 }
 
 /// Sled-based storage backend. Persists to a sled database directory.
@@ -63,6 +65,15 @@ impl StorageBackend for SledBackend {
         }
         Ok(results)
     }
+
+    fn iter_keys(&self, prefix: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+        let mut results = Vec::new();
+        for result in self.db.scan_prefix(prefix).keys() {
+            let k = result?;
+            results.push(k.to_vec());
+        }
+        Ok(results)
+    }
 }
 
 /// SQLite-based storage backend with connection pooling. Persists to a single `.db` file.
@@ -72,15 +83,22 @@ pub struct SqliteBackend {
 
 impl SqliteBackend {
     /// Open or create a SQLite database at `path` with a connection pool.
-    /// Pool size defaults to 8 connections.
+    /// Configures WAL journal mode, `synchronous=NORMAL`, and `busy_timeout=5000`
+    /// on every connection in the pool.
     pub fn new(path: &Path) -> anyhow::Result<Self> {
-        let manager = SqliteConnectionManager::file(path);
+        let manager = SqliteConnectionManager::file(path).with_init(|conn| {
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA busy_timeout=5000;",
+            )
+        });
         let pool = Pool::builder().max_size(8).build(manager)?;
         {
             let conn = pool.get()?;
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS shard_store (
-                    key   TEXT PRIMARY KEY,
+                    key   BLOB PRIMARY KEY,
                     value BLOB NOT NULL
                 );",
             )?;
@@ -98,15 +116,15 @@ impl StorageBackend for SqliteBackend {
         let conn = self.pool.get()?;
         conn.execute(
             "INSERT OR REPLACE INTO shard_store (key, value) VALUES (?1, ?2)",
-            [key, value],
+            rusqlite::params![key, value],
         )?;
         Ok(())
     }
 
     fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare("SELECT value FROM shard_store WHERE key = ?1")?;
-        let mut rows = stmt.query([key])?;
+        let mut stmt = conn.prepare_cached("SELECT value FROM shard_store WHERE key = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![key])?;
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),
@@ -115,34 +133,71 @@ impl StorageBackend for SqliteBackend {
 
     fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        conn.execute("DELETE FROM shard_store WHERE key = ?1", [key])?;
+        conn.execute(
+            "DELETE FROM shard_store WHERE key = ?1",
+            rusqlite::params![key],
+        )?;
         Ok(())
     }
 
     fn contains(&self, key: &[u8]) -> anyhow::Result<bool> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare("SELECT 1 FROM shard_store WHERE key = ?1")?;
-        let exists = stmt.exists([key])?;
+        let mut stmt = conn.prepare_cached("SELECT 1 FROM shard_store WHERE key = ?1")?;
+        let exists = stmt.exists(rusqlite::params![key])?;
         Ok(exists)
     }
 
     fn flush(&self) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let conn = self.pool.get()?;
-        let pattern = format!("{}%", std::str::from_utf8(prefix).unwrap_or(""));
-        let mut stmt =
-            conn.prepare("SELECT key, value FROM shard_store WHERE key LIKE ?1 ORDER BY key")?;
-        let rows = stmt.query_map([&pattern], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
         let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
+        if prefix.is_empty() {
+            let mut stmt =
+                conn.prepare_cached("SELECT key, value FROM shard_store ORDER BY key")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            for row in rows {
+                results.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare_cached(
+                "SELECT key, value FROM shard_store WHERE substr(key, 1, ?1) = ?2 ORDER BY key",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![prefix.len() as i64, prefix], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            for row in rows {
+                results.push(row?);
+            }
+        }
+        Ok(results)
+    }
+
+    fn iter_keys(&self, prefix: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
+        let conn = self.pool.get()?;
+        let mut results = Vec::new();
+        if prefix.is_empty() {
+            let mut stmt = conn.prepare_cached("SELECT key FROM shard_store ORDER BY key")?;
+            let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+            for row in rows {
+                results.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare_cached(
+                "SELECT key FROM shard_store WHERE substr(key, 1, ?1) = ?2 ORDER BY key",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![prefix.len() as i64, prefix], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })?;
+            for row in rows {
+                results.push(row?);
+            }
         }
         Ok(results)
     }
@@ -177,6 +232,12 @@ mod tests {
         let all = backend.iter_prefix(b"").unwrap();
         assert_eq!(all.len(), 2);
 
+        // iter_keys on all keys and prefix
+        let all_keys = backend.iter_keys(b"").unwrap();
+        assert_eq!(all_keys.len(), 2);
+        assert_eq!(backend.iter_keys(b"key").unwrap().len(), 2);
+        assert_eq!(backend.iter_keys(b"nope").unwrap().len(), 0);
+
         // iter_prefix on prefix
         let k1 = backend.iter_prefix(b"key").unwrap();
         assert_eq!(k1.len(), 2);
@@ -205,6 +266,21 @@ mod tests {
         let backend: Box<dyn StorageBackend> =
             Box::new(SqliteBackend::new(&dir.path().join("sqlite.db")).unwrap());
         test_backend_roundtrip(backend.as_ref());
+    }
+
+    #[test]
+    fn test_sqlite_wal_and_pragmas_enabled() {
+        let dir = tempdir().unwrap();
+        let backend = SqliteBackend::new(&dir.path().join("sqlite.db")).unwrap();
+        let conn = backend.pool().get().unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000);
     }
 
     #[test]

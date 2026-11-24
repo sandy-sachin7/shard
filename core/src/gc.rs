@@ -1,18 +1,37 @@
 use crate::branch;
 use crate::commit::Commit;
 use crate::index::Index;
+use crate::keychain;
 use crate::manifest::FileManifest;
 use crate::metadata::{self, MetadataFormat};
+use crate::partial;
 use crate::store::Store;
-use std::collections::HashSet;
-
 use anyhow::Result;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 static GC_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// RAII guard that guarantees `GC_RUNNING` is cleared even if GC panics.
+struct GcRunningGuard;
+
+impl GcRunningGuard {
+    fn acquire() -> Result<Self> {
+        if GC_RUNNING.swap(true, Ordering::Acquire) {
+            anyhow::bail!("GC already in progress");
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for GcRunningGuard {
+    fn drop(&mut self) {
+        GC_RUNNING.store(false, Ordering::Release);
+    }
+}
 
 pub struct GcPolicy {
     pub interval_secs: u64,
@@ -25,6 +44,7 @@ impl GcPolicy {
         let interval_secs = cfg
             .get("gc_interval_secs")
             .and_then(|s| s.parse().ok())
+            .filter(|&v| v > 0)
             .unwrap_or(3600);
         let enabled = cfg.get("gc_enabled").map(|s| s == "true").unwrap_or(false);
         Self {
@@ -34,32 +54,53 @@ impl GcPolicy {
     }
 }
 
+/// Iteratively mark all commits, manifests, and data chunks reachable from `start_commit_id`.
+///
+/// **Fail-closed:** returns `Err` immediately on any missing or corrupt commit/manifest object
+/// so GC will NEVER proceed to sweep on an incomplete reachability graph.
 pub fn collect_reachable(
     store: &Store,
-    commit_id: &str,
+    start_commit_id: &str,
     seen_commits: &mut HashSet<String>,
     reachable: &mut HashSet<String>,
 ) -> Result<()> {
-    if !seen_commits.insert(commit_id.to_string()) {
-        return Ok(());
-    }
-    reachable.insert(commit_id.to_string());
-    let commit = match load_commit(store, commit_id) {
-        Ok(c) => c,
-        Err(_) => return Ok(()),
-    };
-    for manifest_id in &commit.manifests {
-        reachable.insert(manifest_id.clone());
-        if let Ok(data) = store.get_chunk(manifest_id) {
-            if let Ok(manifest) = metadata::deserialize::<FileManifest>(&data) {
+    let mut stack = vec![start_commit_id.to_string()];
+
+    while let Some(commit_id) = stack.pop() {
+        if !seen_commits.insert(commit_id.clone()) {
+            continue;
+        }
+        reachable.insert(commit_id.clone());
+
+        let commit = load_commit(store, &commit_id)?;
+        for manifest_id in &commit.manifests {
+            if reachable.insert(manifest_id.clone()) {
+                let data = store.get_chunk(manifest_id).map_err(|e| {
+                    anyhow::anyhow!(
+                        "GC mark failed: missing manifest '{}' referenced by commit '{}': {}",
+                        manifest_id,
+                        commit_id,
+                        e
+                    )
+                })?;
+                let manifest: FileManifest = metadata::deserialize(&data).map_err(|e| {
+                    anyhow::anyhow!(
+                        "GC mark failed: corrupt manifest '{}' referenced by commit '{}': {}",
+                        manifest_id,
+                        commit_id,
+                        e
+                    )
+                })?;
                 for chunk_id in &manifest.chunks {
                     reachable.insert(chunk_id.clone());
                 }
             }
         }
-    }
-    for parent_id in &commit.parents {
-        collect_reachable(store, parent_id, seen_commits, reachable)?;
+        for parent_id in &commit.parents {
+            if !seen_commits.contains(parent_id) {
+                stack.push(parent_id.clone());
+            }
+        }
     }
     Ok(())
 }
@@ -71,13 +112,10 @@ fn load_commit(store: &Store, commit_id: &str) -> Result<Commit> {
     Ok(commit)
 }
 
+/// Execute crash-safe, fail-closed garbage collection under an exclusive repository lock.
 pub fn gc(path: &Path, json: bool) -> Result<()> {
-    if GC_RUNNING.swap(true, Ordering::Acquire) {
-        anyhow::bail!("GC already in progress");
-    }
-    let result = gc_inner(path, json);
-    GC_RUNNING.store(false, Ordering::Release);
-    result
+    let _gc_guard = GcRunningGuard::acquire()?;
+    crate::with_write_op(path, "gc", || gc_inner(path, json))
 }
 
 fn gc_inner(path: &Path, json: bool) -> Result<()> {
@@ -86,30 +124,36 @@ fn gc_inner(path: &Path, json: bool) -> Result<()> {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let shard_dir = path.join(".shard");
     if !shard_dir.exists() {
-        anyhow::bail!("not a shard repository");
+        anyhow::bail!("not a shard repository (run `shard init` first)");
     }
 
     let cfg = crate::load_config(&shard_dir)?;
     let fmt = MetadataFormat::from_config(&cfg);
     let store = Store::open(&shard_dir)?;
     let mut reachable: HashSet<String> = HashSet::new();
+    let mut seen_commits: HashSet<String> = HashSet::new();
 
+    // 1. Mark from HEAD
     let (_, head_commit) = branch::resolve_head(&shard_dir)?;
     if let Some(ref head) = head_commit {
-        collect_reachable(&store, head, &mut HashSet::new(), &mut reachable)?;
+        collect_reachable(&store, head, &mut seen_commits, &mut reachable)?;
     }
 
-    if let Ok(branches) = branch::list_branches(&shard_dir) {
-        for (_, commit_id) in branches.1 {
-            collect_reachable(&store, &commit_id, &mut HashSet::new(), &mut reachable)?;
+    // 2. Mark from all branches (recursive, including slashed branches like feature/foo)
+    let (_, branches) = branch::list_branches(&shard_dir)?;
+    for (_, commit_id) in branches {
+        if !commit_id.is_empty() {
+            collect_reachable(&store, &commit_id, &mut seen_commits, &mut reachable)?;
         }
     }
 
+    // 3. Mark from all tags
     let tags = crate::load_tags(&shard_dir)?;
     for commit_id in tags.values() {
-        collect_reachable(&store, commit_id, &mut HashSet::new(), &mut reachable)?;
+        collect_reachable(&store, commit_id, &mut seen_commits, &mut reachable)?;
     }
 
+    // 4. Mark from staging index
     let index = Index::load(&shard_dir.join("index"), &fmt)?;
     for manifest in index.files.values() {
         let json_bytes = metadata::serialize(manifest, &fmt);
@@ -120,6 +164,24 @@ fn gc_inner(path: &Path, json: bool) -> Result<()> {
         }
     }
 
+    // 5. Mark KeyRotation objects stored in the DAG
+    let keys_dir = shard_dir.join("keys");
+    if keys_dir.exists() {
+        let rotations = keychain::load_rotations(&keys_dir)?;
+        for rot in &rotations {
+            reachable.insert(rot.rotation_id.clone());
+            if let Ok(raw) = serde_json::to_vec(rot) {
+                reachable.insert(blake3::hash(&raw).to_hex().to_string());
+            }
+        }
+    }
+
+    // 6. Mark in-flight partial transfers
+    for obj_id in partial::collect_partial_object_ids(&shard_dir)? {
+        reachable.insert(obj_id);
+    }
+
+    // 7. Sweep unreachable objects (only reached if 100% of mark phase succeeded!)
     let all_chunks = store.iter_chunks()?;
     let mut pruned = 0u64;
     let mut kept = 0u64;
@@ -131,9 +193,10 @@ fn gc_inner(path: &Path, json: bool) -> Result<()> {
             kept += 1;
         }
     }
+    store.flush()?;
 
     if json {
-        info!(
+        println!(
             "{}",
             serde_json::to_string(&serde_json::json!({
                 "pruned": pruned,
@@ -141,7 +204,7 @@ fn gc_inner(path: &Path, json: bool) -> Result<()> {
             }))?
         );
     } else {
-        info!("GC pruned {} objects. {} objects remain.", pruned, kept);
+        println!("Pruned {} objects. {} objects remain.", pruned, kept);
     }
     Ok(())
 }
@@ -159,9 +222,11 @@ pub async fn gc_loop(path: PathBuf, policy: GcPolicy) {
             _ = interval.tick() => {
                 let start = Instant::now();
                 info!("Auto-GC: starting");
-                match gc(&path, false) {
-                    Ok(()) => info!("Auto-GC: completed in {:?}", start.elapsed()),
-                    Err(e) => warn!("Auto-GC: error: {}", e),
+                let p = path.clone();
+                match tokio::task::spawn_blocking(move || gc(&p, false)).await {
+                    Ok(Ok(())) => info!("Auto-GC: completed in {:?}", start.elapsed()),
+                    Ok(Err(e)) => warn!("Auto-GC: error: {}", e),
+                    Err(e) => warn!("Auto-GC task panicked: {}", e),
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -181,9 +246,6 @@ mod tests {
     use crate::metadata;
     use tempfile::tempdir;
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    /// Create a Chunk with the given data and a blake3 hash computed over it.
     fn make_chunk(data: &[u8]) -> Chunk {
         let hash = blake3::hash(data);
         Chunk {
@@ -193,13 +255,10 @@ mod tests {
         }
     }
 
-    /// Convenience: hash a byte slice to a hex string.
     fn hex_hash(data: &[u8]) -> String {
         blake3::hash(data).to_hex().to_string()
     }
 
-    /// Store a commit plus its manifests and data chunks, returning all the
-    /// hex hashes that should become reachable: `(commit_id, manifest_ids, chunk_ids)`.
     fn store_commit_chain(
         store: &Store,
         parents: Vec<String>,
@@ -254,14 +313,11 @@ mod tests {
         (c_id, manifest_ids, all_chunk_ids)
     }
 
-    /// Create a minimal `.shard` skeleton with a config file and a FlatStore
-    /// ready to use.  Returns `(tmpdir, shard_dir)`.
     fn init_shard_repo() -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().unwrap();
         let shard = dir.path().join(".shard");
         std::fs::create_dir_all(shard.join("objects")).unwrap();
 
-        // Minimal config so Store::open uses the flat backend.
         let mut cfg_map = std::collections::BTreeMap::<String, String>::new();
         cfg_map.insert("storage_backend".into(), "flat".into());
         let cfg_bytes = metadata::serialize(&cfg_map, &MetadataFormat::Json);
@@ -269,8 +325,6 @@ mod tests {
 
         (dir, shard)
     }
-
-    // ── GcPolicy ────────────────────────────────────────────────────────────
 
     #[test]
     fn test_gc_policy_default() {
@@ -283,9 +337,6 @@ mod tests {
     #[test]
     fn test_gc_policy_from_config_file() {
         let dir = tempdir().unwrap();
-
-        // GcPolicy::from_config delegates to load_config which reads
-        // config.json directly from the given directory.
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "7200".into());
         cfg.insert("gc_enabled".into(), "true".into());
@@ -300,8 +351,6 @@ mod tests {
     #[test]
     fn test_gc_policy_partial_config() {
         let dir = tempdir().unwrap();
-
-        // Only set interval; enabled should default to false.
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "1800".into());
         let bytes = metadata::serialize(&cfg, &MetadataFormat::Json);
@@ -315,7 +364,6 @@ mod tests {
     #[test]
     fn test_gc_policy_invalid_values_use_defaults() {
         let dir = tempdir().unwrap();
-
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "not-a-number".into());
         cfg.insert("gc_enabled".into(), "maybe".into());
@@ -323,30 +371,19 @@ mod tests {
         std::fs::write(dir.path().join("config.json"), bytes).unwrap();
 
         let policy = GcPolicy::from_config(dir.path());
-        // Parse failures fall back to defaults.
         assert_eq!(policy.interval_secs, 3600);
         assert!(!policy.enabled);
     }
 
-    /// Environment-variable overrides flow through `load_config` but the
-    /// `env_to_config_key` transform replaces underscores with dots, producing
-    /// keys like `gc.interval.secs` / `gc.enabled`.  Because `GcPolicy`
-    /// reads `gc_interval_secs` / `gc_enabled` (with underscores), the env
-    /// vars do NOT override – this test documents that behaviour.
     #[test]
-    fn test_gc_policy_env_override_key_format_mismatch() {
+    fn test_gc_policy_env_override_works() {
         let dir = tempdir().unwrap();
-
-        // Write a config so from_config has a baseline.
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "3600".into());
         cfg.insert("gc_enabled".into(), "false".into());
         let bytes = metadata::serialize(&cfg, &MetadataFormat::Json);
         std::fs::write(dir.path().join("config.json"), bytes).unwrap();
 
-        // Set env vars WITH underscores in the name → load_env_overrides
-        // produces keys WITH dots ("gc.interval.secs") that do NOT match
-        // the config keys ("gc_interval_secs") that GcPolicy reads.
         let saved_interval = std::env::var("SHARD_GC_INTERVAL_SECS").ok();
         let saved_enabled = std::env::var("SHARD_GC_ENABLED").ok();
         std::env::set_var("SHARD_GC_INTERVAL_SECS", "9999");
@@ -354,7 +391,6 @@ mod tests {
 
         let policy = GcPolicy::from_config(dir.path());
 
-        // Restore env state before assertions (to avoid poisoning other tests).
         if let Some(v) = saved_interval {
             std::env::set_var("SHARD_GC_INTERVAL_SECS", v);
         } else {
@@ -366,67 +402,54 @@ mod tests {
             std::env::remove_var("SHARD_GC_ENABLED");
         }
 
-        // The config-file values survived because the env-var keys don't match.
-        assert_eq!(policy.interval_secs, 3600);
-        assert!(!policy.enabled);
+        assert_eq!(policy.interval_secs, 9999);
+        assert!(policy.enabled);
     }
 
-    // ── collect_reachable ───────────────────────────────────────────────────
-
     #[test]
-    fn test_collect_reachable_empty() {
+    fn test_collect_reachable_missing_commit_fails_closed() {
         let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".shard/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join("objects")).unwrap();
         let store = Store::open(dir.path()).unwrap();
         let mut reachable = HashSet::new();
-        let result = collect_reachable(&store, "nonexistent", &mut HashSet::new(), &mut reachable);
-        assert!(result.is_ok());
-        // The commit_id is inserted before the load attempt, so it appears
-        // even when the commit data is missing.
-        assert!(reachable.contains("nonexistent"));
-        assert_eq!(reachable.len(), 1);
+        let result =
+            collect_reachable(&store, &"0".repeat(64), &mut HashSet::new(), &mut reachable);
+        assert!(
+            result.is_err(),
+            "GC mark phase must fail closed on missing commit"
+        );
     }
 
     #[test]
     fn test_collect_reachable_root_commit() {
         let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".shard/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join("objects")).unwrap();
         let store = Store::open(dir.path()).unwrap();
 
-        // ── store a simple commit with one manifest / one data chunk ──
         let (commit_id, manifest_ids, chunk_ids) =
             store_commit_chain(&store, vec![], vec![("f.txt", &[b"hello" as &[u8]])], 100);
 
         let mut reachable = HashSet::new();
         collect_reachable(&store, &commit_id, &mut HashSet::new(), &mut reachable).unwrap();
 
-        assert!(reachable.contains(&commit_id), "commit must be reachable");
-        assert!(
-            reachable.contains(&manifest_ids[0]),
-            "manifest must be reachable"
-        );
-        assert!(
-            reachable.contains(&chunk_ids[0]),
-            "data chunk must be reachable"
-        );
-        assert_eq!(reachable.len(), 3, "commit + manifest + chunk");
+        assert!(reachable.contains(&commit_id));
+        assert!(reachable.contains(&manifest_ids[0]));
+        assert!(reachable.contains(&chunk_ids[0]));
+        assert_eq!(reachable.len(), 3);
     }
 
     #[test]
     fn test_collect_reachable_with_parents() {
         let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".shard/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join("objects")).unwrap();
         let store = Store::open(dir.path()).unwrap();
 
-        // Parent commit.
         let (parent_id, _, _) = store_commit_chain(
             &store,
             vec![],
             vec![("parent.txt", &[b"parent" as &[u8]])],
             1,
         );
-
-        // Child commit that lists the parent.
         let (child_id, _, _) = store_commit_chain(
             &store,
             vec![parent_id.clone()],
@@ -437,17 +460,16 @@ mod tests {
         let mut reachable = HashSet::new();
         collect_reachable(&store, &child_id, &mut HashSet::new(), &mut reachable).unwrap();
 
-        assert!(reachable.contains(&child_id), "child commit reachable");
-        assert!(reachable.contains(&parent_id), "parent commit reachable");
+        assert!(reachable.contains(&child_id));
+        assert!(reachable.contains(&parent_id));
     }
 
     #[test]
     fn test_collect_reachable_diamond_merge() {
         let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".shard/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join("objects")).unwrap();
         let store = Store::open(dir.path()).unwrap();
 
-        // root → left, right  →  merge
         let (root_id, _, _) =
             store_commit_chain(&store, vec![], vec![("root.txt", &[b"root" as &[u8]])], 1);
         let (left_id, _, _) = store_commit_chain(
@@ -479,64 +501,74 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_reachable_cycle_ignored() {
-        // If a commit lists itself as a parent (corrupt data),
-        // `seen_commits` should prevent infinite recursion.
-        let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".shard/objects")).unwrap();
-        let store = Store::open(dir.path()).unwrap();
+    fn test_gc_preserves_slashed_branch_and_partial_transfers() {
+        let (_dir, shard) = init_shard_repo();
+        let store = Store::open(&shard).unwrap();
 
-        // First store a normal commit to get its id.
-        let (c_id, _, _) =
-            store_commit_chain(&store, vec![], vec![("a.txt", &[b"data" as &[u8]])], 1);
+        let (c_main, _, _) =
+            store_commit_chain(&store, vec![], vec![("a.txt", &[b"main" as &[u8]])], 1);
+        let (c_feat, _, feat_chunks) =
+            store_commit_chain(&store, vec![], vec![("b.txt", &[b"feature" as &[u8]])], 2);
 
-        // Now store a commit that lists itself as parent by re-using c_id.
-        let self_ref = Commit {
-            commit_id: String::new(),
-            parents: vec![c_id.clone(), c_id.clone()], // self-reference via same id
-            manifests: vec![],
-            author: "test".into(),
-            message: "self".into(),
-            timestamp: 2,
-            public_key: None,
-            signature: None,
-            key_id: None,
-        };
-        let bytes = metadata::serialize(&self_ref, &MetadataFormat::Json);
-        let _self_id = hex_hash(&bytes);
-        store.put_chunk(&make_chunk(&bytes)).unwrap();
+        // Partial transfer chunk that is NOT referenced by any commit yet
+        let partial_chunk = make_chunk(b"in-flight transfer");
+        let partial_chunk_id = partial_chunk.hash.to_hex().to_string();
+        store.put_chunk(&partial_chunk).unwrap();
+        let partial_commit_id = "1".repeat(64);
+        let pt = partial::PartialTransfer::new(&shard, &partial_commit_id).unwrap();
+        pt.save_chunk(&partial_chunk_id, b"in-flight transfer")
+            .unwrap();
 
-        let mut reachable = HashSet::new();
-        // This should not loop infinitely.
-        let result = collect_reachable(&store, &c_id, &mut HashSet::new(), &mut reachable);
-        assert!(result.is_ok());
-        assert!(reachable.contains(&c_id));
+        // Orphan chunk
+        let orphan = make_chunk(b"orphan");
+        let orphan_id = orphan.hash.to_hex().to_string();
+        store.put_chunk(&orphan).unwrap();
+
+        branch::set_head_branch(&shard, "main").unwrap();
+        branch::update_branch_ref(&shard, "main", &c_main).unwrap();
+        branch::update_branch_ref(&shard, "feature/deep/branch", &c_feat).unwrap();
+
+        gc_inner(_dir.path(), false).unwrap();
+
+        assert!(store.has_chunk(&c_main));
+        assert!(store.has_chunk(&c_feat));
+        assert!(store.has_chunk(&feat_chunks[0]));
+        assert!(store.has_chunk(&partial_chunk_id));
+        assert!(!store.has_chunk(&orphan_id));
     }
 
-    // ── gc_inner ────────────────────────────────────────────────────────────
+    #[test]
+    fn test_gc_aborts_without_deleting_on_corrupt_ref() {
+        let (_dir, shard) = init_shard_repo();
+        let store = Store::open(&shard).unwrap();
+
+        let live = make_chunk(b"keep me");
+        let live_id = live.hash.to_hex().to_string();
+        store.put_chunk(&live).unwrap();
+
+        // Point HEAD to a missing commit
+        std::fs::write(shard.join("HEAD"), "f".repeat(64)).unwrap();
+
+        assert!(gc_inner(_dir.path(), false).is_err());
+        // Fail closed: NOTHING was deleted!
+        assert!(store.has_chunk(&live_id));
+    }
 
     #[test]
     fn test_gc_inner_non_shard_directory() {
         let dir = tempdir().unwrap();
-        // No .shard/ sub-directory.
         let result = gc_inner(dir.path(), false);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not a shard repository"),
-            "should reject non-shard dir"
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not a shard repository"));
     }
 
     #[test]
     fn test_gc_inner_empty_store() {
         let (_dir, _shard) = init_shard_repo();
-
-        // No HEAD, no branches, no tags, no index, no objects.
-        let result = gc_inner(_dir.path(), false);
-        assert!(result.is_ok(), "empty store should not fail");
+        assert!(gc_inner(_dir.path(), false).is_ok());
     }
 
     #[test]
@@ -544,15 +576,12 @@ mod tests {
         let (_dir, shard) = init_shard_repo();
         let store = Store::open(&shard).unwrap();
 
-        // Put some chunks but no HEAD / branch / tag points to them.
         let c = make_chunk(b"orphan data");
         let orphan_id = c.hash.to_hex().to_string();
         store.put_chunk(&c).unwrap();
 
-        // Run gc — since nothing is reachable the orphan should be removed.
         gc_inner(_dir.path(), false).unwrap();
-
-        assert!(!store.has_chunk(&orphan_id), "orphan must be pruned");
+        assert!(!store.has_chunk(&orphan_id));
     }
 
     #[test]
@@ -560,40 +589,24 @@ mod tests {
         let (_dir, shard) = init_shard_repo();
         let store = Store::open(&shard).unwrap();
 
-        // ── Reachable objects (referenced from HEAD) ──
         let (commit_id, manifest_ids, chunk_ids) = store_commit_chain(
             &store,
             vec![],
             vec![("keep.txt", &[b"keep data" as &[u8]])],
             1,
         );
+        std::fs::write(shard.join("HEAD"), &commit_id).unwrap();
 
-        // Point HEAD at the commit.
-        let head = shard.join("HEAD");
-        std::fs::write(&head, &commit_id).unwrap(); // detached HEAD
-
-        // ── Unreachable object (never referenced) ──
         let unreachable = make_chunk(b"dead data");
         let unreachable_id = unreachable.hash.to_hex().to_string();
         store.put_chunk(&unreachable).unwrap();
 
-        // Sanity: everything exists before GC.
+        gc_inner(_dir.path(), false).unwrap();
+
         assert!(store.has_chunk(&commit_id));
         assert!(store.has_chunk(&manifest_ids[0]));
         assert!(store.has_chunk(&chunk_ids[0]));
-        assert!(store.has_chunk(&unreachable_id));
-
-        gc_inner(_dir.path(), false).unwrap();
-
-        // Reachable objects survive.
-        assert!(store.has_chunk(&commit_id), "commit must survive");
-        assert!(store.has_chunk(&manifest_ids[0]), "manifest must survive");
-        assert!(store.has_chunk(&chunk_ids[0]), "data chunk must survive");
-        // Unreachable object is pruned.
-        assert!(
-            !store.has_chunk(&unreachable_id),
-            "unreachable must be pruned"
-        );
+        assert!(!store.has_chunk(&unreachable_id));
     }
 
     #[test]
@@ -601,144 +614,49 @@ mod tests {
         let (_dir, shard) = init_shard_repo();
         let store = Store::open(&shard).unwrap();
 
-        // Commit 1 – reachable via branch.
         let (c1_id, _, _) =
             store_commit_chain(&store, vec![], vec![("a.txt", &[b"alpha" as &[u8]])], 1);
-
-        // Commit 2 – reachable via tag only.
         let (c2_id, _, _) =
             store_commit_chain(&store, vec![], vec![("b.txt", &[b"beta" as &[u8]])], 2);
 
-        // Commit 3 – unreachable (no refs).
         let c3_chunk = make_chunk(b"gamma chunk");
         let c3_id = c3_chunk.hash.to_hex().to_string();
-        store.put_chunk(&c3_chunk).unwrap(); // just a blob, not a real commit
+        store.put_chunk(&c3_chunk).unwrap();
 
-        // Set up a branch pointing to c1.
         branch::set_head_branch(&shard, "main").unwrap();
         branch::update_branch_ref(&shard, "main", &c1_id).unwrap();
 
-        // Set up a tag pointing to c2.
         let mut tags: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
         tags.insert("v1".into(), c2_id.clone());
-        let tag_bytes = serde_json::to_vec_pretty(&tags).unwrap();
-        std::fs::write(shard.join("tags.json"), tag_bytes).unwrap();
+        std::fs::write(
+            shard.join("tags.json"),
+            serde_json::to_vec_pretty(&tags).unwrap(),
+        )
+        .unwrap();
 
-        // Run GC.
         assert!(gc_inner(_dir.path(), false).is_ok());
 
-        // c1 and c2 must survive.
-        assert!(store.has_chunk(&c1_id), "branch-tip must survive");
-        assert!(store.has_chunk(&c2_id), "tag-tip must survive");
-        // c3 (unreferenced blob) must be pruned.
-        assert!(!store.has_chunk(&c3_id), "unreferenced blob must be pruned");
+        assert!(store.has_chunk(&c1_id));
+        assert!(store.has_chunk(&c2_id));
+        assert!(!store.has_chunk(&c3_id));
     }
-
-    #[test]
-    fn test_gc_inner_multiple_branches() {
-        let (_dir, shard) = init_shard_repo();
-        let store = Store::open(&shard).unwrap();
-
-        // Create two commits with shared data chunks.
-        let data = b"shared data chunk";
-        let d = make_chunk(data);
-        let data_id = d.hash.to_hex().to_string();
-        store.put_chunk(&d).unwrap();
-
-        let manifest_a = FileManifest {
-            name: "a.txt".into(),
-            size: data.len() as u64,
-            chunks: vec![data_id.clone()],
-            content_type: None,
-            compression: "none".into(),
-            merkle_root: None,
-            created_by: None,
-            created_at: None,
-            signature: None,
-        };
-        let ma_bytes = metadata::serialize(&manifest_a, &MetadataFormat::Json);
-        let ma_id = hex_hash(&ma_bytes);
-        store.put_chunk(&make_chunk(&ma_bytes)).unwrap();
-
-        let commit_a = Commit {
-            commit_id: String::new(),
-            parents: vec![],
-            manifests: vec![ma_id.clone()],
-            author: "test".into(),
-            message: "A".into(),
-            timestamp: 1,
-            public_key: None,
-            signature: None,
-            key_id: None,
-        };
-        let ca_bytes = metadata::serialize(&commit_a, &MetadataFormat::Json);
-        let ca_id = hex_hash(&ca_bytes);
-        store.put_chunk(&make_chunk(&ca_bytes)).unwrap();
-
-        let commit_b = Commit {
-            commit_id: String::new(),
-            parents: vec![],
-            manifests: vec![ma_id.clone()], // same manifest → same data
-            author: "test".into(),
-            message: "B".into(),
-            timestamp: 2,
-            public_key: None,
-            signature: None,
-            key_id: None,
-        };
-        let cb_bytes = metadata::serialize(&commit_b, &MetadataFormat::Json);
-        let cb_id = hex_hash(&cb_bytes);
-        store.put_chunk(&make_chunk(&cb_bytes)).unwrap();
-
-        // Both branches.
-        branch::set_head_branch(&shard, "main").unwrap();
-        branch::update_branch_ref(&shard, "main", &ca_id).unwrap();
-        branch::update_branch_ref(&shard, "feature", &cb_id).unwrap();
-
-        // An unreachable blob.
-        let dead = make_chunk(b"dead");
-        let dead_id = dead.hash.to_hex().to_string();
-        store.put_chunk(&dead).unwrap();
-
-        gc_inner(_dir.path(), false).unwrap();
-
-        assert!(store.has_chunk(&ca_id), "commit A survives");
-        assert!(store.has_chunk(&cb_id), "commit B survives");
-        assert!(store.has_chunk(&ma_id), "shared manifest survives");
-        assert!(store.has_chunk(&data_id), "shared data chunk survives");
-        assert!(!store.has_chunk(&dead_id), "dead blob pruned");
-    }
-
-    // ── gc  (concurrency guard) ─────────────────────────────────────────────
 
     #[test]
     fn test_gc_concurrency_guard() {
         let (_dir, shard) = init_shard_repo();
         let store = Store::open(&shard).unwrap();
 
-        // Put a valid commit and set HEAD.
         let (c_id, _, _) = store_commit_chain(&store, vec![], vec![("x.txt", &[b"x" as &[u8]])], 1);
         std::fs::write(shard.join("HEAD"), &c_id).unwrap();
 
-        // First call succeeds.
         assert!(gc(_dir.path(), false).is_ok());
-
-        // The guard was released after the first call, so a second call also
-        // succeeds.  (We test the guard by checking that concurrent calls via
-        // the atomic are properly serialized.)
         assert!(gc(_dir.path(), false).is_ok());
     }
 
-    // ── Serialization (JSON output path) ────────────────────────────────────
-
-    /// Check that gc_inner with `json = true` doesn't crash (the JSON branch
-    /// uses `info!` which goes through tracing).  We just verify no error.
     #[test]
     fn test_gc_inner_json_output() {
         let (_dir, _shard) = init_shard_repo();
-        // No objects, no HEAD → pruned=0, remaining=0.
-        let result = gc_inner(_dir.path(), true);
-        assert!(result.is_ok());
+        assert!(gc_inner(_dir.path(), true).is_ok());
     }
 }

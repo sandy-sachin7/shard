@@ -1,4 +1,5 @@
 use crate::chunker::Chunk;
+use crate::fs_util::validate_object_id;
 use anyhow::Result;
 use shard_storage::{open_backend, StorageBackend};
 use std::path::Path;
@@ -16,36 +17,55 @@ impl SqliteStore {
 
     pub fn put_chunk(&self, chunk: &Chunk) -> Result<()> {
         let hash_hex = chunk.hash.to_hex().to_string();
+        validate_object_id(&hash_hex)?;
         if !self.backend.contains(hash_hex.as_bytes())? {
             self.backend.put(hash_hex.as_bytes(), &chunk.data)?;
         }
         Ok(())
     }
 
+    pub fn put_chunk_overwrite(&self, chunk: &Chunk) -> Result<()> {
+        let hash_hex = chunk.hash.to_hex().to_string();
+        validate_object_id(&hash_hex)?;
+        self.backend.put(hash_hex.as_bytes(), &chunk.data)?;
+        Ok(())
+    }
+
     pub fn get_chunk(&self, hash_hex: &str) -> Result<Vec<u8>> {
+        validate_object_id(hash_hex)?;
         self.backend
             .get(hash_hex.as_bytes())?
             .ok_or_else(|| anyhow::anyhow!("Chunk not found: {}", hash_hex))
     }
 
     pub fn has_chunk(&self, hash_hex: &str) -> bool {
+        if validate_object_id(hash_hex).is_err() {
+            return false;
+        }
         self.backend.contains(hash_hex.as_bytes()).unwrap_or(false)
     }
 
+    /// Returns object IDs via key-only query (`SELECT key FROM shard_store`).
     pub fn iter_chunks(&self) -> Result<Vec<(String, String)>> {
-        let results = self.backend.iter_prefix(b"")?;
-        Ok(results
+        let keys = self.backend.iter_keys(b"")?;
+        Ok(keys
             .into_iter()
-            .map(|(k, _)| {
-                let hash = String::from_utf8_lossy(&k).to_string();
-                (hash.clone(), hash)
+            .filter_map(|k| {
+                let hash = String::from_utf8(k).ok()?;
+                validate_object_id(&hash).ok()?;
+                Some((hash.clone(), hash))
             })
             .collect())
     }
 
     pub fn delete_chunk(&self, hash_hex: &str, _full_path: Option<&str>) -> Result<()> {
+        validate_object_id(hash_hex)?;
         self.backend.delete(hash_hex.as_bytes())?;
         Ok(())
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        self.backend.flush()
     }
 }
 
@@ -79,8 +99,8 @@ mod tests {
     fn test_sqlite_get_nonexistent() {
         let dir = tempdir().unwrap();
         let store = SqliteStore::new(dir.path()).unwrap();
-        let result = store.get_chunk("nonexistent");
-        assert!(result.is_err());
+        assert!(store.get_chunk("nonexistent").is_err());
+        assert!(store.get_chunk(&"0".repeat(64)).is_err());
     }
 
     #[test]

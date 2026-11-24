@@ -1,4 +1,5 @@
-/target
+target/
+python/shard-py/Cargo.lock
 
 # Rust build artifacts
 **/*.rs.bk

@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -9,17 +10,46 @@ fn shard_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_shard"))
 }
 
-fn repo_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("shard-tests").join(name);
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+struct TempRepo {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl Deref for TempRepo {
+    type Target = Path;
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempRepo {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn repo_dir(_name: &str) -> TempRepo {
+    let dir = tempfile::tempdir().expect("failed to create temp repo dir");
+    let path = dir.path().to_path_buf();
+    TempRepo { _dir: dir, path }
 }
 
 fn shard(args: &[&str], cwd: &Path) -> Command {
     let mut cmd = Command::new(shard_bin());
     cmd.args(args).current_dir(cwd);
     cmd
+}
+
+fn shard_ok(args: &[&str], cwd: &Path) -> std::process::Output {
+    let out = shard(args, cwd).output().unwrap();
+    assert!(
+        out.status.success(),
+        "shard {:?} failed:\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
 }
 
 #[test]
@@ -638,26 +668,22 @@ fn test_init_private_sets_config() {
 }
 
 #[test]
-#[ignore = "flaky — P2P race condition in test environment"]
 fn test_three_node_pull() {
     let dir_a = repo_dir("3node-a");
     let dir_b = repo_dir("3node-b");
     let dir_c = repo_dir("3node-c");
 
     // Setup node A: init, add, commit
-    shard(&["init"], &dir_a).output().unwrap();
+    shard_ok(&["init"], &dir_a);
     fs::write(dir_a.join("data.txt"), b"shared data").unwrap();
-    shard(&["add", "data.txt"], &dir_a).output().unwrap();
-    let out = shard(&["commit", "-m", "shared", "--author", "T"], &dir_a)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
+    shard_ok(&["add", "data.txt"], &dir_a);
+    let out = shard_ok(&["commit", "-m", "shared", "--author", "T"], &dir_a);
     let stdout = String::from_utf8(out.stdout).unwrap();
     let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
 
-    // Start share on node A in background, pipe stdout to capture peer ID + listen addr
+    // Start share on node A bound to loopback
     let mut child = Command::new(shard_bin())
-        .arg("share")
+        .args(["share", "--listen", "/ip4/127.0.0.1/tcp/0"])
         .current_dir(&dir_a)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -669,21 +695,22 @@ fn test_three_node_pull() {
     std::thread::spawn(move || {
         let mut peer_id = String::new();
         let mut listen_addr = String::new();
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            if let Some(id) = line.strip_prefix("Local peer id: ") {
-                peer_id = id.to_string();
-            }
-            if let Some(addr) = line.strip_prefix("Listening on ") {
-                listen_addr = addr.trim().trim_matches('"').to_string();
-            }
-            if !peer_id.is_empty() && !listen_addr.is_empty() {
-                let _ = tx.send((peer_id.clone(), listen_addr.clone()));
-                peer_id.clear();
-                listen_addr.clear();
+        let mut sent = false;
+        for line in reader.lines().map_while(Result::ok) {
+            if !sent {
+                if let Some(id) = line.strip_prefix("Local peer id: ") {
+                    peer_id = id.trim().to_string();
+                }
+                if let Some(addr) = line.strip_prefix("Listening on ") {
+                    let candidate = addr.trim().trim_matches('"').to_string();
+                    if candidate.contains("/ip4/127.0.0.1/") {
+                        listen_addr = candidate;
+                    }
+                }
+                if !peer_id.is_empty() && !listen_addr.is_empty() {
+                    let _ = tx.send((peer_id.clone(), listen_addr.clone()));
+                    sent = true;
+                }
             }
         }
     });
@@ -694,14 +721,7 @@ fn test_three_node_pull() {
     let multiaddr = format!("{}/p2p/{}", listen_addr, peer_id);
 
     // Node B pulls from A
-    let out = shard(&["pull", &multiaddr, &commit_id], &dir_b)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "B pull failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    shard_ok(&["pull", &multiaddr, &commit_id], &dir_b);
     assert!(dir_b.join("data.txt").exists());
     assert_eq!(
         fs::read_to_string(dir_b.join("data.txt")).unwrap(),
@@ -709,14 +729,7 @@ fn test_three_node_pull() {
     );
 
     // Node C pulls from A
-    let out = shard(&["pull", &multiaddr, &commit_id], &dir_c)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "C pull failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    shard_ok(&["pull", &multiaddr, &commit_id], &dir_c);
     assert!(dir_c.join("data.txt").exists());
     assert_eq!(
         fs::read_to_string(dir_c.join("data.txt")).unwrap(),
@@ -729,19 +742,15 @@ fn test_three_node_pull() {
 }
 
 #[test]
-#[ignore = "flaky: race condition in P2P auto-pull causes wrong commit to be selected"]
 fn test_sync_auto_pull() {
     let dir_a = repo_dir("sync-a");
     let dir_b = repo_dir("sync-b");
 
     // Setup node A: init, add, commit
-    shard(&["init"], &dir_a).output().unwrap();
+    shard_ok(&["init"], &dir_a);
     fs::write(dir_a.join("shared.txt"), b"sync test data").unwrap();
-    shard(&["add", "shared.txt"], &dir_a).output().unwrap();
-    let out = shard(&["commit", "-m", "sync-test", "--author", "T"], &dir_a)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
+    shard_ok(&["add", "shared.txt"], &dir_a);
+    let out = shard_ok(&["commit", "-m", "sync-test", "--author", "T"], &dir_a);
     let stdout = String::from_utf8(out.stdout).unwrap();
     let commit_id = stdout.split_whitespace().nth(1).unwrap().to_string();
 
@@ -750,7 +759,7 @@ fn test_sync_auto_pull() {
         .arg("sync")
         .current_dir(&dir_a)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("failed to start sync A");
 
@@ -759,21 +768,23 @@ fn test_sync_auto_pull() {
     std::thread::spawn(move || {
         let mut peer_id = String::new();
         let mut listen_addr = String::new();
-        for line in reader_a.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            if let Some(id) = line.strip_prefix("Local peer id: ") {
-                peer_id = id.to_string();
-            }
-            if let Some(addr) = line.strip_prefix("Listening on ") {
-                listen_addr = addr.trim().trim_matches('"').to_string();
-            }
-            if !peer_id.is_empty() && !listen_addr.is_empty() {
-                let _ = tx_a.send((peer_id.clone(), listen_addr.clone()));
-                peer_id.clear();
-                listen_addr.clear();
+        let mut sent = false;
+        // Keep draining stdout until EOF so child_a never gets SIGPIPE on subsequent NewListenAddr prints!
+        for line in reader_a.lines().map_while(Result::ok) {
+            if !sent {
+                if let Some(id) = line.strip_prefix("Local peer id: ") {
+                    peer_id = id.trim().to_string();
+                }
+                if let Some(addr) = line.strip_prefix("Listening on ") {
+                    let candidate = addr.trim().trim_matches('"').to_string();
+                    if candidate.contains("/ip4/127.0.0.1/") {
+                        listen_addr = candidate;
+                    }
+                }
+                if !peer_id.is_empty() && !listen_addr.is_empty() {
+                    let _ = tx_a.send((peer_id.clone(), listen_addr.clone()));
+                    sent = true;
+                }
             }
         }
     });
@@ -783,68 +794,39 @@ fn test_sync_auto_pull() {
         .expect("timed out waiting for sync A output");
     let multiaddr_a = format!("{}/p2p/{}", listen_addr_a, peer_id_a);
 
-    // Configure B with A's address as a peer
-    shard(&["init"], &dir_b).output().unwrap();
-    // Copy A's repo_id so both repos share the same gossipsub topic
+    // Configure B with A's repo_id and peer address
+    shard_ok(&["init"], &dir_b);
     let a_config: std::collections::BTreeMap<String, String> =
         serde_json::from_slice(&fs::read(dir_a.join(".shard/config.json")).unwrap()).unwrap();
     let repo_id = a_config.get("repo_id").expect("A has repo_id");
-    let out = shard(&["config", "set", "repo_id", repo_id], &dir_b)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "config set repo_id failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let out = shard(&["peer", "add", &multiaddr_a], &dir_b)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "peer add failed");
+    shard_ok(&["config", "set", "repo_id", repo_id], &dir_b);
+    shard_ok(&["peer", "add", &multiaddr_a], &dir_b);
 
     // Start sync on B in background
     let mut child_b = Command::new(shard_bin())
         .arg("sync")
         .current_dir(&dir_b)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("failed to start sync B");
 
     let reader_b = BufReader::new(child_b.stdout.take().unwrap());
-    let stderr_b = child_b.stderr.take().unwrap();
     let (tx_b, rx_b) = mpsc::channel();
     std::thread::spawn(move || {
-        let stderr_reader = BufReader::new(stderr_b);
-        let stderr_tx = tx_b.clone();
-        std::thread::spawn(move || {
-            for l in stderr_reader.lines().map_while(Result::ok) {
-                eprintln!("[sync-B stderr] {}", l);
-                if l.contains("auto-pull") || l.contains("Auto-pull") || l.contains("announce") {
-                    let _ = stderr_tx.send(format!("stderr:{}", l));
-                }
-            }
-        });
-        for line in reader_b.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            eprintln!("[sync-B stdout] {}", line);
-            if line.starts_with("Auto-pulled commit") {
+        let mut sent = false;
+        for line in reader_b.lines().map_while(Result::ok) {
+            if !sent && line.starts_with("Auto-pulled commit") {
                 let _ = tx_b.send(line);
+                sent = true;
             }
         }
     });
 
     // Wait for B to auto-pull
-    let result = rx_b.recv_timeout(Duration::from_secs(60));
-    assert!(
-        result.is_ok(),
-        "B did not auto-pull commit within timeout: {:?}",
-        result.err()
-    );
-    let msg = result.unwrap();
+    let msg = rx_b
+        .recv_timeout(Duration::from_secs(30))
+        .expect("B did not auto-pull commit within timeout");
     assert!(msg.contains(&commit_id), "auto-pulled wrong commit: {msg}");
 
     // Verify file was pulled
@@ -1586,12 +1568,393 @@ fn test_cbor_mixed_format_compat() {
     assert!(stdout.contains(&c2[..8]));
 
     // Diff should work between the two
-    let out = shard(&["diff", &c1, &c2], &dir).output().unwrap();
-    assert!(
-        out.status.success(),
-        "diff between JSON and CBOR commits failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = shard_ok(&["diff", &c1, &c2], &dir);
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("f1.txt") || stdout.contains("f2.txt"));
+}
+
+fn spawn_share(repo: &Path) -> (std::process::Child, String) {
+    let mut child = Command::new(shard_bin())
+        .args(["share", "--listen", "/ip4/127.0.0.1/tcp/0"])
+        .current_dir(repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start share");
+
+    let reader = BufReader::new(child.stdout.take().unwrap());
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut peer_id = String::new();
+        let mut listen_addr = String::new();
+        let mut sent = false;
+        for line in reader.lines().map_while(Result::ok) {
+            if !sent {
+                if let Some(id) = line.strip_prefix("Local peer id: ") {
+                    peer_id = id.trim().to_string();
+                }
+                if let Some(addr) = line.strip_prefix("Listening on ") {
+                    let candidate = addr.trim().trim_matches('"').to_string();
+                    if candidate.contains("/ip4/127.0.0.1/") {
+                        listen_addr = candidate;
+                    }
+                }
+                if !peer_id.is_empty() && !listen_addr.is_empty() {
+                    let _ = tx.send(format!("{}/p2p/{}", listen_addr, peer_id));
+                    sent = true;
+                }
+            }
+        }
+    });
+
+    let multiaddr = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("timed out waiting for share multiaddr");
+    (child, multiaddr)
+}
+
+#[test]
+fn test_p2p_auth_authorized_succeeds_and_unauthorized_denied() {
+    let dir_a = repo_dir("auth-a");
+    let dir_b = repo_dir("auth-b");
+    let dir_c = repo_dir("auth-c");
+
+    shard_ok(&["init"], &dir_a);
+    shard_ok(&["init"], &dir_b);
+    shard_ok(&["init"], &dir_c);
+
+    // Authorize B's public key on A (C is NOT authorized)
+    let b_pub = fs::read(dir_b.join(".shard/keys/public.key")).unwrap();
+    let b_pub_hex: String = b_pub.iter().map(|b| format!("{:02x}", b)).collect();
+    shard_ok(&["key", "add-authorized", &b_pub_hex], &dir_a);
+
+    fs::write(dir_a.join("restricted.txt"), b"authorized payload").unwrap();
+    shard_ok(&["add", "restricted.txt"], &dir_a);
+    let out = shard_ok(&["commit", "-m", "restricted", "--author", "A"], &dir_a);
+    let commit_id = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    let (mut child, multiaddr) = spawn_share(&dir_a);
+
+    // Authorized peer B succeeds
+    shard_ok(&["pull", &multiaddr, &commit_id], &dir_b);
+    assert_eq!(
+        fs::read_to_string(dir_b.join("restricted.txt")).unwrap(),
+        "authorized payload"
+    );
+
+    // Unauthorized peer C must be denied
+    let c_out = shard(&["pull", &multiaddr, &commit_id], &dir_c)
+        .output()
+        .unwrap();
+    assert!(
+        !c_out.status.success(),
+        "unauthorized peer C should have been denied"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn test_p2p_push_and_pull_zstd_and_private_with_resume() {
+    // 1. Default zstd push & pull
+    let dir_src = repo_dir("push-zstd-src");
+    let dir_dst = repo_dir("push-zstd-dst");
+    shard_ok(&["init", "--compression", "zstd"], &dir_src);
+    shard_ok(&["init", "--compression", "zstd"], &dir_dst);
+
+    let big_payload = b"zstd push pull payload data! ".repeat(2048);
+    fs::write(dir_src.join("weights.bin"), &big_payload).unwrap();
+    shard_ok(&["add", "weights.bin"], &dir_src);
+    let out = shard_ok(&["commit", "-m", "zstd-push", "--author", "S"], &dir_src);
+    let cid = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    let (mut dst_server, dst_addr) = spawn_share(&dir_dst);
+    shard_ok(&["push", &dst_addr], &dir_src);
+    let _ = dst_server.kill();
+    let _ = dst_server.wait();
+
+    // Checkout on destination proves pushed zstd chunks are intact!
+    shard_ok(&["checkout", &cid], &dir_dst);
+    assert_eq!(fs::read(dir_dst.join("weights.bin")).unwrap(), big_payload);
+
+    // 2. Private (--private) encrypted push & pull + partial resume!
+    let priv_a = repo_dir("priv-a");
+    let priv_b = repo_dir("priv-b");
+    shard_ok(&["init", "--private", "--compression", "zstd"], &priv_a);
+    shard_ok(&["init", "--private", "--compression", "zstd"], &priv_b);
+    // Share repo.key between private cluster peers
+    fs::copy(
+        priv_a.join(".shard/keys/repo.key"),
+        priv_b.join(".shard/keys/repo.key"),
+    )
+    .unwrap();
+
+    let secret_payload = b"top secret encrypted tensor data! ".repeat(1024);
+    fs::write(priv_a.join("model.safetensors"), &secret_payload).unwrap();
+    shard_ok(&["add", "model.safetensors"], &priv_a);
+    let out = shard_ok(&["commit", "-m", "priv-commit", "--author", "A"], &priv_a);
+    let priv_cid = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    // Pre-populate partial/ on priv_b with the encrypted chunk to test resume recovery!
+    let chunk_hash = format!("{}", blake3::hash(&secret_payload).to_hex());
+    let src_chunk_file = priv_a
+        .join(".shard/objects")
+        .join(&chunk_hash[..2])
+        .join(&chunk_hash);
+    let partial_dir = priv_b.join(".shard/partial").join(&priv_cid);
+    fs::create_dir_all(&partial_dir).unwrap();
+    fs::copy(&src_chunk_file, partial_dir.join(&chunk_hash)).unwrap();
+
+    let (mut priv_server, priv_addr) = spawn_share(&priv_a);
+    let pull_out = shard_ok(&["pull", &priv_addr, &priv_cid], &priv_b);
+    let pull_stdout = String::from_utf8(pull_out.stdout).unwrap();
+    assert!(
+        pull_stdout.contains("Recovered 1 chunks from partial transfer"),
+        "expected partial resume recovery, got: {}",
+        pull_stdout
+    );
+    assert_eq!(
+        fs::read(priv_b.join("model.safetensors")).unwrap(),
+        secret_payload
+    );
+    let _ = priv_server.kill();
+    let _ = priv_server.wait();
+
+    // Push private commit from priv_a to a fresh priv_c sharing repo.key
+    let priv_c = repo_dir("priv-c");
+    shard_ok(&["init", "--private", "--compression", "zstd"], &priv_c);
+    fs::copy(
+        priv_a.join(".shard/keys/repo.key"),
+        priv_c.join(".shard/keys/repo.key"),
+    )
+    .unwrap();
+    let (mut priv_c_server, priv_c_addr) = spawn_share(&priv_c);
+    shard_ok(&["push", &priv_c_addr], &priv_a);
+    let _ = priv_c_server.kill();
+    let _ = priv_c_server.wait();
+    shard_ok(&["checkout", &priv_cid], &priv_c);
+    assert_eq!(
+        fs::read(priv_c.join("model.safetensors")).unwrap(),
+        secret_payload
+    );
+}
+
+#[test]
+fn test_merge_zstd_preserves_compression_and_detects_conflicts() {
+    let dir = repo_dir("merge-zstd");
+    shard_ok(&["init", "--compression", "zstd"], &dir);
+
+    fs::write(dir.join("base.txt"), b"base content").unwrap();
+    shard_ok(&["add", "base.txt"], &dir);
+    shard_ok(&["commit", "-m", "base", "--author", "T"], &dir);
+
+    // Clean 3-way merge branch
+    shard_ok(&["branch", "create", "feature/clean"], &dir);
+    shard_ok(&["checkout", "feature/clean"], &dir);
+    fs::write(dir.join("feat.txt"), b"feature content").unwrap();
+    shard_ok(&["add", "feat.txt"], &dir);
+    shard_ok(&["commit", "-m", "add feat", "--author", "T"], &dir);
+
+    shard_ok(&["checkout", "main"], &dir);
+    fs::write(dir.join("main2.txt"), b"main2 content").unwrap();
+    shard_ok(&["add", "main2.txt"], &dir);
+    shard_ok(&["commit", "-m", "add main2", "--author", "T"], &dir);
+
+    let out = shard_ok(
+        &[
+            "merge",
+            "feature/clean",
+            "-m",
+            "merge clean",
+            "--author",
+            "T",
+        ],
+        &dir,
+    );
+    let merge_cid = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(2)
+        .unwrap()
+        .to_string();
+
+    // Verify AND checkout merge commit — must reconstruct exact plaintext (NOT raw zstd bytes!)
+    shard_ok(&["verify", &merge_cid], &dir);
+    let _ = fs::remove_file(dir.join("base.txt"));
+    let _ = fs::remove_file(dir.join("feat.txt"));
+    let _ = fs::remove_file(dir.join("main2.txt"));
+    shard_ok(&["checkout", &merge_cid], &dir);
+    assert_eq!(
+        fs::read_to_string(dir.join("base.txt")).unwrap(),
+        "base content"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("feat.txt")).unwrap(),
+        "feature content"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("main2.txt")).unwrap(),
+        "main2 content"
+    );
+
+    // Conflicting 3-way merge must fail with clear conflict error!
+    shard_ok(&["checkout", "main"], &dir);
+    shard_ok(&["branch", "create", "feature/conflict"], &dir);
+    shard_ok(&["checkout", "feature/conflict"], &dir);
+    fs::write(dir.join("base.txt"), b"theirs version").unwrap();
+    shard_ok(&["add", "base.txt"], &dir);
+    shard_ok(&["commit", "-m", "theirs edit", "--author", "T"], &dir);
+
+    shard_ok(&["checkout", "main"], &dir);
+    fs::write(dir.join("base.txt"), b"ours version").unwrap();
+    shard_ok(&["add", "base.txt"], &dir);
+    shard_ok(&["commit", "-m", "ours edit", "--author", "T"], &dir);
+
+    let conflict = shard(
+        &[
+            "merge",
+            "feature/conflict",
+            "-m",
+            "should conflict",
+            "--author",
+            "T",
+        ],
+        &dir,
+    )
+    .output()
+    .unwrap();
+    assert!(!conflict.status.success(), "conflicting merge must fail");
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        stderr.contains("conflict") && stderr.contains("base.txt"),
+        "expected merge conflict listing base.txt, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_branch_traversal_rejected_and_gc_preserves_slashed_branch() {
+    let dir = repo_dir("slashed-branch-gc");
+    shard_ok(&["init"], &dir);
+    fs::write(dir.join("a.txt"), b"alpha").unwrap();
+    shard_ok(&["add", "a.txt"], &dir);
+    shard_ok(&["commit", "-m", "c1", "--author", "T"], &dir);
+
+    // Branch traversal must be rejected
+    let bad = shard(&["branch", "create", "../pwned"], &dir)
+        .output()
+        .unwrap();
+    assert!(!bad.status.success(), "branch traversal must fail");
+
+    // Slashed branch works and survives GC!
+    shard_ok(&["branch", "create", "feature/models/v1"], &dir);
+    shard_ok(&["checkout", "feature/models/v1"], &dir);
+    fs::write(dir.join("nested/weights.bin"), b"branch-only weights").unwrap_or_else(|_| {
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested/weights.bin"), b"branch-only weights").unwrap();
+    });
+    shard_ok(&["add", "nested/weights.bin"], &dir);
+    let out = shard_ok(&["commit", "-m", "feat commit", "--author", "T"], &dir);
+    let feat_cid = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    // Switch back to main and run GC — feature/models/v1 commit must NOT be deleted!
+    shard_ok(&["checkout", "main"], &dir);
+    shard_ok(&["prune"], &dir);
+    shard_ok(&["verify", &feat_cid], &dir);
+}
+
+#[test]
+fn test_key_verify_json_exits_nonzero_on_tamper() {
+    let dir = repo_dir("key-verify-json-exit");
+    shard_ok(&["init"], &dir);
+    shard_ok(&["key", "rotate"], &dir);
+
+    let rot_dir = dir.join(".shard/keys/rotations");
+    for entry in fs::read_dir(&rot_dir).unwrap() {
+        let entry = entry.unwrap();
+        let mut obj: serde_json::Value =
+            serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
+        obj["signature_hex"] = serde_json::Value::String("00".repeat(64));
+        fs::write(entry.path(), serde_json::to_string_pretty(&obj).unwrap()).unwrap();
+    }
+
+    let out = shard(&["key", "verify", "--json"], &dir).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "key verify --json must exit non-zero on tampered rotation"
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must still be valid JSON");
+    assert_eq!(v["verified"], false);
+}
+
+#[test]
+fn test_commit_snapshot_and_sled_import_preserve_subdirs() {
+    let dir = repo_dir("sled-import-snapshot");
+    shard_ok(&["init", "--db", "sled"], &dir);
+
+    let import_src = tempfile::tempdir().unwrap();
+    fs::create_dir_all(import_src.path().join("sub/dir")).unwrap();
+    fs::write(import_src.path().join("root.txt"), b"root").unwrap();
+    fs::write(import_src.path().join("sub/dir/leaf.txt"), b"leaf").unwrap();
+
+    // Sled import must NOT fail with exclusive lock double-open, and must preserve subdirs!
+    shard_ok(
+        &[
+            "import",
+            import_src.path().to_str().unwrap(),
+            "-m",
+            "imported",
+            "--author",
+            "T",
+        ],
+        &dir,
+    );
+
+    // Add a second file and commit — unmodified imported files must be carried forward!
+    fs::write(dir.join("extra.txt"), b"extra").unwrap();
+    shard_ok(&["add", "extra.txt"], &dir);
+    let out = shard_ok(&["commit", "-m", "second", "--author", "T"], &dir);
+    let cid2 = String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    let exported = tempfile::tempdir().unwrap();
+    shard_ok(&["export", &cid2, exported.path().to_str().unwrap()], &dir);
+    assert_eq!(
+        fs::read_to_string(exported.path().join("root.txt")).unwrap(),
+        "root"
+    );
+    assert_eq!(
+        fs::read_to_string(exported.path().join("sub/dir/leaf.txt")).unwrap(),
+        "leaf"
+    );
+    assert_eq!(
+        fs::read_to_string(exported.path().join("extra.txt")).unwrap(),
+        "extra"
+    );
 }

@@ -47,6 +47,14 @@ impl Store {
         }
     }
 
+    pub fn put_chunk_overwrite(&self, chunk: &Chunk) -> Result<()> {
+        match self {
+            Store::Flat(s) => s.put_chunk_overwrite(chunk),
+            Store::Sled(s) => s.put_chunk_overwrite(chunk),
+            Store::Sqlite(s) => s.put_chunk_overwrite(chunk),
+        }
+    }
+
     pub fn get_chunk(&self, hash_hex: &str) -> Result<Vec<u8>> {
         match self {
             Store::Flat(s) => s.get_chunk(hash_hex),
@@ -76,6 +84,14 @@ impl Store {
             Store::Flat(s) => s.delete_chunk(hash_hex, full_path),
             Store::Sled(s) => s.delete_chunk(hash_hex, full_path),
             Store::Sqlite(s) => s.delete_chunk(hash_hex, full_path),
+        }
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        match self {
+            Store::Flat(s) => s.flush(),
+            Store::Sled(s) => s.flush(),
+            Store::Sqlite(s) => s.flush(),
         }
     }
 }

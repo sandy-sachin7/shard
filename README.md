@@ -250,7 +250,7 @@ export SHARD_GC_ENABLED=true           # enables auto-GC
 export SHARD_RATE_LIMIT_MAX_REQUESTS=100  # P2P rate limit
 ```
 
-Supported config keys: `storage_backend` (flat/sled/sqlite), `compression` (none/zstd/gzip), `chunker_mode` (fixed/rabin), `chunk_size`, `rate_limit_max_requests`, `rate_limit_window_secs`, `gc_enabled`, `gc_interval_secs`.
+Supported config keys: `storage_backend` (`flat`/`sled`/`sqlite`), `compression` (`none`/`zstd`/`zlib`), `chunker_mode` (`fixed`/`rabin`), `chunk_size`, `rate_limit_max_requests`, `rate_limit_window_secs`, `gc_enabled`, `gc_interval_secs`.
 
 ### Concurrency Control
 
@@ -313,8 +313,10 @@ shard health --json
 ### HTTP API
 
 ```bash
+export SHARD_API_TOKEN="$(openssl rand -hex 32)"
 shard serve --addr 127.0.0.1:8080
-curl http://127.0.0.1:8080/api/v1/health
+curl http://127.0.0.1:8080/health
+curl -H "Authorization: Bearer $SHARD_API_TOKEN" http://127.0.0.1:8080/api/v1/status
 ```
 
 ---

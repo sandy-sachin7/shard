@@ -4,12 +4,20 @@ use clap_complete::{generate, Shell};
 use std::env;
 use std::io;
 use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[arg(global = true, long, default_value = "plain", value_parser = ["plain", "json"])]
     log_format: String,
+    #[arg(
+        global = true,
+        short,
+        long,
+        help = "Enable verbose debug logging to stderr"
+    )]
+    verbose: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -29,7 +37,10 @@ enum Commands {
         chunk_size: Option<u64>,
         #[arg(long)]
         json: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Encrypt signing and repo keys with passphrase (prefer SHARD_PASSPHRASE env var to avoid process-list exposure)"
+        )]
         passphrase: Option<String>,
     },
     Add {
@@ -49,6 +60,8 @@ enum Commands {
         commit_id: String,
         #[arg(long)]
         json: bool,
+        #[arg(long, help = "Allow verifying legacy unsigned commits")]
+        allow_unsigned: bool,
     },
     Branch {
         #[command(subcommand)]
@@ -175,8 +188,11 @@ enum Commands {
         json: bool,
     },
     Unlock {
-        #[arg(long)]
-        passphrase: String,
+        #[arg(
+            long,
+            help = "Verify repository passphrase (prefer setting SHARD_PASSPHRASE env var for stateless CLI sessions)"
+        )]
+        passphrase: Option<String>,
     },
     Completions {
         shell: String,
@@ -260,14 +276,20 @@ enum PeerCommands {
 enum HfCommands {
     Push {
         dataset_id: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "HuggingFace API token (prefer HF_TOKEN env var to avoid process-list exposure)"
+        )]
         token: Option<String>,
         #[arg(long)]
         json: bool,
     },
     Pull {
         dataset_id: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "HuggingFace API token (prefer HF_TOKEN env var to avoid process-list exposure)"
+        )]
         token: Option<String>,
         #[arg(long)]
         json: bool,
@@ -278,16 +300,29 @@ enum HfCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Route ALL diagnostic tracing logs strictly to stderr so stdout stays clean data/JSON.
+    let filter = if cli.verbose {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    };
+
     match cli.log_format.as_str() {
         "json" => {
-            tracing_subscriber::fmt().json().with_ansi(false).init();
+            tracing_subscriber::fmt()
+                .json()
+                .with_ansi(false)
+                .with_env_filter(filter)
+                .with_writer(io::stderr)
+                .init();
         }
         _ => {
             tracing_subscriber::fmt()
                 .with_ansi(false)
                 .without_time()
                 .with_target(false)
-                .with_level(false)
+                .with_env_filter(filter)
+                .with_writer(io::stderr)
                 .init();
         }
     }
@@ -303,7 +338,8 @@ async fn main() -> Result<()> {
             passphrase,
         } => {
             let current_dir = env::current_dir()?;
-            let pass = passphrase.as_deref().unwrap_or("");
+            let env_pass = env::var("SHARD_PASSPHRASE").ok();
+            let pass = passphrase.as_deref().or(env_pass.as_deref()).unwrap_or("");
             shard_core::init_with_passphrase(
                 &current_dir,
                 db,
@@ -325,11 +361,15 @@ async fn main() -> Result<()> {
             json,
         } => {
             let current_dir = env::current_dir()?;
-            shard_core::commit(&current_dir, message, author, *json)?;
+            let _ = shard_core::commit(&current_dir, message, author, *json)?;
         }
-        Commands::Verify { commit_id, json } => {
+        Commands::Verify {
+            commit_id,
+            json,
+            allow_unsigned,
+        } => {
             let current_dir = env::current_dir()?;
-            shard_core::verify(&current_dir, commit_id, *json)?;
+            shard_core::verify_with_options(&current_dir, commit_id, *json, *allow_unsigned)?;
         }
         Commands::Branch { command } => match command {
             BranchCommands::Create { name, commit_id } => {
@@ -512,8 +552,19 @@ async fn main() -> Result<()> {
             shard_core::api::serve(&current_dir, addr, *json).await?;
         }
         Commands::Unlock { passphrase } => {
-            shard_core::cache_passphrase(passphrase)?;
-            eprintln!("Passphrase cached for this session.");
+            let current_dir = env::current_dir()?;
+            let env_pass = env::var("SHARD_PASSPHRASE").ok();
+            let pass = passphrase
+                .as_deref()
+                .or(env_pass.as_deref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no passphrase provided (pass --passphrase or set SHARD_PASSPHRASE)"
+                    )
+                })?;
+            shard_core::unlock_repo(&current_dir, pass)?;
+            println!("Passphrase verified against repository keys.");
+            eprintln!("Note: CLI commands run in separate processes. Export SHARD_PASSPHRASE in your shell to authenticate subsequent CLI invocations.");
         }
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
@@ -527,7 +578,9 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 let current_dir = env::current_dir()?;
-                shard_core::hf_push(&current_dir, dataset_id, token.as_deref(), *json)?;
+                let env_token = env::var("HF_TOKEN").ok();
+                let effective = token.as_deref().or(env_token.as_deref());
+                shard_core::hf_push(&current_dir, dataset_id, effective, *json)?;
             }
             HfCommands::Pull {
                 dataset_id,
@@ -535,7 +588,9 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 let current_dir = env::current_dir()?;
-                shard_core::hf_pull(&current_dir, dataset_id, token.as_deref(), *json)?;
+                let env_token = env::var("HF_TOKEN").ok();
+                let effective = token.as_deref().or(env_token.as_deref());
+                shard_core::hf_pull(&current_dir, dataset_id, effective, *json)?;
             }
         },
     }

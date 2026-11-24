@@ -1,89 +1,50 @@
+use crate::chunker::Chunk;
+use crate::fs_util::{atomic_write, fsync_dir, validate_object_id};
 use anyhow::Result;
 use std::fs;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
+/// Flat-file content-addressed object store (`objects/<2-hex>/<64-hex>`).
+/// Writes are crash-safe (temp file + `sync_all()` + atomic rename) and all object
+/// IDs are strictly validated as 64 lowercase hex characters.
 pub struct FlatStore {
     root: PathBuf,
-    lock: Mutex<()>,
 }
 
 impl FlatStore {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
-            lock: Mutex::new(()),
         }
-    }
-
-    fn index_path(&self) -> PathBuf {
-        self.root.join("objects.idx")
     }
 
     fn objects_dir(&self) -> PathBuf {
         self.root.join("objects")
     }
 
-    fn append_index(&self, hash_hex: &str) -> Result<()> {
-        let path = self.index_path();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        writeln!(file, "{}", hash_hex)?;
+    fn object_path(&self, hash_hex: &str) -> Result<PathBuf> {
+        validate_object_id(hash_hex)?;
+        Ok(self.objects_dir().join(&hash_hex[..2]).join(hash_hex))
+    }
+
+    pub fn put_chunk(&self, chunk: &Chunk) -> Result<()> {
+        let hash_hex = chunk.hash.to_hex().to_string();
+        let path = self.object_path(&hash_hex)?;
+        if !path.exists() {
+            atomic_write(&path, &chunk.data)?;
+        }
         Ok(())
     }
 
-    fn scan_and_index(&self) -> Result<Vec<(String, String)>> {
-        let objects_dir = self.objects_dir();
-        let mut entries = Vec::new();
-        if objects_dir.exists() {
-            for entry in fs::read_dir(&objects_dir)? {
-                let entry = entry?;
-                let prefix_dir = entry.path();
-                let prefix_name = entry.file_name().to_string_lossy().to_string();
-                if prefix_dir.is_dir() {
-                    for file_entry in fs::read_dir(&prefix_dir)? {
-                        let file_entry = file_entry?;
-                        let hash = file_entry.file_name().to_string_lossy().to_string();
-                        let rel_path = format!("{}/{}", prefix_name, hash);
-                        entries.push((hash, rel_path));
-                    }
-                }
-            }
-        }
-        let path = self.index_path();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&path)?;
-        for (hash, _) in &entries {
-            writeln!(file, "{}", hash)?;
-        }
-        Ok(entries)
-    }
-
-    pub fn put_chunk(&self, chunk: &crate::chunker::Chunk) -> Result<()> {
-        let _guard = self.lock.lock().unwrap();
+    pub fn put_chunk_overwrite(&self, chunk: &Chunk) -> Result<()> {
         let hash_hex = chunk.hash.to_hex().to_string();
-        let prefix = hash_hex.get(..2).unwrap_or("xx");
-        let dir = self.objects_dir().join(prefix);
-        fs::create_dir_all(&dir)?;
-        let path = dir.join(&hash_hex);
-        if !path.exists() {
-            fs::write(path, &chunk.data)?;
-        }
-        self.append_index(&hash_hex)?;
+        let path = self.object_path(&hash_hex)?;
+        atomic_write(&path, &chunk.data)?;
         Ok(())
     }
 
     pub fn get_chunk(&self, hash_hex: &str) -> Result<Vec<u8>> {
-        if hash_hex.len() < 2 {
-            anyhow::bail!("Invalid hash: {}", hash_hex);
-        }
-        let path = self.objects_dir().join(&hash_hex[..2]).join(hash_hex);
+        let path = self.object_path(hash_hex)?;
         if !path.exists() {
             anyhow::bail!("Chunk not found: {}", hash_hex);
         }
@@ -91,85 +52,68 @@ impl FlatStore {
     }
 
     pub fn has_chunk(&self, hash_hex: &str) -> bool {
-        if hash_hex.len() < 2 {
-            return false;
-        }
-        self.objects_dir()
-            .join(&hash_hex[..2])
-            .join(hash_hex)
-            .exists()
+        self.object_path(hash_hex)
+            .map(|p| p.exists())
+            .unwrap_or(false)
     }
 
+    /// Authoritative directory walk over `objects/<00..ff>/` returning only valid
+    /// 64-character lowercase hex object IDs (ignoring any stray temp files).
     pub fn iter_chunks(&self) -> Result<Vec<(String, String)>> {
-        let _guard = self.lock.lock().unwrap();
-        let idx_path = self.index_path();
-        if idx_path.exists() {
-            let file = fs::File::open(&idx_path)?;
-            let mut entries = Vec::new();
-            for line in std::io::BufReader::new(file).lines() {
-                let h = line?.trim().to_string();
-                if !h.is_empty() {
-                    let prefix = h.get(..2).unwrap_or("xx");
-                    entries.push((h.clone(), format!("{}/{}", prefix, h)));
+        let objects_dir = self.objects_dir();
+        let mut entries = Vec::new();
+        if !objects_dir.exists() {
+            return Ok(entries);
+        }
+        for entry in fs::read_dir(&objects_dir)? {
+            let entry = entry?;
+            let prefix_dir = entry.path();
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let prefix_name = entry.file_name().to_string_lossy().to_string();
+            if prefix_name.len() != 2
+                || !prefix_name
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            {
+                continue;
+            }
+            for file_entry in fs::read_dir(&prefix_dir)? {
+                let file_entry = file_entry?;
+                if !file_entry.file_type()?.is_file() {
+                    continue;
+                }
+                let hash = file_entry.file_name().to_string_lossy().to_string();
+                if validate_object_id(&hash).is_ok() && hash.starts_with(&prefix_name) {
+                    let rel_path = format!("{}/{}", prefix_name, hash);
+                    entries.push((hash, rel_path));
                 }
             }
-            let file_count = count_object_files(&self.objects_dir());
-            if entries.len() >= file_count {
-                return Ok(entries);
-            }
         }
-        self.scan_and_index()
+        Ok(entries)
     }
 
-    pub fn delete_chunk(&self, hash_hex: &str, full_path: Option<&str>) -> Result<()> {
-        let _guard = self.lock.lock().unwrap();
-        let path = if let Some(fp) = full_path {
-            self.objects_dir().join(fp)
-        } else {
-            if hash_hex.len() < 2 {
-                anyhow::bail!("Invalid hash: {}", hash_hex);
-            }
-            self.objects_dir().join(&hash_hex[..2]).join(hash_hex)
-        };
+    /// Delete a validated object in O(1) time. Ignores unvalidated `full_path` overrides
+    /// and always derives the safe path directly from the validated `hash_hex`.
+    pub fn delete_chunk(&self, hash_hex: &str, _full_path: Option<&str>) -> Result<()> {
+        let path = self.object_path(hash_hex)?;
         if path.exists() {
-            fs::remove_file(path)?;
-        }
-        let idx_path = self.index_path();
-        if idx_path.exists() {
-            let entries: Vec<String> = {
-                let file = fs::File::open(&idx_path)?;
-                std::io::BufReader::new(file)
-                    .lines()
-                    .map_while(Result::ok)
-                    .map(|l| l.trim().to_string())
-                    .filter(|h| !h.is_empty() && h != hash_hex)
-                    .collect()
-            };
-            let mut file = fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&idx_path)?;
-            for h in &entries {
-                writeln!(file, "{}", h)?;
+            fs::remove_file(&path)?;
+            if let Some(parent) = path.parent() {
+                fsync_dir(parent);
             }
         }
         Ok(())
     }
-}
 
-fn count_object_files(objects_dir: &Path) -> usize {
-    let mut count = 0;
-    if let Ok(dir) = fs::read_dir(objects_dir) {
-        for entry in dir.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if let Ok(sub) = fs::read_dir(entry.path()) {
-                    count += sub.count();
-                }
-            }
+    pub fn flush(&self) -> Result<()> {
+        let dir = self.objects_dir();
+        if dir.exists() {
+            fsync_dir(&dir);
         }
+        Ok(())
     }
-    count
 }
 
 #[cfg(test)]
@@ -203,8 +147,11 @@ mod tests {
     fn test_flat_get_nonexistent() {
         let dir = tempdir().unwrap();
         let store = FlatStore::new(dir.path());
-        let result = store.get_chunk("abcdef");
-        assert!(result.is_err());
+        assert!(store.get_chunk(&"0".repeat(64)).is_err());
+        assert!(store.get_chunk("abcdef").is_err());
+        assert!(store.get_chunk("/etc/passwd").is_err());
+        assert!(store.get_chunk("../../../keys/secret.key").is_err());
+        assert!(store.get_chunk("éé").is_err());
     }
 
     #[test]
@@ -213,6 +160,8 @@ mod tests {
         let store = FlatStore::new(dir.path());
         assert!(!store.has_chunk("ab"));
         assert!(!store.has_chunk(""));
+        assert!(!store.has_chunk("éé"));
+        assert!(!store.has_chunk("/etc/passwd"));
     }
 
     #[test]
@@ -248,22 +197,15 @@ mod tests {
     }
 
     #[test]
-    fn test_flat_put_idempotent() {
+    fn test_flat_put_idempotent_no_duplicates_in_iter() {
         let dir = tempdir().unwrap();
         let store = FlatStore::new(dir.path());
         let chunk = fake_chunk(b"idempotent");
         store.put_chunk(&chunk).unwrap();
         store.put_chunk(&chunk).unwrap();
-        // Object file exists only once (deduped on disk)
         let hash_hex = chunk.hash.to_hex().to_string();
-        let path = dir
-            .path()
-            .join("objects")
-            .join(&hash_hex[..2])
-            .join(&hash_hex);
-        assert!(path.exists());
-        // get_chunk works
-        let retrieved = store.get_chunk(&hash_hex).unwrap();
-        assert_eq!(retrieved, b"idempotent");
+        let entries = store.iter_chunks().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(store.get_chunk(&hash_hex).unwrap(), b"idempotent");
     }
 }

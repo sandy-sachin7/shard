@@ -1,11 +1,10 @@
 [package]
 name = "shard-storage"
-version = "2.3.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Storage backends for shard distributed VCS (sled, sqlite, flat file)"
-license = "MIT"
-repository = "https://github.com/sandy-sachin7/shard"
-homepage = "https://github.com/sandy-sachin7/shard"
+license.workspace = true
+repository.workspace = true
 keywords = ["vcs", "version-control", "mlops", "distributed", "storage"]
 categories = ["database"]
 
@@ -13,8 +12,6 @@ categories = ["database"]
 anyhow = { workspace = true }
 sled = "0.34"
 rusqlite = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 r2d2 = { workspace = true }
 r2d2_sqlite = { workspace = true }
 
