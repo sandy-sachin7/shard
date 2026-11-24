@@ -46,17 +46,17 @@ fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-pub fn serialize<T: Serialize>(data: &T, format: &MetadataFormat) -> Vec<u8> {
+pub fn serialize<T: Serialize>(data: &T, format: &MetadataFormat) -> Result<Vec<u8>> {
     match format {
         MetadataFormat::Json => {
-            let value = serde_json::to_value(data).expect("JSON serialization failed");
+            let value = serde_json::to_value(data)?;
             let sorted = sort_json_keys(value);
-            serde_json::to_vec(&sorted).expect("canonical JSON serialization failed")
+            Ok(serde_json::to_vec(&sorted)?)
         }
         MetadataFormat::Cbor => {
             let mut buf = vec![CBOR_MARKER];
-            ciborium::into_writer(data, &mut buf).expect("CBOR serialization failed");
-            buf
+            ciborium::into_writer(data, &mut buf)?;
+            Ok(buf)
         }
     }
 }
@@ -71,10 +71,10 @@ pub fn deserialize<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
     Ok(serde_json::from_slice(data)?)
 }
 
-pub fn serialize_for_signing<T: Serialize>(data: &T) -> Vec<u8> {
-    let value = serde_json::to_value(data).expect("JSON serialization failed");
+pub fn serialize_for_signing<T: Serialize>(data: &T) -> Result<Vec<u8>> {
+    let value = serde_json::to_value(data)?;
     let sorted = sort_json_keys(value);
-    serde_json::to_vec(&sorted).expect("canonical JSON serialization failed")
+    Ok(serde_json::to_vec(&sorted)?)
 }
 
 #[cfg(test)]
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn test_json_roundtrip() {
         let obj = test_obj();
-        let bytes = serialize(&obj, &MetadataFormat::Json);
+        let bytes = serialize(&obj, &MetadataFormat::Json).unwrap();
         // JSON has no marker byte
         assert!(!bytes.is_empty());
         let decoded: TestData = deserialize(&bytes).unwrap();
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn test_cbor_roundtrip() {
         let obj = test_obj();
-        let bytes = serialize(&obj, &MetadataFormat::Cbor);
+        let bytes = serialize(&obj, &MetadataFormat::Cbor).unwrap();
         assert_eq!(bytes[0], CBOR_MARKER);
         let decoded: TestData = deserialize(&bytes).unwrap();
         assert_eq!(decoded, obj);
@@ -120,7 +120,7 @@ mod tests {
     fn test_cbor_backward_compat() {
         // CBOR-marker data should be readable
         let obj = test_obj();
-        let cbor_bytes = serialize(&obj, &MetadataFormat::Cbor);
+        let cbor_bytes = serialize(&obj, &MetadataFormat::Cbor).unwrap();
         let decoded: TestData = deserialize(&cbor_bytes).unwrap();
         assert_eq!(decoded, obj);
     }
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn test_serialize_for_signing_is_json() {
         let obj = test_obj();
-        let bytes = serialize_for_signing(&obj);
+        let bytes = serialize_for_signing(&obj).unwrap();
         // Should be parseable as JSON
         let decoded: TestData = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, obj);
@@ -164,8 +164,8 @@ mod tests {
     #[test]
     fn test_cbor_compactness() {
         let obj = test_obj();
-        let json_bytes = serialize(&obj, &MetadataFormat::Json);
-        let cbor_bytes = serialize(&obj, &MetadataFormat::Cbor);
+        let json_bytes = serialize(&obj, &MetadataFormat::Json).unwrap();
+        let cbor_bytes = serialize(&obj, &MetadataFormat::Cbor).unwrap();
         // CBOR should be smaller than JSON for this struct
         assert!(cbor_bytes.len() < json_bytes.len());
     }
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn test_cbor_marker_byte() {
         let obj = test_obj();
-        let bytes = serialize(&obj, &MetadataFormat::Cbor);
+        let bytes = serialize(&obj, &MetadataFormat::Cbor).unwrap();
         // First byte must be 0x02
         assert_eq!(bytes[0], CBOR_MARKER);
         // Must have content after marker
@@ -185,7 +185,7 @@ mod tests {
         let mut map = std::collections::BTreeMap::new();
         map.insert("key1".to_string(), "value1".to_string());
         map.insert("key2".to_string(), "value2".to_string());
-        let bytes = serialize(&map, &MetadataFormat::Cbor);
+        let bytes = serialize(&map, &MetadataFormat::Cbor).unwrap();
         assert_eq!(bytes[0], CBOR_MARKER);
         let decoded: std::collections::BTreeMap<String, String> = deserialize(&bytes).unwrap();
         assert_eq!(decoded["key1"], "value1");

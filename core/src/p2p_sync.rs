@@ -325,8 +325,9 @@ pub async fn share(path: &Path, listen_addr: &str, json: bool) -> Result<()> {
 
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     let mut rate_limiter = PeerRateLimiter::new(rate_limit_max, rate_limit_window);
+    let gc_task = crate::gc::GcTaskHandle::spawn_if_enabled(path);
 
-    loop {
+    let res = loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Share shutting down...");
@@ -483,7 +484,9 @@ pub async fn share(path: &Path, listen_addr: &str, json: bool) -> Result<()> {
                 }
             }
         }
-    }
+    };
+    gc_task.shutdown().await;
+    res
 }
 
 /// Start a circuit relay v2 server for NAT traversal.
@@ -597,8 +600,9 @@ pub async fn sync(path: &Path, json: bool) -> Result<()> {
         Arc::new(parking_lot::Mutex::new(HashSet::new()));
     let pull_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_AUTO_PULLS));
     let path_buf = path.to_path_buf();
+    let gc_task = crate::gc::GcTaskHandle::spawn_if_enabled(path);
 
-    loop {
+    let res = loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Sync shutting down...");
@@ -826,7 +830,9 @@ pub async fn sync(path: &Path, json: bool) -> Result<()> {
                 }
             }
         }
-    }
+    };
+    gc_task.shutdown().await;
+    res
 }
 
 pub async fn pull(path: &Path, peer: &str, commit_id: &str, json: bool) -> Result<()> {

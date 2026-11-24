@@ -3,7 +3,6 @@ pub mod sled;
 pub mod sqlite;
 
 use crate::chunker::Chunk;
-use crate::metadata;
 use anyhow::Result;
 use std::path::Path;
 
@@ -24,19 +23,12 @@ impl Store {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
-        let config_path = root.join("config.json");
-        let backend = if config_path.exists() {
-            let data = std::fs::read(&config_path)?;
-            let config: std::collections::BTreeMap<String, String> = metadata::deserialize(&data)?;
-            config
-                .get("storage_backend")
-                .map(|s| s.as_str())
-                .unwrap_or("flat")
-                .to_string()
-        } else {
-            "flat".to_string()
-        };
-        Self::new(root, &backend)
+        let config = crate::config::load_config(root)?;
+        let backend = config
+            .get("storage_backend")
+            .map(|s| s.as_str())
+            .unwrap_or("flat");
+        Self::new(root, backend)
     }
 
     pub fn put_chunk(&self, chunk: &Chunk) -> Result<()> {
@@ -93,5 +85,33 @@ impl Store {
             Store::Sled(s) => s.flush(),
             Store::Sqlite(s) => s.flush(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_nested_sled_store_open_same_repo_succeeds() {
+        let dir = tempdir().unwrap();
+        crate::init(dir.path(), "sled", "none", "fixed", None, false, false).unwrap();
+        let shard_dir = dir.path().join(".shard");
+
+        let s1 = Store::open(&shard_dir).unwrap();
+        let s2 = Store::open(&shard_dir).unwrap();
+        assert!(matches!(s1, Store::Sled(_)));
+        assert!(matches!(s2, Store::Sled(_)));
+
+        let data = b"shared sled chunk";
+        let chunk = Chunk {
+            hash: blake3::hash(data),
+            data: data.to_vec(),
+            offset: 0,
+        };
+        let id = chunk.hash.to_hex().to_string();
+        s1.put_chunk(&chunk).unwrap();
+        assert_eq!(s2.get_chunk(&id).unwrap(), data);
     }
 }

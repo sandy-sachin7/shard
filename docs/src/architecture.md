@@ -80,7 +80,7 @@ graph LR
 
 | Decision | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Chunking** | Rabin (default) or Fixed | Rabin CDC improves dedup across versions; fixed for predictable sizes |
+| **Chunking** | Fixed (default) or Rabin (`--chunker rabin`) | Fixed for predictable sizes and peak throughput; Rabin/FastCDC improves dedup across versions |
 | **Compression** | Zstd or Zlib | Runtime selection; zstd is faster with better ratios |
 | **Hashing** | Blake3 | Fastest cryptographic hash, SIMD-accelerated |
 | **Signatures** | ed25519 | Proven, fast, small signatures (64 bytes) |

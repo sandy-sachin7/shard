@@ -7,15 +7,12 @@ use rand::RngCore;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroizing;
 
 const SALT_SIZE: usize = 16;
 const NONCE_SIZE: usize = 12;
 const GCM_TAG_SIZE: usize = 16;
 const MIN_ENCRYPTED_SIZE: usize = SALT_SIZE + NONCE_SIZE + GCM_TAG_SIZE;
-
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Set restrictive `0o600` permissions on a secret file (Unix only).
 pub fn set_secret_permissions(path: &Path) -> Result<()> {
@@ -32,7 +29,9 @@ pub fn set_secret_permissions(path: &Path) -> Result<()> {
 }
 
 /// Atomically write sensitive bytes to `path` with `0o600` permissions on Unix
-/// set on file creation (before writing secret material) and `sync_all()` before rename.
+/// set on file creation (before writing secret material) and `sync_all()` before persist.
+/// Uses `tempfile::NamedTempFile::persist` so overwriting an existing target works
+/// atomically on both Unix (`rename`) and Windows (`MoveFileExW`).
 pub fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -42,33 +41,21 @@ pub fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("secret");
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = parent.join(format!(".{}.tmp.{}.{}", name, std::process::id(), seq));
 
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{}.tmp.", name))
+        .tempfile_in(parent)?;
+
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
 
-    let write_res = (|| -> Result<()> {
-        let mut file = opts.open(&tmp_path)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_res {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
+    tmp.as_file_mut().write_all(data)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
 
     #[cfg(unix)]
     if let Ok(dir) = fs::File::open(parent) {
@@ -78,35 +65,22 @@ pub fn write_secret_file(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Atomically write non-secret bytes to `path` with `sync_all()` before rename.
+/// Atomically write non-secret bytes to `path` with `sync_all()` before persist.
+/// Uses `tempfile::NamedTempFile::persist` so overwriting an existing target works
+/// atomically on both Unix and Windows.
 fn write_atomic_file(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("file path has no parent directory"))?;
     fs::create_dir_all(parent)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = parent.join(format!(".{}.tmp.{}.{}", name, std::process::id(), seq));
 
-    let write_res = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_res {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{}.tmp.", name))
+        .tempfile_in(parent)?;
+    tmp.as_file_mut().write_all(data)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
 
     #[cfg(unix)]
     if let Ok(dir) = fs::File::open(parent) {

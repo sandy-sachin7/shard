@@ -67,6 +67,30 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  python-bindings:
+    name: Python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-py-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check shard-py bindings
+        env:
+          PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+        run: cargo check --manifest-path python/shard-py/Cargo.toml
+
   security:
     name: Security audit
     runs-on: ubuntu-latest

@@ -1,6 +1,8 @@
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// Trait for content-addressed storage backends used by Shard.
 pub trait StorageBackend: Send + Sync {
@@ -20,15 +22,54 @@ pub trait StorageBackend: Send + Sync {
     fn iter_keys(&self, prefix: &[u8]) -> anyhow::Result<Vec<Vec<u8>>>;
 }
 
+static SLED_HANDLE_CACHE: OnceLock<Mutex<HashMap<PathBuf, Weak<sled::Db>>>> = OnceLock::new();
+
+fn sled_handle_cache() -> &'static Mutex<HashMap<PathBuf, Weak<sled::Db>>> {
+    SLED_HANDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn canonical_sled_key(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        let parent_dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Ok(canon_parent) = std::fs::canonicalize(parent_dir) {
+            return canon_parent.join(name);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Sled-based storage backend. Persists to a sled database directory.
+/// Shares a single live `Arc<sled::Db>` per canonical path within the process so
+/// concurrent/nested opens (e.g., `sync()` auto-pull or background GC) never fail
+/// with Sled's exclusive file-lock error.
 pub struct SledBackend {
-    db: sled::Db,
+    db: Arc<sled::Db>,
 }
 
 impl SledBackend {
-    /// Open or create a sled database at `path`.
+    /// Open or create a sled database at `path`, reusing any live in-process handle
+    /// for the same canonical path.
     pub fn new(path: &Path) -> anyhow::Result<Self> {
-        let db = sled::open(path)?;
+        let mut cache = sled_handle_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.retain(|_, weak| weak.strong_count() > 0);
+
+        let key = canonical_sled_key(path);
+        if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+            return Ok(Self { db: existing });
+        }
+
+        let db = Arc::new(sled::open(path)?);
+        let final_key = canonical_sled_key(path);
+        cache.insert(final_key, Arc::downgrade(&db));
         Ok(Self { db })
     }
 }
@@ -309,6 +350,35 @@ mod tests {
         backend.put(b"k", b"v1").unwrap();
         backend.put(b"k", b"v2").unwrap();
         assert_eq!(backend.get(b"k").unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn test_sled_concurrent_and_nested_reopen_reuses_handle() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("nested_sled");
+        let b1 = SledBackend::new(&db_path).unwrap();
+        // Non-canonical equivalent path (dir/./nested_sled) must still reuse handle
+        let alias_path = dir.path().join(".").join("nested_sled");
+        let b2 = SledBackend::new(&alias_path).unwrap();
+
+        b1.put(b"from_b1", b"hello").unwrap();
+        assert_eq!(b2.get(b"from_b1").unwrap(), Some(b"hello".to_vec()));
+
+        // Multi-threaded concurrent opens + writes on the same path must never fail
+        let mut threads = Vec::new();
+        for i in 0..6 {
+            let p = db_path.clone();
+            threads.push(std::thread::spawn(move || {
+                let handle = SledBackend::new(&p).unwrap();
+                let key = format!("thread_{}", i);
+                handle.put(key.as_bytes(), b"ok").unwrap();
+                assert_eq!(handle.get(key.as_bytes()).unwrap(), Some(b"ok".to_vec()));
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(b1.iter_keys(b"thread_").unwrap().len(), 6);
     }
 
     #[test]

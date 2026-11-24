@@ -30,9 +30,8 @@ impl RepoCipher {
     }
 
     /// Encrypt plaintext with empty AAD (legacy format).
-    pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         self.encrypt_with_aad(plaintext, b"")
-            .expect("AES-256-GCM encryption failed")
     }
 
     /// Encrypt plaintext binding `aad` (e.g., chunk content hash) into the GCM authentication tag.
@@ -156,7 +155,7 @@ mod tests {
     fn test_encrypt_decrypt_roundtrip() {
         let cipher = RepoCipher::generate();
         let data = b"hello world this is test data";
-        let encrypted = cipher.encrypt(data);
+        let encrypted = cipher.encrypt(data).unwrap();
         assert_ne!(encrypted, data);
         assert!(encrypted.len() > NONCE_SIZE);
         let decrypted = cipher.decrypt(&encrypted).unwrap();
@@ -179,8 +178,8 @@ mod tests {
     fn test_encrypt_different_nonces() {
         let cipher = RepoCipher::generate();
         let data = b"same data";
-        let e1 = cipher.encrypt(data);
-        let e2 = cipher.encrypt(data);
+        let e1 = cipher.encrypt(data).unwrap();
+        let e2 = cipher.encrypt(data).unwrap();
         assert_ne!(
             e1, e2,
             "two encryptions of same data should differ (random nonce)"
@@ -192,7 +191,7 @@ mod tests {
         let cipher1 = RepoCipher::generate();
         let cipher2 = RepoCipher::generate();
         let data = b"secret message";
-        let encrypted = cipher1.encrypt(data);
+        let encrypted = cipher1.encrypt(data).unwrap();
         let result = cipher2.decrypt(&encrypted);
         assert!(result.is_err(), "decrypt with wrong key should fail");
     }
@@ -201,7 +200,7 @@ mod tests {
     fn test_decrypt_tampered() {
         let cipher = RepoCipher::generate();
         let data = b"tamper me";
-        let mut encrypted = cipher.encrypt(data);
+        let mut encrypted = cipher.encrypt(data).unwrap();
         if encrypted.len() > NONCE_SIZE + 1 {
             encrypted[NONCE_SIZE] ^= 0xFF;
         }
@@ -249,7 +248,7 @@ mod tests {
         let key = generate_repo_key();
         let cipher = RepoCipher::from_key(&key);
         let data = b"roundtrip via from_key";
-        let encrypted = cipher.encrypt(data);
+        let encrypted = cipher.encrypt(data).unwrap();
         let decrypted = cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, data);
 

@@ -25,7 +25,7 @@ cargo test --workspace
 - **Content-addressed storage**: Flat (`objects/<2-hex>/<64-hex>`, atomic write + fsync), Sled, or pooled SQLite (WAL + `busy_timeout=5000`). All object IDs strictly validated as 64 lowercase hex characters.
 - **Self-describing chunk envelopes (`SHRD` v1)**: Encodes compression & encryption flags with AAD bound to `chunk_id` (backward compatible with legacy raw blobs). Enables safe dedup, `push`/`pull` resume across `zstd`/`zlib`/`--private`, and wire-level integrity verification.
 - **FastCDC chunking**: 64-bit Gear hash with dual normalized masks (`mask_s`/`mask_l`) and cursor-based buffer (shift-invariant deduplication).
-- **Concurrency & durability**: Per-repo in-process `RwLock` + OS-level `.shard/repo.lock` (`fs2`), CRC32-checksummed WAL backing up `HEAD`, active branch ref, and `index`, plus atomic write-fsync-rename for all metadata.
+- **Concurrency & durability**: Per-repo in-process `RwLock` + OS-level `<repo_root>/.shard.lock` (`fs2`), CRC32-checksummed WAL backing up `HEAD`, active branch ref, and `index`, plus cross-platform atomic write-fsync-persist for all metadata.
 - **Security**:
   - Ed25519 challenge-response P2P auth with 32-byte `OsRng` nonces, 30s TTL, dual-PeerId domain separation, and `authorized_keys` enforcement.
   - Strict `safe_repo_join` path containment & `validate_branch_name` traversal protection.

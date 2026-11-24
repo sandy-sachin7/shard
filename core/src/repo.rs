@@ -634,11 +634,11 @@ pub(crate) fn commit_with_store(
 
         let mut unsigned = manifest.clone();
         unsigned.signature = None;
-        let canonical = metadata::serialize_for_signing(&unsigned);
+        let canonical = metadata::serialize_for_signing(&unsigned)?;
         let sig = signing_key.sign(&canonical);
         manifest.signature = Some(hex::encode(sig.to_bytes()));
 
-        let encoded = metadata::serialize(manifest, &fmt);
+        let encoded = metadata::serialize(manifest, &fmt)?;
         let hash = blake3::hash(&encoded);
         store.put_chunk(&Chunk {
             hash,
@@ -672,11 +672,11 @@ pub(crate) fn commit_with_store(
         key_id,
     };
 
-    let json_unsigned = metadata::serialize_for_signing(&commit);
+    let json_unsigned = metadata::serialize_for_signing(&commit)?;
     let signature = signing_key.sign(&json_unsigned);
     commit.signature = Some(hex::encode(signature.to_bytes()));
 
-    let encoded = metadata::serialize(&commit, &fmt);
+    let encoded = metadata::serialize(&commit, &fmt)?;
     let hash = blake3::hash(&encoded);
     store.put_chunk(&Chunk {
         hash,
@@ -803,7 +803,7 @@ pub fn verify_with_options(
             if let Some(sig_hex) = &manifest.signature {
                 let mut unsigned = manifest.clone();
                 unsigned.signature = None;
-                let canonical = metadata::serialize_for_signing(&unsigned);
+                let canonical = metadata::serialize_for_signing(&unsigned)?;
                 let sig_bytes = hex::decode(sig_hex)?;
                 let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
                     ShardError::SignatureVerificationFailed(
@@ -1014,8 +1014,9 @@ pub(crate) fn stream_manifest_to_file(
     }
     let compression = manifest.compression.parse::<Compression>()?;
 
-    // Stream into a same-dir temp file first, then atomically rename over `dest_path`
-    // so interrupted checkouts/exports/pulls never leave half-written files.
+    // Stream into a same-dir temp file first, then atomically persist over `dest_path`
+    // so interrupted checkouts/exports/pulls never leave half-written files and
+    // overwriting existing targets works atomically on both Unix and Windows.
     let parent = dest_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?;
@@ -1023,35 +1024,22 @@ pub(crate) fn stream_manifest_to_file(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("file");
-    let tmp_path = parent.join(format!(
-        ".{}.shardtmp.{}.{}",
-        name,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!(".{}.shardtmp.", name))
+        .tempfile_in(parent)?;
 
-    let write_res = (|| -> Result<()> {
-        let file = fs::File::create(&tmp_path)?;
-        let mut writer = BufWriter::new(file);
+    {
+        let mut writer = BufWriter::new(tmp.as_file());
         for chunk_id in &manifest.chunks {
             let stored = store.get_chunk(chunk_id)?;
             let plaintext = chunk_codec::decode_chunk(chunk_id, &stored, compression, cipher)?;
             writer.write_all(&plaintext)?;
         }
         writer.flush()?;
-        writer.into_inner()?.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_res {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
     }
-
-    if let Err(e) = fs::rename(&tmp_path, &dest_path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
+    tmp.as_file().sync_all()?;
+    tmp.persist(&dest_path).map_err(|e| e.error)?;
+    crate::fs_util::fsync_dir(parent);
     Ok(dest_path)
 }
 
@@ -1801,11 +1789,11 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str, json: bool)
             manifest.created_at = Some(timestamp);
             manifest.signature = None;
 
-            let canonical = metadata::serialize_for_signing(&manifest);
+            let canonical = metadata::serialize_for_signing(&manifest)?;
             let sig = signing_key.sign(&canonical);
             manifest.signature = Some(hex::encode(sig.to_bytes()));
 
-            let encoded = metadata::serialize(&manifest, &fmt);
+            let encoded = metadata::serialize(&manifest, &fmt)?;
             let hash = blake3::hash(&encoded);
             store.put_chunk(&Chunk {
                 hash,
@@ -1831,11 +1819,11 @@ pub fn merge(path: &Path, branch: &str, message: &str, author: &str, json: bool)
             key_id,
         };
 
-        let json_unsigned = metadata::serialize_for_signing(&commit);
+        let json_unsigned = metadata::serialize_for_signing(&commit)?;
         let signature = signing_key.sign(&json_unsigned);
         commit.signature = Some(hex::encode(signature.to_bytes()));
 
-        let encoded = metadata::serialize(&commit, &fmt);
+        let encoded = metadata::serialize(&commit, &fmt)?;
         let hash = blake3::hash(&encoded);
         store.put_chunk(&Chunk {
             hash,
@@ -2007,7 +1995,7 @@ pub(crate) fn write_config_atomic(
     config: &BTreeMap<String, String>,
 ) -> Result<()> {
     let fmt = MetadataFormat::from_config(config);
-    let data = metadata::serialize(config, &fmt);
+    let data = metadata::serialize(config, &fmt)?;
     atomic_write(&shard_dir.join("config.json"), &data)?;
     Ok(())
 }

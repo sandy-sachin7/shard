@@ -25,7 +25,7 @@ impl Index {
     }
 
     pub fn save(&self, path: &Path, fmt: &MetadataFormat) -> Result<()> {
-        let content = metadata::serialize(self, fmt);
+        let content = metadata::serialize(self, fmt)?;
         atomic_write(path, &content)?;
         Ok(())
     }

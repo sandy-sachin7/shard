@@ -79,5 +79,5 @@ sequenceDiagram
 
 ## Resilience & Security
 
-- **Resilience:** Parallel downloads, chunk retries, resumable transfer (persists partial chunks to `.partial/`).
+- **Resilience:** Parallel downloads, chunk retries, resumable transfer (persists partial chunks to `.shard/partial/`).
 - **Security:** Metadata signed; payloads integrity verified; optional encryption with per-repo symmetric keys. Key rotation is handled via a signed revocation commit in the DAG.

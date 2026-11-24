@@ -13,7 +13,7 @@ Shard exposes a unified CLI with Git-like ergonomics. All commands support a `--
 | `verify <commit>` | Verify integrity + signature | `--json` |
 | `diff <commit1> <commit2>` | Compare two commits | `--json` |
 | `prune` | Remove unreachable objects | `--json` |
-| `tag` | Manage commit tags | `add`, `list`, `delete` |
+| `tag` | Manage commit tags | `add`, `list` |
 | `branch` | Manage branches | `create`, `delete`, `list` |
 | `merge <branch>` | Merge branch into current HEAD | `-m <msg>`, `--author <name>` |
 | `config` | View/edit configuration | `get`, `set` |

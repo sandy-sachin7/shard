@@ -3,9 +3,6 @@ use anyhow::Result;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Validate that `id` is a strict 64-character lowercase hexadecimal Blake3 digest.
 /// Prevents path traversal and non-UTF-8 boundary slicing panics.
@@ -140,35 +137,22 @@ pub fn safe_repo_join(root: &Path, rel: &str) -> Result<PathBuf> {
 }
 
 /// Atomically write `data` to `path`:
-/// write to same-directory temp file -> `sync_all()` -> `rename()` -> parent dir fsync.
+/// write to same-directory temp file -> `sync_all()` -> cross-platform `persist()` -> parent dir fsync.
+/// Uses `tempfile::NamedTempFile::persist` so overwriting an existing target works
+/// atomically on both Unix (`rename`) and Windows (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)`).
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("target path '{}' has no parent", path.display()))?;
     fs::create_dir_all(parent)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("shard");
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = parent.join(format!(".{}.tmp.{}.{}", name, std::process::id(), seq));
 
-    let write_res = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_res {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e.into());
-    }
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{}.tmp.", name))
+        .tempfile_in(parent)?;
+    tmp.as_file_mut().write_all(data)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
 
     fsync_dir(parent);
     Ok(())

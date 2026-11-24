@@ -180,7 +180,14 @@ pub async fn serve(path: &Path, addr: &str, json: bool) -> Result<()> {
             eprintln!("Generated ephemeral API bearer token: {}", token);
         }
     }
-    axum::serve(listener, app).await?;
+    let gc_task = crate::gc::GcTaskHandle::spawn_if_enabled(path);
+    let serve_res = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
+    gc_task.shutdown().await;
+    serve_res?;
     Ok(())
 }
 
@@ -253,36 +260,39 @@ async fn commit_handler(
 }
 
 async fn log_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let repo_path = state.repo_path.clone();
     let shard_dir = state.shard_dir.clone();
     let res = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>> {
-        if !shard_dir.exists() {
-            anyhow::bail!("not a shard repository");
-        }
-        let store = Store::open(&shard_dir)?;
-        let head = branch::resolve_head(&shard_dir).ok().and_then(|(_, h)| h);
-
-        let mut entries = Vec::new();
-        let mut stack = head.into_iter().collect::<Vec<_>>();
-        let mut seen = std::collections::HashSet::new();
-        while let Some(cid) = stack.pop() {
-            if !seen.insert(cid.clone()) {
-                continue;
+        crate::with_read_op(&repo_path, "api_log", || {
+            if !shard_dir.exists() {
+                anyhow::bail!("not a shard repository");
             }
-            if let Ok(data) = store.get_chunk(&cid) {
-                if let Ok(commit) = metadata::deserialize::<crate::commit::Commit>(&data) {
-                    entries.push(serde_json::json!({
-                        "commit_id": cid,
-                        "message": commit.message,
-                        "author": commit.author,
-                        "timestamp": commit.timestamp.to_string(),
-                    }));
-                    for p in &commit.parents {
-                        stack.push(p.clone());
+            let store = Store::open(&shard_dir)?;
+            let head = branch::resolve_head(&shard_dir).ok().and_then(|(_, h)| h);
+
+            let mut entries = Vec::new();
+            let mut stack = head.into_iter().collect::<Vec<_>>();
+            let mut seen = std::collections::HashSet::new();
+            while let Some(cid) = stack.pop() {
+                if !seen.insert(cid.clone()) {
+                    continue;
+                }
+                if let Ok(data) = store.get_chunk(&cid) {
+                    if let Ok(commit) = metadata::deserialize::<crate::commit::Commit>(&data) {
+                        entries.push(serde_json::json!({
+                            "commit_id": cid,
+                            "message": commit.message,
+                            "author": commit.author,
+                            "timestamp": commit.timestamp.to_string(),
+                        }));
+                        for p in &commit.parents {
+                            stack.push(p.clone());
+                        }
                     }
                 }
             }
-        }
-        Ok(entries)
+            Ok(entries)
+        })
     })
     .await;
 
@@ -296,23 +306,26 @@ async fn log_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<se
 async fn status_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let repo_path = state.repo_path.clone();
     let shard_dir = state.shard_dir.clone();
     let res = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
-        if !shard_dir.exists() {
-            anyhow::bail!("not a shard repository");
-        }
-        let config = crate::load_config(&shard_dir)?;
-        let fmt = MetadataFormat::from_config(&config);
-        let (current_branch, head) = branch::resolve_head(&shard_dir).unwrap_or((None, None));
-        let index = Index::load(&shard_dir.join("index"), &fmt)?;
-        let mut staged: Vec<String> = index.files.keys().cloned().collect();
-        staged.sort();
-        Ok(serde_json::json!({
-            "status": "ok",
-            "current_branch": current_branch,
-            "head": head,
-            "staged": staged,
-        }))
+        crate::with_read_op(&repo_path, "api_status", || {
+            if !shard_dir.exists() {
+                anyhow::bail!("not a shard repository");
+            }
+            let config = crate::load_config(&shard_dir)?;
+            let fmt = MetadataFormat::from_config(&config);
+            let (current_branch, head) = branch::resolve_head(&shard_dir).unwrap_or((None, None));
+            let index = Index::load(&shard_dir.join("index"), &fmt)?;
+            let mut staged: Vec<String> = index.files.keys().cloned().collect();
+            staged.sort();
+            Ok(serde_json::json!({
+                "status": "ok",
+                "current_branch": current_branch,
+                "head": head,
+                "staged": staged,
+            }))
+        })
     })
     .await;
 
@@ -346,17 +359,20 @@ async fn push_handler(
 async fn branch_list_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let repo_path = state.repo_path.clone();
     let shard_dir = state.shard_dir.clone();
     let res = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
-        if !shard_dir.exists() {
-            anyhow::bail!("not a shard repository");
-        }
-        let (current, branches) = branch::list_branches(&shard_dir)?;
-        let branch_list: Vec<serde_json::Value> = branches
-            .into_iter()
-            .map(|(name, tip)| serde_json::json!({"name": name, "tip": tip}))
-            .collect();
-        Ok(serde_json::json!({"status": "ok", "current": current, "branches": branch_list}))
+        crate::with_read_op(&repo_path, "api_branch_list", || {
+            if !shard_dir.exists() {
+                anyhow::bail!("not a shard repository");
+            }
+            let (current, branches) = branch::list_branches(&shard_dir)?;
+            let branch_list: Vec<serde_json::Value> = branches
+                .into_iter()
+                .map(|(name, tip)| serde_json::json!({"name": name, "tip": tip}))
+                .collect();
+            Ok(serde_json::json!({"status": "ok", "current": current, "branches": branch_list}))
+        })
     })
     .await;
 

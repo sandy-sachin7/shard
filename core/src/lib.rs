@@ -82,11 +82,7 @@ pub(crate) fn load_config_file_only(shard_dir: &Path) -> Result<BTreeMap<String,
 }
 
 pub(crate) fn load_config(shard_dir: &Path) -> Result<BTreeMap<String, String>> {
-    let mut cfg = load_config_file_only(shard_dir)?;
-    for (k, v) in config::load_env_overrides() {
-        cfg.insert(k, v);
-    }
-    Ok(cfg)
+    config::load_config(shard_dir)
 }
 
 pub(crate) fn save_config(shard_dir: &Path, cfg: &BTreeMap<String, String>) -> Result<()> {

@@ -9,27 +9,41 @@ use crate::store::Store;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-static GC_RUNNING: AtomicBool = AtomicBool::new(false);
+static GC_RUNNING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
-/// RAII guard that guarantees `GC_RUNNING` is cleared even if GC panics.
-struct GcRunningGuard;
+fn gc_running_set() -> &'static Mutex<HashSet<PathBuf>> {
+    GC_RUNNING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn canonical_repo_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// RAII guard that tracks active GC per canonical repository path and guarantees
+/// cleanup even if GC panics, so GC on repo A never blocks GC on repo B.
+struct GcRunningGuard {
+    repo_key: PathBuf,
+}
 
 impl GcRunningGuard {
-    fn acquire() -> Result<Self> {
-        if GC_RUNNING.swap(true, Ordering::Acquire) {
-            anyhow::bail!("GC already in progress");
+    fn acquire(path: &Path) -> Result<Self> {
+        let repo_key = canonical_repo_key(path);
+        let mut set = gc_running_set().lock().unwrap_or_else(|e| e.into_inner());
+        if !set.insert(repo_key.clone()) {
+            anyhow::bail!("GC already in progress for {}", repo_key.display());
         }
-        Ok(Self)
+        Ok(Self { repo_key })
     }
 }
 
 impl Drop for GcRunningGuard {
     fn drop(&mut self) {
-        GC_RUNNING.store(false, Ordering::Release);
+        let mut set = gc_running_set().lock().unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.repo_key);
     }
 }
 
@@ -114,7 +128,7 @@ fn load_commit(store: &Store, commit_id: &str) -> Result<Commit> {
 
 /// Execute crash-safe, fail-closed garbage collection under an exclusive repository lock.
 pub fn gc(path: &Path, json: bool) -> Result<()> {
-    let _gc_guard = GcRunningGuard::acquire()?;
+    let _gc_guard = GcRunningGuard::acquire(path)?;
     crate::with_write_op(path, "gc", || gc_inner(path, json))
 }
 
@@ -156,7 +170,7 @@ fn gc_inner(path: &Path, json: bool) -> Result<()> {
     // 4. Mark from staging index
     let index = Index::load(&shard_dir.join("index"), &fmt)?;
     for manifest in index.files.values() {
-        let json_bytes = metadata::serialize(manifest, &fmt);
+        let json_bytes = metadata::serialize(manifest, &fmt)?;
         let hash = blake3::hash(&json_bytes);
         reachable.insert(hash.to_hex().to_string());
         for chunk_hash in &manifest.chunks {
@@ -214,7 +228,12 @@ fn gc_inner(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn gc_loop(path: PathBuf, policy: GcPolicy) {
+/// Run periodic garbage collection until `shutdown` resolves.
+pub async fn gc_loop_until<F: std::future::Future<Output = ()>>(
+    path: PathBuf,
+    policy: GcPolicy,
+    shutdown: F,
+) {
     if !policy.enabled {
         info!("Auto-GC disabled (set gc_enabled=true in config)");
         return;
@@ -222,6 +241,7 @@ pub async fn gc_loop(path: PathBuf, policy: GcPolicy) {
     info!("Auto-GC started, interval {}s", policy.interval_secs);
     let mut interval = tokio::time::interval(Duration::from_secs(policy.interval_secs));
     interval.tick().await;
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = interval.tick() => {
@@ -234,10 +254,69 @@ pub async fn gc_loop(path: PathBuf, policy: GcPolicy) {
                     Err(e) => warn!("Auto-GC task panicked: {}", e),
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 info!("Auto-GC stopped");
                 break;
             }
+        }
+    }
+}
+
+pub async fn gc_loop(path: PathBuf, policy: GcPolicy) {
+    gc_loop_until(path, policy, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await;
+}
+
+/// Handle for a background auto-GC task spawned by long-running commands (`share`, `sync`, `serve`).
+/// Cancels cleanly on [`shutdown`](Self::shutdown) or drop.
+pub(crate) struct GcTaskHandle {
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl GcTaskHandle {
+    /// Spawn background `gc_loop` for `repo_path` when `gc_enabled == true`.
+    pub(crate) fn spawn_if_enabled(repo_path: &Path) -> Self {
+        let policy = GcPolicy::from_config(&repo_path.join(".shard"));
+        if !policy.enabled {
+            return Self {
+                shutdown_tx: None,
+                handle: None,
+            };
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let path = repo_path.to_path_buf();
+        let handle = tokio::spawn(async move {
+            gc_loop_until(path, policy, async move {
+                let _ = rx.await;
+            })
+            .await;
+        });
+        Self {
+            shutdown_tx: Some(tx),
+            handle: Some(handle),
+        }
+    }
+
+    pub(crate) async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for GcTaskHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
         }
     }
 }
@@ -296,7 +375,7 @@ mod tests {
                 created_at: None,
                 signature: None,
             };
-            let m_bytes = metadata::serialize(&manifest, &MetadataFormat::Json);
+            let m_bytes = metadata::serialize(&manifest, &MetadataFormat::Json).unwrap();
             let m_id = hex_hash(&m_bytes);
             store.put_chunk(&make_chunk(&m_bytes)).unwrap();
             manifest_ids.push(m_id);
@@ -313,7 +392,7 @@ mod tests {
             signature: None,
             key_id: None,
         };
-        let c_bytes = metadata::serialize(&commit, &MetadataFormat::Json);
+        let c_bytes = metadata::serialize(&commit, &MetadataFormat::Json).unwrap();
         let c_id = hex_hash(&c_bytes);
         store.put_chunk(&make_chunk(&c_bytes)).unwrap();
 
@@ -327,7 +406,7 @@ mod tests {
 
         let mut cfg_map = std::collections::BTreeMap::<String, String>::new();
         cfg_map.insert("storage_backend".into(), "flat".into());
-        let cfg_bytes = metadata::serialize(&cfg_map, &MetadataFormat::Json);
+        let cfg_bytes = metadata::serialize(&cfg_map, &MetadataFormat::Json).unwrap();
         std::fs::write(shard.join("config.json"), cfg_bytes).unwrap();
 
         (dir, shard)
@@ -349,7 +428,7 @@ mod tests {
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "7200".into());
         cfg.insert("gc_enabled".into(), "true".into());
-        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json);
+        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json).unwrap();
         std::fs::write(dir.path().join("config.json"), bytes).unwrap();
 
         let policy = GcPolicy::from_config(dir.path());
@@ -363,7 +442,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "1800".into());
-        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json);
+        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json).unwrap();
         std::fs::write(dir.path().join("config.json"), bytes).unwrap();
 
         let policy = GcPolicy::from_config(dir.path());
@@ -378,7 +457,7 @@ mod tests {
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "not-a-number".into());
         cfg.insert("gc_enabled".into(), "maybe".into());
-        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json);
+        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json).unwrap();
         std::fs::write(dir.path().join("config.json"), bytes).unwrap();
 
         let policy = GcPolicy::from_config(dir.path());
@@ -393,7 +472,7 @@ mod tests {
         let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         cfg.insert("gc_interval_secs".into(), "3600".into());
         cfg.insert("gc_enabled".into(), "false".into());
-        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json);
+        let bytes = metadata::serialize(&cfg, &MetadataFormat::Json).unwrap();
         std::fs::write(dir.path().join("config.json"), bytes).unwrap();
 
         let saved_interval = std::env::var("SHARD_GC_INTERVAL_SECS").ok();
@@ -670,5 +749,41 @@ mod tests {
     fn test_gc_inner_json_output() {
         let (_dir, _shard) = init_shard_repo();
         assert!(gc_inner(_dir.path(), true).is_ok());
+    }
+
+    #[test]
+    fn test_gc_running_guard_is_per_repo() {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+
+        let guard_a = GcRunningGuard::acquire(dir_a.path()).unwrap();
+        // Second acquire on repo A (even via non-canonical alias) must fail
+        assert!(GcRunningGuard::acquire(&dir_a.path().join(".")).is_err());
+        // Acquire on repo B MUST succeed concurrently
+        let guard_b = GcRunningGuard::acquire(dir_b.path()).unwrap();
+
+        drop(guard_a);
+        // Repo A can be acquired again once released while repo B is still running
+        let guard_a2 = GcRunningGuard::acquire(dir_a.path()).unwrap();
+        drop(guard_a2);
+        drop(guard_b);
+    }
+
+    #[tokio::test]
+    async fn test_gc_task_handle_spawns_and_shuts_down_cleanly() {
+        let (dir, shard) = init_shard_repo();
+        let mut cfg: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        cfg.insert("storage_backend".into(), "flat".into());
+        cfg.insert("gc_enabled".into(), "true".into());
+        cfg.insert("gc_interval_secs".into(), "3600".into());
+        std::fs::write(
+            shard.join("config.json"),
+            metadata::serialize(&cfg, &MetadataFormat::Json).unwrap(),
+        )
+        .unwrap();
+
+        let handle = GcTaskHandle::spawn_if_enabled(dir.path());
+        assert!(handle.handle.is_some());
+        handle.shutdown().await;
     }
 }

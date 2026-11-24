@@ -174,10 +174,10 @@ fn workspace_verify_rejects_unsigned_and_untrusted_forged_commit() {
             &attacker.verifying_key,
         )),
     };
-    let unsigned_bytes = metadata::serialize_for_signing(&forged);
+    let unsigned_bytes = metadata::serialize_for_signing(&forged).unwrap();
     let sig = attacker.signing_key.sign(&unsigned_bytes);
     forged.signature = Some(hex::encode(sig.to_bytes()));
-    let forged_bytes = metadata::serialize(&forged, &MetadataFormat::Json);
+    let forged_bytes = metadata::serialize(&forged, &MetadataFormat::Json).unwrap();
     let forged_hash = blake3::hash(&forged_bytes);
     let forged_id = forged_hash.to_hex().to_string();
     store
@@ -208,7 +208,7 @@ fn workspace_verify_rejects_unsigned_and_untrusted_forged_commit() {
         signature: None,
         key_id: None,
     };
-    let u_bytes = metadata::serialize(&unsigned, &MetadataFormat::Json);
+    let u_bytes = metadata::serialize(&unsigned, &MetadataFormat::Json).unwrap();
     let u_hash = blake3::hash(&u_bytes);
     let u_id = u_hash.to_hex().to_string();
     store
@@ -251,7 +251,7 @@ fn workspace_checkout_and_export_reject_path_traversal_manifest() {
             created_at: None,
             signature: None,
         };
-        let m_bytes = metadata::serialize(&manifest, &MetadataFormat::Json);
+        let m_bytes = metadata::serialize(&manifest, &MetadataFormat::Json).unwrap();
         let m_hash = blake3::hash(&m_bytes);
         store
             .put_chunk(&Chunk {
@@ -272,7 +272,7 @@ fn workspace_checkout_and_export_reject_path_traversal_manifest() {
             signature: None,
             key_id: None,
         };
-        let c_bytes = metadata::serialize(&commit, &MetadataFormat::Json);
+        let c_bytes = metadata::serialize(&commit, &MetadataFormat::Json).unwrap();
         let c_hash = blake3::hash(&c_bytes);
         let c_id = c_hash.to_hex().to_string();
         store

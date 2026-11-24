@@ -11,6 +11,7 @@ const FORBIDDEN_HF_NAMES: &[&str] = &[
     "wal.log",
     "partial",
     "repo.lock",
+    ".shard.lock",
 ];
 
 /// Stage only safe public repository artifacts from `shard_dir` into `staging_dir`
@@ -33,6 +34,14 @@ pub fn stage_hf_export(shard_dir: &Path, staging_dir: &Path) -> Result<()> {
         if src.is_dir() {
             copy_dir_filtered(&src, &staging_dir.join(dir))?;
         }
+    }
+
+    // Object database for Sled (directory) or SQLite (file) backends
+    let objects_db = shard_dir.join("objects.db");
+    if objects_db.is_dir() {
+        copy_dir_filtered(&objects_db, &staging_dir.join("objects.db"))?;
+    } else if objects_db.is_file() {
+        fs::copy(&objects_db, staging_dir.join("objects.db"))?;
     }
 
     // Public-only key metadata (NEVER secret.key, repo.key, or archive/)
@@ -234,5 +243,48 @@ mod tests {
         assert!(!out.join("wal.log").exists());
         assert!(!out.join("partial").exists());
         assert!(!out.join("repo.lock").exists());
+        assert!(!out.join(".shard.lock").exists());
+    }
+
+    #[test]
+    fn test_hf_staging_includes_objects_db_for_sled_and_sqlite_and_blocks_secrets() {
+        for backend in ["sled", "sqlite"] {
+            let dir = tempdir().unwrap();
+            let repo = dir.path();
+            crate::init(repo, backend, "zstd", "fixed", None, true, false).unwrap();
+            fs::write(repo.join("weights.bin"), b"tensor weights").unwrap();
+            crate::add(repo, &repo.join("weights.bin"), false).unwrap();
+            crate::commit(repo, "commit weights", "Alice", false).unwrap();
+
+            let shard_dir = repo.join(".shard");
+            // Plant forbidden lock/WAL files to ensure they are excluded
+            fs::write(shard_dir.join(".shard.lock"), b"").unwrap();
+            fs::write(shard_dir.join("wal.log"), b"wal").unwrap();
+            if backend == "sled" {
+                // Even if a rogue secret file somehow sat inside objects.db/, it must be skipped
+                fs::write(shard_dir.join("objects.db/secret.key"), b"nope").unwrap();
+            }
+
+            let staging = tempdir().unwrap();
+            let out = staging.path().join(".shard");
+            stage_hf_export(&shard_dir, &out).unwrap();
+
+            if backend == "sled" {
+                assert!(out.join("objects.db").is_dir());
+                assert!(!out.join("objects.db/secret.key").exists());
+            } else {
+                assert!(out.join("objects.db").is_file());
+                assert!(fs::metadata(out.join("objects.db")).unwrap().len() > 0);
+            }
+
+            assert!(!out.join("keys/secret.key").exists());
+            assert!(!out.join("keys/repo.key").exists());
+            assert!(!out.join("wal.log").exists());
+            assert!(!out.join(".shard.lock").exists());
+
+            // Pre-flight assertion must reject any forbidden file if present
+            fs::write(out.join(".shard.lock"), b"").unwrap();
+            assert!(assert_no_secrets_staged(&out).is_err());
+        }
     }
 }

@@ -262,7 +262,7 @@ pub(crate) fn verify_commit_signature(
 
     let mut unsigned_commit = commit.clone();
     unsigned_commit.signature = None;
-    let json_unsigned = metadata::serialize_for_signing(&unsigned_commit);
+    let json_unsigned = metadata::serialize_for_signing(&unsigned_commit)?;
 
     let sig_bytes = hex::decode(sig_hex)?;
     let sig_arr: [u8; 64] = sig_bytes

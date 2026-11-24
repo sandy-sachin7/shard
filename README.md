@@ -200,7 +200,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 | `verify <commit>` | Verify integrity + signature | `--json` |
 | `diff <commit1> <commit2>` | Compare two commits | `--json` |
 | `prune` | Remove unreachable objects | `--json` |
-| `tag` | Manage commit tags | `add`, `list`, `delete` |
+| `tag` | Manage commit tags | `add`, `list` |
 | `branch` | Manage branches | `create`, `delete`, `list` |
 | `merge <branch>` | Merge branch into current HEAD | `-m <msg>`, `--author <name>` |
 | `config` | View/edit configuration | `get <key>\|set <key> <value>` |
@@ -373,31 +373,34 @@ curl -H "Authorization: Bearer $SHARD_API_TOKEN" http://127.0.0.1:8080/api/v1/st
 ### Storage layout
 
 ```
-.shard/
-├── objects/<2-prefix>/<hash>    # content-addressed chunks
-├── objects.idx                   # chunk index (flat store O(1) iteration)
-├── HEAD                          # current commit reference
-├── config.json                   # repository configuration
-├── index                         # staging area
-├── wal.log                       # write-ahead log (crash recovery)
-├── keys/                         # ed25519 keypair
-│   ├── secret.key
-│   └── public.key
-├── refs/heads/                   # branch pointers
-├── authorized_keys               # P2P auth whitelist
-├── objects.idx                   # chunk index (flat store O(1) iteration)
-├── peers.json                    # known P2P peers
-├── tags.json                     # named commit pointers
-├── key_history.json              # key rotation history
-├── transfer_queue.json           # pending P2P transfer queue
-└── shard.db                      # SQLite storage (when backend=sqlite)
+<repo_root>/
+├── .shard.lock                   # OS-level advisory lock (fs2)
+└── .shard/
+    ├── objects/<2-prefix>/<hash> # content-addressed chunks (when backend=flat)
+    ├── objects.db                # Sled directory or SQLite DB (when backend=sled|sqlite)
+    ├── HEAD                      # current commit or branch reference
+    ├── config.json               # repository configuration
+    ├── index                     # staging area
+    ├── wal.log                   # CRC32-checksummed write-ahead log (crash recovery)
+    ├── partial/                  # resumable in-flight P2P transfers
+    ├── keys/                     # Ed25519 keypair, repo key, and rotation chain
+    │   ├── secret.key
+    │   ├── public.key
+    │   ├── current
+    │   ├── records/
+    │   ├── rotations/
+    │   └── archive/
+    ├── refs/heads/               # branch pointers
+    ├── authorized_keys           # P2P auth allowlist
+    ├── peers.json                # known P2P peers
+    └── tags.json                 # named commit pointers
 ```
 
 ### Key design decisions
 
 | Decision | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Chunking** | Rabin (default) or Fixed | Rabin CDC improves dedup across versions; fixed for predictable sizes |
+| **Chunking** | Fixed (default) or Rabin (`--chunker rabin`) | Fixed for predictable sizes and peak throughput; Rabin/FastCDC improves dedup across versions |
 | **Compression** | Zstd or Zlib | Runtime selection; zstd is faster with better ratios |
 | **Hashing** | Blake3 | Fastest cryptographic hash, SIMD-accelerated |
 | **Signatures** | ed25519 | Proven, fast, small signatures (64 bytes) |

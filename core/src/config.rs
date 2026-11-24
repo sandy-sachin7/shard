@@ -36,6 +36,16 @@ pub fn load_env_overrides() -> BTreeMap<String, String> {
     overrides
 }
 
+/// Load repository configuration from `<shard_dir>/config.json` with `SHARD_*`
+/// environment variable overrides applied on top.
+pub fn load_config(shard_dir: &Path) -> Result<BTreeMap<String, String>> {
+    let mut cfg = crate::load_config_file_only(shard_dir)?;
+    for (k, v) in load_env_overrides() {
+        cfg.insert(k, v);
+    }
+    Ok(cfg)
+}
+
 pub fn load_config_env(shard_dir: &Path) -> Result<()> {
     let config_path = shard_dir.join("config.json");
     let mut config: BTreeMap<String, String> = if config_path.exists() {

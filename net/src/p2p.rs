@@ -12,7 +12,7 @@ use libp2p::{
     kad::{self, store::MemoryStore},
     mdns, noise, ping, relay,
     request_response::{self, ProtocolSupport},
-    swarm::{NetworkBehaviour, SwarmEvent},
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, StreamProtocol, Swarm, SwarmBuilder,
 };
 use rand::RngCore;
@@ -32,7 +32,7 @@ pub struct ShardBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub request_response: request_response::cbor::Behaviour<ShardRequest, ShardResponse>,
-    pub mdns: mdns::tokio::Behaviour,
+    pub mdns: Toggle<mdns::tokio::Behaviour>,
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
     pub relay: relay::Behaviour,
@@ -65,64 +65,76 @@ impl Node {
             )?
             .with_quic()
             .with_dns()?
-            .with_behaviour(|key| {
-                let local_peer_id = PeerId::from(key.public());
-                debug!("Local peer id: {local_peer_id}");
+            .with_behaviour(
+                |key| -> std::result::Result<
+                    ShardBehaviour,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > {
+                    let local_peer_id = PeerId::from(key.public());
+                    debug!("Local peer id: {local_peer_id}");
 
-                // Gossipsub — Signed authenticity provides unique per-publish sequence numbers
-                // so re-announcements when new peers subscribe are never dropped as duplicates.
-                let gossipsub_config = gossipsub::Config::default();
-                let gossipsub = gossipsub::Behaviour::new(
-                    gossipsub::MessageAuthenticity::Signed(key.clone()),
-                    gossipsub_config,
-                )
-                .expect("Valid gossipsub behaviour");
+                    // Gossipsub — Signed authenticity provides unique per-publish sequence numbers
+                    // so re-announcements when new peers subscribe are never dropped as duplicates.
+                    let gossipsub_config = gossipsub::Config::default();
+                    let gossipsub = gossipsub::Behaviour::new(
+                        gossipsub::MessageAuthenticity::Signed(key.clone()),
+                        gossipsub_config,
+                    )
+                    .map_err(|e| std::io::Error::other(format!("gossipsub init failed: {e}")))?;
 
-                // Kademlia
-                let store = MemoryStore::new(local_peer_id);
-                let kademlia = kad::Behaviour::new(local_peer_id, store);
+                    // Kademlia
+                    let store = MemoryStore::new(local_peer_id);
+                    let kademlia = kad::Behaviour::new(local_peer_id, store);
 
-                // Request-Response (CBOR for compact binary encoding)
-                let request_response = request_response::cbor::Behaviour::new(
-                    [(StreamProtocol::new("/shard/1"), ProtocolSupport::Full)],
-                    request_response::Config::default()
-                        .with_request_timeout(Duration::from_secs(60)),
-                );
+                    // Request-Response (CBOR for compact binary encoding)
+                    let request_response = request_response::cbor::Behaviour::new(
+                        [(StreamProtocol::new("/shard/1"), ProtocolSupport::Full)],
+                        request_response::Config::default()
+                            .with_request_timeout(Duration::from_secs(60)),
+                    );
 
-                // mDNS
-                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
-                    .expect("mDNS start");
+                    // mDNS (gracefully disabled in restricted / multicast-disabled containers)
+                    let mdns =
+                        match mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id) {
+                            Ok(behaviour) => Toggle::from(Some(behaviour)),
+                            Err(e) => {
+                                warn!("mDNS unavailable (starting without LAN discovery): {}", e);
+                                Toggle::from(None)
+                            }
+                        };
 
-                // Identify
-                let identify = identify::Behaviour::new(identify::Config::new(
-                    "shard/1.0.0".to_string(),
-                    key.public(),
-                ));
+                    // Identify
+                    let identify = identify::Behaviour::new(identify::Config::new(
+                        "shard/1.0.0".to_string(),
+                        key.public(),
+                    ));
 
-                // Ping (keeps connections alive)
-                let ping = ping::Behaviour::new(ping::Config::new());
+                    // Ping (keeps connections alive)
+                    let ping = ping::Behaviour::new(ping::Config::new());
 
-                // Relay (circuit relay v2)
-                let relay = relay::Behaviour::new(local_peer_id, relay::Config::default());
+                    // Relay (circuit relay v2)
+                    let relay = relay::Behaviour::new(local_peer_id, relay::Config::default());
 
-                // DCUtR (Direct Connection Upgrade through Relay)
-                let dcutr = dcutr::Behaviour::new(local_peer_id);
+                    // DCUtR (Direct Connection Upgrade through Relay)
+                    let dcutr = dcutr::Behaviour::new(local_peer_id);
 
-                // AutoNAT (NAT type detection)
-                let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
+                    // AutoNAT (NAT type detection)
+                    let autonat =
+                        autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
-                ShardBehaviour {
-                    gossipsub,
-                    kademlia,
-                    request_response,
-                    mdns,
-                    identify,
-                    ping,
-                    relay,
-                    dcutr,
-                    autonat,
-                }
-            })?
+                    Ok(ShardBehaviour {
+                        gossipsub,
+                        kademlia,
+                        request_response,
+                        mdns,
+                        identify,
+                        ping,
+                        relay,
+                        dcutr,
+                        autonat,
+                    })
+                },
+            )?
             .with_swarm_config(|config| {
                 config.with_idle_connection_timeout(Duration::from_secs(120))
             })

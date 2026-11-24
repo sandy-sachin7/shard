@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(decoded, data);
 
         let cipher = RepoCipher::generate();
-        let legacy_enc = cipher.encrypt(&legacy_compressed);
+        let legacy_enc = cipher.encrypt(&legacy_compressed).unwrap();
         let decoded_enc = decode_chunk(&id, &legacy_enc, Compression::Zstd, Some(&cipher)).unwrap();
         assert_eq!(decoded_enc, data);
     }
