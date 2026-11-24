@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.4.0 — Production Security, Durability & Correctness Hardening
+## v2.4.0 (2026-11-24) — Production Security, Durability & Correctness Hardening
 
 ### Security & Trust Boundaries
 - **P2P Ed25519 challenge-response authentication**: Restored real challenge-response handshake using fresh 32-byte `OsRng` nonces with 30s TTL, domain separation bound to both client and server `PeerId`s, `authorized_keys` enforcement, and automatic session cleanup on `ConnectionClosed`.
