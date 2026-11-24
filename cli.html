@@ -15,8 +15,8 @@
         <link rel="icon" href="favicon-de23e50b.svg">
         <link rel="shortcut icon" href="favicon-8114d1fc.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
-        <link rel="stylesheet" href="css/general-0392ca55.css">
-        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
         <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-69d8d7f4.js";
+            window.path_to_searchindex_js = "searchindex-d82c34bb.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-50be9360.js"></script>
@@ -181,56 +181,58 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="cli-reference"><a class="header" href="#cli-reference">CLI Reference</a></h1>
-<p>Shard exposes a unified CLI with Git-like ergonomics. All commands support a <code>--json</code> flag for machine-readable output.</p>
+<p>Shard exposes a unified CLI with Git-like ergonomics. Most data and status subcommands accept <code>--json</code> for machine-readable <code>stdout</code> output, while diagnostic logs are always written to <code>stderr</code>.</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th style="text-align: left">Command</th><th style="text-align: left">What it does</th><th style="text-align: left">Key flags</th></tr>
 </thead>
 <tbody>
-<tr><td style="text-align: left"><code>init</code></td><td style="text-align: left">Initialize a repository</td><td style="text-align: left"><code>--private</code>, <code>--db flat|sled|sqlite</code>, <code>--compression zstd|zlib|none</code>, <code>--chunker fixed|rabin</code>, <code>--passphrase</code></td></tr>
-<tr><td style="text-align: left"><code>add &lt;path&gt;</code></td><td style="text-align: left">Stage files for commit</td><td style="text-align: left">(recursive for directories)</td></tr>
-<tr><td style="text-align: left"><code>commit</code></td><td style="text-align: left">Create a signed commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>init</code></td><td style="text-align: left">Initialize a repository</td><td style="text-align: left"><code>--private</code>, <code>--db flat|sled|sqlite</code>, <code>--compression zstd|zlib|none</code>, <code>--chunker fixed|rabin</code>, <code>--chunk-size &lt;bytes&gt;</code>, <code>--passphrase</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>add &lt;path&gt;</code></td><td style="text-align: left">Stage files or directories for commit</td><td style="text-align: left"><code>--json</code> (recursive for directories; honors <code>.shardignore</code>)</td></tr>
+<tr><td style="text-align: left"><code>commit</code></td><td style="text-align: left">Create a signed commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code>, <code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>log</code></td><td style="text-align: left">Show commit history</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>checkout &lt;commit&gt;</code></td><td style="text-align: left">Restore files from commit</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>status</code></td><td style="text-align: left">Show working tree state</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>verify &lt;commit&gt;</code></td><td style="text-align: left">Verify integrity + signature</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>diff &lt;commit1&gt; &lt;commit2&gt;</code></td><td style="text-align: left">Compare two commits</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>checkout &lt;target&gt;</code></td><td style="text-align: left">Restore files from commit ID or branch</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>status</code></td><td style="text-align: left">Show working tree state</td><td style="text-align: left"><code>--json</code>, <code>--porcelain</code></td></tr>
+<tr><td style="text-align: left"><code>verify &lt;commit&gt;</code></td><td style="text-align: left">Verify integrity, Merkle roots, and signature</td><td style="text-align: left"><code>--allow-unsigned</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>diff &lt;commit1&gt; [commit2]</code></td><td style="text-align: left">Compare two commits</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>prune</code></td><td style="text-align: left">Remove unreachable objects</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>tag</code></td><td style="text-align: left">Manage commit tags</td><td style="text-align: left"><code>add</code>, <code>list</code>, <code>delete</code></td></tr>
-<tr><td style="text-align: left"><code>branch</code></td><td style="text-align: left">Manage branches</td><td style="text-align: left"><code>create</code>, <code>delete</code>, <code>list</code></td></tr>
-<tr><td style="text-align: left"><code>merge &lt;branch&gt;</code></td><td style="text-align: left">Merge branch into current HEAD</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>config</code></td><td style="text-align: left">View/edit configuration</td><td style="text-align: left"><code>get</code>, <code>set</code></td></tr>
-<tr><td style="text-align: left"><code>share</code></td><td style="text-align: left">Announce commits to P2P network</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>sync</code></td><td style="text-align: left">Discover + fetch from peers</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>pull &lt;peer&gt; &lt;commit&gt;</code></td><td style="text-align: left">Pull commit from specific peer</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>push &lt;peer&gt;</code></td><td style="text-align: left">Push commits to peer</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>peer add &lt;multiaddr&gt;</code></td><td style="text-align: left">Add a known peer</td><td style="text-align: left"><code>--public-key &lt;hex&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>backup &lt;output&gt;</code></td><td style="text-align: left">Create a tar.gz backup</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>restore &lt;backup&gt;</code></td><td style="text-align: left">Restore repo from backup</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>tag</code></td><td style="text-align: left">Manage commit tags</td><td style="text-align: left"><code>add &lt;name&gt; &lt;commit&gt;</code>, <code>list</code></td></tr>
+<tr><td style="text-align: left"><code>branch</code></td><td style="text-align: left">Manage branches</td><td style="text-align: left"><code>create &lt;name&gt; [commit]</code>, <code>delete &lt;name&gt;</code>, <code>list</code></td></tr>
+<tr><td style="text-align: left"><code>merge &lt;branch&gt;</code></td><td style="text-align: left">Merge branch into current HEAD</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>config</code></td><td style="text-align: left">View/edit configuration</td><td style="text-align: left"><code>get [key]</code>, <code>set &lt;key&gt; &lt;value&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>share</code></td><td style="text-align: left">Announce and serve commits on P2P network</td><td style="text-align: left"><code>--listen &lt;multiaddr&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>sync</code></td><td style="text-align: left">Discover and auto-pull updates from known peers</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>pull &lt;peer&gt; &lt;commit&gt;</code></td><td style="text-align: left">Pull commit from specific peer (<code>/p2p/&lt;peer_id&gt;</code>)</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>push &lt;peer&gt;</code></td><td style="text-align: left">Transfer objects reachable from HEAD to a peer (does not move receiver refs)</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>peer add &lt;multiaddr&gt;</code></td><td style="text-align: left">Add a known peer</td><td style="text-align: left"><code>--public-key &lt;hex&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>hf push &lt;dataset_id&gt;</code></td><td style="text-align: left">Checkpoint and upload sanitized <code>.shard</code> to HuggingFace Datasets</td><td style="text-align: left"><code>--token &lt;tok&gt;</code> (prefer <code>HF_TOKEN</code>), <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>hf pull &lt;dataset_id&gt;</code></td><td style="text-align: left">Download <code>.shard</code> repository from HuggingFace Datasets</td><td style="text-align: left"><code>--token &lt;tok&gt;</code> (prefer <code>HF_TOKEN</code>), <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>backup &lt;output&gt;</code></td><td style="text-align: left">Create a <code>.tar.gz</code> backup</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>restore &lt;backup&gt;</code></td><td style="text-align: left">Restore <code>.shard/</code> safely from backup</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>export &lt;commit&gt; &lt;dir&gt;</code></td><td style="text-align: left">Reconstruct commit to directory</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>import &lt;dir&gt;</code></td><td style="text-align: left">Ingest directory as commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>import &lt;dir&gt;</code></td><td style="text-align: left">Ingest directory as commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code>, <code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>recover</code></td><td style="text-align: left">Recover from WAL crash</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>health</code></td><td style="text-align: left">Show repository diagnostics + metrics</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>serve</code></td><td style="text-align: left">Start HTTP API server</td><td style="text-align: left"><code>--addr &lt;host:port&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>unlock</code></td><td style="text-align: left">Cache passphrase for session</td><td style="text-align: left"><code>--passphrase</code></td></tr>
-<tr><td style="text-align: left"><code>relay</code></td><td style="text-align: left">Start P2P relay node</td><td style="text-align: left"><code>--listen &lt;multiaddr&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>transfer</code></td><td style="text-align: left">Manage P2P transfer queue</td><td style="text-align: left"><code>list</code>, <code>remove</code></td></tr>
-<tr><td style="text-align: left"><code>key</code></td><td style="text-align: left">Manage signing keys</td><td style="text-align: left"><code>rotate</code>, <code>list</code>, <code>verify</code>, <code>add-authorized</code>, <code>remove-authorized</code>, <code>list-authorized</code></td></tr>
-<tr><td style="text-align: left"><code>completions</code></td><td style="text-align: left">Generate shell completions</td><td style="text-align: left"><code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>elvish</code>, <code>powershell</code></td></tr>
+<tr><td style="text-align: left"><code>serve</code></td><td style="text-align: left">Start authenticated HTTP API server</td><td style="text-align: left"><code>--addr &lt;host:port&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>unlock</code></td><td style="text-align: left">Verify passphrase against repository keys</td><td style="text-align: left"><code>--passphrase</code> (prefer <code>SHARD_PASSPHRASE</code>)</td></tr>
+<tr><td style="text-align: left"><code>relay</code></td><td style="text-align: left">Start P2P Circuit Relay v2 node</td><td style="text-align: left"><code>--listen &lt;multiaddr&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>transfer</code></td><td style="text-align: left">Manage resumable P2P partial transfers</td><td style="text-align: left"><code>list [--json]</code>, <code>remove &lt;commit_id&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>key</code></td><td style="text-align: left">Manage signing keys &amp; authorized peers</td><td style="text-align: left"><code>rotate</code>, <code>list [--json]</code>, <code>verify [--json]</code>, <code>add-authorized &lt;hex&gt;</code>, <code>remove-authorized &lt;hex&gt;</code>, <code>list-authorized [--json]</code></td></tr>
+<tr><td style="text-align: left"><code>completions &lt;shell&gt;</code></td><td style="text-align: left">Generate shell completions</td><td style="text-align: left"><code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>elvish</code>, <code>powershell</code></td></tr>
 </tbody>
 </table>
 </div>
-<h3 id="global-flags"><a class="header" href="#global-flags">Global flags</a></h3>
+<p>Before a peer can push, add its public key on the receiving repo with <code>shard key add-authorized &lt;public-key-hex&gt;</code>. Repos without <code>authorized_keys</code> allow P2P reads and reject P2P writes.</p>
+<h2 id="global-flags"><a class="header" href="#global-flags">Global Flags</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th style="text-align: left">Flag</th><th style="text-align: left">Effect</th></tr>
 </thead>
 <tbody>
-<tr><td style="text-align: left"><code>--json</code></td><td style="text-align: left">Machine-readable JSON output</td></tr>
-<tr><td style="text-align: left"><code>--log-format</code></td><td style="text-align: left">Log output format: <code>plain</code> (default) or <code>json</code></td></tr>
-<tr><td style="text-align: left"><code>--verbose</code></td><td style="text-align: left">Debug-level logging</td></tr>
+<tr><td style="text-align: left"><code>--log-format &lt;plain|json&gt;</code></td><td style="text-align: left">Log output format on <code>stderr</code>: <code>plain</code> (default) or <code>json</code></td></tr>
+<tr><td style="text-align: left"><code>-v</code>, <code>--verbose</code></td><td style="text-align: left">Enable debug-level logging on <code>stderr</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -283,7 +285,7 @@
 
         <script src="clipboard-1626706a.min.js"></script>
         <script src="highlight-abc7f01d.js"></script>
-        <script src="book-c22b7243.js"></script>
+        <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
 

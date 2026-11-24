@@ -15,8 +15,8 @@
         <link rel="icon" href="favicon-de23e50b.svg">
         <link rel="shortcut icon" href="favicon-8114d1fc.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
-        <link rel="stylesheet" href="css/general-0392ca55.css">
-        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
         <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-69d8d7f4.js";
+            window.path_to_searchindex_js = "searchindex-d82c34bb.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-50be9360.js"></script>
@@ -206,9 +206,9 @@
 <tr><td style="text-align: left"><strong>Compression</strong></td><td style="text-align: left">zlib (default)</td><td style="text-align: left">Zstd or Zlib (runtime selectable)</td></tr>
 <tr><td style="text-align: left"><strong>Hashing</strong></td><td style="text-align: left">SHA-1 / SHA-256</td><td style="text-align: left">Blake3</td></tr>
 <tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">Remote-centric</td><td style="text-align: left">Native P2P (mDNS, Kademlia, Gossipsub)</td></tr>
-<tr><td style="text-align: left"><strong>Storage backend</strong></td><td style="text-align: left">Flat files + packfiles</td><td style="text-align: left">Sled or SQLite indexed store</td></tr>
-<tr><td style="text-align: left"><strong>Signing</strong></td><td style="text-align: left">GPG (optional)</td><td style="text-align: left">ed25519 (built-in, every commit)</td></tr>
-<tr><td style="text-align: left"><strong>Transport</strong></td><td style="text-align: left">SSH/HTTPS</td><td style="text-align: left">libp2p TCP + Noise + Yamux</td></tr>
+<tr><td style="text-align: left"><strong>Storage backend</strong></td><td style="text-align: left">Flat files + packfiles</td><td style="text-align: left">FlatStore (default), Sled, or SQLite (WAL + pool)</td></tr>
+<tr><td style="text-align: left"><strong>Signing</strong></td><td style="text-align: left">GPG (optional)</td><td style="text-align: left">Ed25519 (built-in, every commit)</td></tr>
+<tr><td style="text-align: left"><strong>Transport</strong></td><td style="text-align: left">SSH/HTTPS</td><td style="text-align: left">libp2p TCP + QUIC + Noise + Yamux</td></tr>
 </tbody>
 </table>
 </div>
@@ -263,7 +263,7 @@
 
         <script src="clipboard-1626706a.min.js"></script>
         <script src="highlight-abc7f01d.js"></script>
-        <script src="book-c22b7243.js"></script>
+        <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
 

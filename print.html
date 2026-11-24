@@ -16,8 +16,8 @@
         <link rel="icon" href="favicon-de23e50b.svg">
         <link rel="shortcut icon" href="favicon-8114d1fc.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
-        <link rel="stylesheet" href="css/general-0392ca55.css">
-        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
         <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-69d8d7f4.js";
+            window.path_to_searchindex_js = "searchindex-d82c34bb.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-50be9360.js"></script>
@@ -204,9 +204,9 @@
 <tr><td style="text-align: left"><strong>Compression</strong></td><td style="text-align: left">zlib (default)</td><td style="text-align: left">Zstd or Zlib (runtime selectable)</td></tr>
 <tr><td style="text-align: left"><strong>Hashing</strong></td><td style="text-align: left">SHA-1 / SHA-256</td><td style="text-align: left">Blake3</td></tr>
 <tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">Remote-centric</td><td style="text-align: left">Native P2P (mDNS, Kademlia, Gossipsub)</td></tr>
-<tr><td style="text-align: left"><strong>Storage backend</strong></td><td style="text-align: left">Flat files + packfiles</td><td style="text-align: left">Sled or SQLite indexed store</td></tr>
-<tr><td style="text-align: left"><strong>Signing</strong></td><td style="text-align: left">GPG (optional)</td><td style="text-align: left">ed25519 (built-in, every commit)</td></tr>
-<tr><td style="text-align: left"><strong>Transport</strong></td><td style="text-align: left">SSH/HTTPS</td><td style="text-align: left">libp2p TCP + Noise + Yamux</td></tr>
+<tr><td style="text-align: left"><strong>Storage backend</strong></td><td style="text-align: left">Flat files + packfiles</td><td style="text-align: left">FlatStore (default), Sled, or SQLite (WAL + pool)</td></tr>
+<tr><td style="text-align: left"><strong>Signing</strong></td><td style="text-align: left">GPG (optional)</td><td style="text-align: left">Ed25519 (built-in, every commit)</td></tr>
+<tr><td style="text-align: left"><strong>Transport</strong></td><td style="text-align: left">SSH/HTTPS</td><td style="text-align: left">libp2p TCP + QUIC + Noise + Yamux</td></tr>
 </tbody>
 </table>
 </div>
@@ -221,6 +221,9 @@
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="getting-started"><a class="header" href="#getting-started">Getting Started</a></h1>
 <h2 id="install"><a class="header" href="#install">Install</a></h2>
+<p><strong>Python (pip)</strong></p>
+<pre><code class="language-bash">pip install shard-py
+</code></pre>
 <p><strong>Linux &amp; macOS (one-liner)</strong></p>
 <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/sandy-sachin7/shard/main/scripts/install.sh | bash
 </code></pre>
@@ -230,14 +233,14 @@
 <p><strong>Cargo</strong></p>
 <pre><code class="language-bash">cargo install shard-cli
 </code></pre>
-<p><strong>Build from source</strong></p>
+<p><strong>Build from source (Rust 1.89+)</strong></p>
 <pre><code class="language-bash">git clone https://github.com/sandy-sachin7/shard.git
 cd shard
 cargo build --release
 ./target/release/shard --help
 </code></pre>
 <hr>
-<h2 id="quick-start"><a class="header" href="#quick-start">Quick start</a></h2>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
 <pre><code class="language-bash"># Initialize a repository
 shard init
 
@@ -246,20 +249,21 @@ shard add model.pt
 shard add dataset/           # recursive directory add
 
 # Commit with a message
-shard commit -m "v1 checkpoint" --author "Alice"
+shard commit -m "v1 checkpoint" --author "Alice &lt;alice@ml.dev&gt;"
 
-# View history
+# View history &amp; working tree state
 shard log
 shard log --json             # machine-readable
+shard status --porcelain
 
 # Check out files from a commit
 shard checkout &lt;commit_id&gt;
 
-# Share with peers
-shard share                  # announce on P2P network
+# Share with peers (prints your /ip4/.../tcp/&lt;port&gt;/p2p/&lt;peer_id&gt; multiaddr)
+shard share --listen /ip4/0.0.0.0/tcp/9876
 
-# Pull from a peer
-shard pull /ip4/192.168.1.2/tcp/9876 &lt;commit_id&gt;
+# Pull from a peer using its full multiaddr including /p2p/&lt;peer_id&gt;
+shard pull /ip4/192.168.1.2/tcp/9876/p2p/&lt;peer_id&gt; &lt;commit_id&gt;
 
 # Verify integrity and signature
 shard verify &lt;commit_id&gt;
@@ -268,141 +272,140 @@ shard verify &lt;commit_id&gt;
 shard branch create experiment
 shard checkout experiment
 shard add model.pt
-shard commit -m "experimental changes"
+shard commit -m "experimental changes" --author "Alice &lt;alice@ml.dev&gt;"
 shard checkout main
-shard merge experiment -m "merge experiment" --author "Alice"
+shard merge experiment -m "merge experiment" --author "Alice &lt;alice@ml.dev&gt;"
 
 # Backup and recovery
 shard backup /tmp/repo-backup.tar.gz
 shard restore /tmp/repo-backup.tar.gz
 shard export &lt;commit_id&gt; /tmp/reconstructed
-shard import /tmp/datasets -m "imported dataset" --author "Alice"
+shard import /tmp/datasets -m "imported dataset" --author "Alice &lt;alice@ml.dev&gt;"
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="cli-reference"><a class="header" href="#cli-reference">CLI Reference</a></h1>
-<p>Shard exposes a unified CLI with Git-like ergonomics. All commands support a <code>--json</code> flag for machine-readable output.</p>
+<p>Shard exposes a unified CLI with Git-like ergonomics. Most data and status subcommands accept <code>--json</code> for machine-readable <code>stdout</code> output, while diagnostic logs are always written to <code>stderr</code>.</p>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th style="text-align: left">Command</th><th style="text-align: left">What it does</th><th style="text-align: left">Key flags</th></tr>
 </thead>
 <tbody>
-<tr><td style="text-align: left"><code>init</code></td><td style="text-align: left">Initialize a repository</td><td style="text-align: left"><code>--private</code>, <code>--db flat|sled|sqlite</code>, <code>--compression zstd|zlib|none</code>, <code>--chunker fixed|rabin</code>, <code>--passphrase</code></td></tr>
-<tr><td style="text-align: left"><code>add &lt;path&gt;</code></td><td style="text-align: left">Stage files for commit</td><td style="text-align: left">(recursive for directories)</td></tr>
-<tr><td style="text-align: left"><code>commit</code></td><td style="text-align: left">Create a signed commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>init</code></td><td style="text-align: left">Initialize a repository</td><td style="text-align: left"><code>--private</code>, <code>--db flat|sled|sqlite</code>, <code>--compression zstd|zlib|none</code>, <code>--chunker fixed|rabin</code>, <code>--chunk-size &lt;bytes&gt;</code>, <code>--passphrase</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>add &lt;path&gt;</code></td><td style="text-align: left">Stage files or directories for commit</td><td style="text-align: left"><code>--json</code> (recursive for directories; honors <code>.shardignore</code>)</td></tr>
+<tr><td style="text-align: left"><code>commit</code></td><td style="text-align: left">Create a signed commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code>, <code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>log</code></td><td style="text-align: left">Show commit history</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>checkout &lt;commit&gt;</code></td><td style="text-align: left">Restore files from commit</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>status</code></td><td style="text-align: left">Show working tree state</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>verify &lt;commit&gt;</code></td><td style="text-align: left">Verify integrity + signature</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>diff &lt;commit1&gt; &lt;commit2&gt;</code></td><td style="text-align: left">Compare two commits</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>checkout &lt;target&gt;</code></td><td style="text-align: left">Restore files from commit ID or branch</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>status</code></td><td style="text-align: left">Show working tree state</td><td style="text-align: left"><code>--json</code>, <code>--porcelain</code></td></tr>
+<tr><td style="text-align: left"><code>verify &lt;commit&gt;</code></td><td style="text-align: left">Verify integrity, Merkle roots, and signature</td><td style="text-align: left"><code>--allow-unsigned</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>diff &lt;commit1&gt; [commit2]</code></td><td style="text-align: left">Compare two commits</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>prune</code></td><td style="text-align: left">Remove unreachable objects</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>tag</code></td><td style="text-align: left">Manage commit tags</td><td style="text-align: left"><code>add</code>, <code>list</code>, <code>delete</code></td></tr>
-<tr><td style="text-align: left"><code>branch</code></td><td style="text-align: left">Manage branches</td><td style="text-align: left"><code>create</code>, <code>delete</code>, <code>list</code></td></tr>
-<tr><td style="text-align: left"><code>merge &lt;branch&gt;</code></td><td style="text-align: left">Merge branch into current HEAD</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>config</code></td><td style="text-align: left">View/edit configuration</td><td style="text-align: left"><code>get</code>, <code>set</code></td></tr>
-<tr><td style="text-align: left"><code>share</code></td><td style="text-align: left">Announce commits to P2P network</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>sync</code></td><td style="text-align: left">Discover + fetch from peers</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>pull &lt;peer&gt; &lt;commit&gt;</code></td><td style="text-align: left">Pull commit from specific peer</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>push &lt;peer&gt;</code></td><td style="text-align: left">Push commits to peer</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>peer add &lt;multiaddr&gt;</code></td><td style="text-align: left">Add a known peer</td><td style="text-align: left"><code>--public-key &lt;hex&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>backup &lt;output&gt;</code></td><td style="text-align: left">Create a tar.gz backup</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>restore &lt;backup&gt;</code></td><td style="text-align: left">Restore repo from backup</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>tag</code></td><td style="text-align: left">Manage commit tags</td><td style="text-align: left"><code>add &lt;name&gt; &lt;commit&gt;</code>, <code>list</code></td></tr>
+<tr><td style="text-align: left"><code>branch</code></td><td style="text-align: left">Manage branches</td><td style="text-align: left"><code>create &lt;name&gt; [commit]</code>, <code>delete &lt;name&gt;</code>, <code>list</code></td></tr>
+<tr><td style="text-align: left"><code>merge &lt;branch&gt;</code></td><td style="text-align: left">Merge branch into current HEAD</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>config</code></td><td style="text-align: left">View/edit configuration</td><td style="text-align: left"><code>get [key]</code>, <code>set &lt;key&gt; &lt;value&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>share</code></td><td style="text-align: left">Announce and serve commits on P2P network</td><td style="text-align: left"><code>--listen &lt;multiaddr&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>sync</code></td><td style="text-align: left">Discover and auto-pull updates from known peers</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>pull &lt;peer&gt; &lt;commit&gt;</code></td><td style="text-align: left">Pull commit from specific peer (<code>/p2p/&lt;peer_id&gt;</code>)</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>push &lt;peer&gt;</code></td><td style="text-align: left">Transfer objects reachable from HEAD to a peer (does not move receiver refs)</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>peer add &lt;multiaddr&gt;</code></td><td style="text-align: left">Add a known peer</td><td style="text-align: left"><code>--public-key &lt;hex&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>hf push &lt;dataset_id&gt;</code></td><td style="text-align: left">Checkpoint and upload sanitized <code>.shard</code> to HuggingFace Datasets</td><td style="text-align: left"><code>--token &lt;tok&gt;</code> (prefer <code>HF_TOKEN</code>), <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>hf pull &lt;dataset_id&gt;</code></td><td style="text-align: left">Download <code>.shard</code> repository from HuggingFace Datasets</td><td style="text-align: left"><code>--token &lt;tok&gt;</code> (prefer <code>HF_TOKEN</code>), <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>backup &lt;output&gt;</code></td><td style="text-align: left">Create a <code>.tar.gz</code> backup</td><td style="text-align: left"><code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>restore &lt;backup&gt;</code></td><td style="text-align: left">Restore <code>.shard/</code> safely from backup</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>export &lt;commit&gt; &lt;dir&gt;</code></td><td style="text-align: left">Reconstruct commit to directory</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>import &lt;dir&gt;</code></td><td style="text-align: left">Ingest directory as commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>import &lt;dir&gt;</code></td><td style="text-align: left">Ingest directory as commit</td><td style="text-align: left"><code>-m &lt;msg&gt;</code>, <code>--author &lt;name&gt;</code>, <code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>recover</code></td><td style="text-align: left">Recover from WAL crash</td><td style="text-align: left"><code>--json</code></td></tr>
 <tr><td style="text-align: left"><code>health</code></td><td style="text-align: left">Show repository diagnostics + metrics</td><td style="text-align: left"><code>--json</code></td></tr>
-<tr><td style="text-align: left"><code>serve</code></td><td style="text-align: left">Start HTTP API server</td><td style="text-align: left"><code>--addr &lt;host:port&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>unlock</code></td><td style="text-align: left">Cache passphrase for session</td><td style="text-align: left"><code>--passphrase</code></td></tr>
-<tr><td style="text-align: left"><code>relay</code></td><td style="text-align: left">Start P2P relay node</td><td style="text-align: left"><code>--listen &lt;multiaddr&gt;</code></td></tr>
-<tr><td style="text-align: left"><code>transfer</code></td><td style="text-align: left">Manage P2P transfer queue</td><td style="text-align: left"><code>list</code>, <code>remove</code></td></tr>
-<tr><td style="text-align: left"><code>key</code></td><td style="text-align: left">Manage signing keys</td><td style="text-align: left"><code>rotate</code>, <code>list</code>, <code>verify</code>, <code>add-authorized</code>, <code>remove-authorized</code>, <code>list-authorized</code></td></tr>
-<tr><td style="text-align: left"><code>completions</code></td><td style="text-align: left">Generate shell completions</td><td style="text-align: left"><code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>elvish</code>, <code>powershell</code></td></tr>
+<tr><td style="text-align: left"><code>serve</code></td><td style="text-align: left">Start authenticated HTTP API server</td><td style="text-align: left"><code>--addr &lt;host:port&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>unlock</code></td><td style="text-align: left">Verify passphrase against repository keys</td><td style="text-align: left"><code>--passphrase</code> (prefer <code>SHARD_PASSPHRASE</code>)</td></tr>
+<tr><td style="text-align: left"><code>relay</code></td><td style="text-align: left">Start P2P Circuit Relay v2 node</td><td style="text-align: left"><code>--listen &lt;multiaddr&gt;</code>, <code>--json</code></td></tr>
+<tr><td style="text-align: left"><code>transfer</code></td><td style="text-align: left">Manage resumable P2P partial transfers</td><td style="text-align: left"><code>list [--json]</code>, <code>remove &lt;commit_id&gt;</code></td></tr>
+<tr><td style="text-align: left"><code>key</code></td><td style="text-align: left">Manage signing keys &amp; authorized peers</td><td style="text-align: left"><code>rotate</code>, <code>list [--json]</code>, <code>verify [--json]</code>, <code>add-authorized &lt;hex&gt;</code>, <code>remove-authorized &lt;hex&gt;</code>, <code>list-authorized [--json]</code></td></tr>
+<tr><td style="text-align: left"><code>completions &lt;shell&gt;</code></td><td style="text-align: left">Generate shell completions</td><td style="text-align: left"><code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>elvish</code>, <code>powershell</code></td></tr>
 </tbody>
 </table>
 </div>
-<h3 id="global-flags"><a class="header" href="#global-flags">Global flags</a></h3>
+<p>Before a peer can push, add its public key on the receiving repo with <code>shard key add-authorized &lt;public-key-hex&gt;</code>. Repos without <code>authorized_keys</code> allow P2P reads and reject P2P writes.</p>
+<h2 id="global-flags"><a class="header" href="#global-flags">Global Flags</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
 <tr><th style="text-align: left">Flag</th><th style="text-align: left">Effect</th></tr>
 </thead>
 <tbody>
-<tr><td style="text-align: left"><code>--json</code></td><td style="text-align: left">Machine-readable JSON output</td></tr>
-<tr><td style="text-align: left"><code>--log-format</code></td><td style="text-align: left">Log output format: <code>plain</code> (default) or <code>json</code></td></tr>
-<tr><td style="text-align: left"><code>--verbose</code></td><td style="text-align: left">Debug-level logging</td></tr>
+<tr><td style="text-align: left"><code>--log-format &lt;plain|json&gt;</code></td><td style="text-align: left">Log output format on <code>stderr</code>: <code>plain</code> (default) or <code>json</code></td></tr>
+<tr><td style="text-align: left"><code>-v</code>, <code>--verbose</code></td><td style="text-align: left">Enable debug-level logging on <code>stderr</code></td></tr>
 </tbody>
 </table>
 </div>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
-<p>Shard is structured as a collection of decoupled crates, tied together by the main CLI entrypoint.</p>
+<p>Shard is structured as a workspace of five decoupled crates plus native Python bindings (<code>shard-py</code>), orchestrated by <code>shard-core</code>.</p>
 <h2 id="component-diagram"><a class="header" href="#component-diagram">Component Diagram</a></h2>
 <pre class="mermaid">graph TD
-    CLI["shard CLI&lt;br/&gt;(clap argument parsing)"]
-    
-    subgraph Core ["core crate"]
-        OpQueue["Operation Queue&lt;br/&gt;(read/write locking)"]
-        Config["Config System&lt;br/&gt;(env overrides + validation)"]
-        GC["Garbage Collector&lt;br/&gt;(DAG reachability scan)"]
+    CLI["shard-cli&lt;br/&gt;(clap CLI entrypoint)"]
+    PY["shard-py&lt;br/&gt;(PyO3 native Python bindings)"]
+
+    subgraph Core["shard-core"]
+        OpQueue["Operation Queue + .shard.lock&lt;br/&gt;(in-process RW + OS fs2 lock)"]
+        Config["Config System&lt;br/&gt;(config.json + SHARD_* env overrides)"]
+        GC["Garbage Collector&lt;br/&gt;(DAG reachability + inbound pins)"]
         Tracing["Distributed Tracing&lt;br/&gt;(thread-local trace IDs)"]
-        Metrics["Runtime Metrics&lt;br/&gt;(atomic counters)"]
-        Chunker["Chunker&lt;br/&gt;(Fixed / Rabin)"]
-        Compression["Compression&lt;br/&gt;(Zstd / Zlib)"]
-        Store["Store&lt;br/&gt;(Sled / SQLite)"]
-        CommitDAG["Commit DAG&lt;br/&gt;Manifest / Index / WAL&lt;br/&gt;Branch / Merge / Push"]
-        API["HTTP API&lt;br/&gt;(axum /api/v1/*)"]
+        Metrics["Runtime Metrics&lt;br/&gt;(32 atomic counters)"]
+        Chunker["Chunker&lt;br/&gt;(Fixed 4 MiB / Rabin CDC)"]
+        Codec["SHRD v1 Chunk Codec&lt;br/&gt;(Zstd / Zlib / AES-256-GCM AAD)"]
+        Store["Store Abstraction&lt;br/&gt;(FlatStore default / Sled / SQLite)"]
+        CommitDAG["Commit DAG · Manifest · Index&lt;br/&gt;CRC32 WAL · Branch · Merge · HF"]
+        API["HTTP API&lt;br/&gt;(Axum /api/v1/* + Bearer Auth)"]
     end
-    
-    subgraph Net ["net crate"]
-        LibP2P["libp2p Node&lt;br/&gt;TCP+Noise+Yamux&lt;br/&gt;mDNS / Kademlia&lt;br/&gt;Gossipsub&lt;br/&gt;Relay / DCUtR / AutoNAT&lt;br/&gt;Rate Limiting"]
+
+    subgraph Net["shard-net"]
+        LibP2P["libp2p Node&lt;br/&gt;TCP + QUIC · Noise · Yamux&lt;br/&gt;mDNS · Kademlia · Gossipsub&lt;br/&gt;CBOR Req/Resp · 2-step Auth&lt;br/&gt;Circuit Relay v2 · DCUtR · AutoNAT"]
     end
-    
-    subgraph Crypto ["crypto crate"]
-        KeyGen["ed25519 key generation&lt;br/&gt;Signing &amp; Verification&lt;br/&gt;Passphrase encryption&lt;br/&gt;Key rotation"]
+
+    subgraph Crypto["shard-crypto"]
+        KeyGen["Ed25519 KeyPair&lt;br/&gt;Argon2id + AES-256-GCM&lt;br/&gt;0o600 Atomic Persistence · Zeroize"]
     end
-    
-    subgraph Storage ["storage crate"]
-        SledBackend["Sled Backend"]
-        SQLiteBackend["SQLite Backend&lt;br/&gt;(r2d2 connection pool)"]
+
+    subgraph Storage["shard-storage"]
+        SledBackend["SledBackend&lt;br/&gt;(in-process handle cache)"]
+        SQLiteBackend["SqliteBackend&lt;br/&gt;(WAL + r2d2 pool + truncate checkpoint)"]
     end
-    
+
     CLI --&gt; Core
-    CLI --&gt; Net
+    CLI --&gt; Crypto
+    PY --&gt; Core
+    Core --&gt; Net
     Core --&gt; Crypto
     Core --&gt; Storage
-    Net --&gt; Crypto
-    Core -.-&gt; OpQueue
-    Core -.-&gt; Config
-    Core -.-&gt; GC
-    Core -.-&gt; Tracing
-    Core -.-&gt; Metrics
-    Core -.-&gt; Chunker
-    Core -.-&gt; Compression
-    Core -.-&gt; Store
-    Core -.-&gt; CommitDAG
-    Core -.-&gt; API
 </pre>
 
 <h2 id="storage-layout"><a class="header" href="#storage-layout">Storage Layout</a></h2>
-<p>Shard stores all its data in a <code>.shard/</code> directory at the root of the repository.</p>
+<p>Shard stores repository state inside <code>.shard/</code> and places the advisory OS lock file <code>.shard.lock</code> at the repository root (so even concurrent <code>shard init</code> calls are serialized).</p>
 <pre class="mermaid">graph LR
-    Root[".shard/"] --&gt; Objects["objects/"]
-    Objects --&gt; Prefix["&lt;2-prefix&gt;/"]
-    Prefix --&gt; Hash["&lt;hash&gt; (content-addressed chunks)"]
-    
-    Root --&gt; HEAD["HEAD (current commit reference)"]
+    Repo["&amp;lt;repo_root&amp;gt;/"] --&gt; Lock[".shard.lock (OS fs2 advisory lock)"]
+    Repo --&gt; Root[".shard/"]
+
+    Root --&gt; Objects["objects/&amp;lt;2-hex&amp;gt;/&amp;lt;64-hex&amp;gt;&lt;br/&gt;(FlatStore, default)"]
+    Root --&gt; ObjectsDB["objects.db&lt;br/&gt;(Sled dir or SQLite WAL db)"]
+    Root --&gt; HEAD["HEAD (branch ref or commit ID)"]
     Root --&gt; Config["config.json (repository config)"]
     Root --&gt; Index["index (staging area)"]
-    Root --&gt; Wal["wal.log (crash recovery)"]
-    
+    Root --&gt; Wal["wal.log (CRC32 crash recovery WAL)"]
+    Root --&gt; Partial["partial/ (resumable P2P transfers)"]
+
     Root --&gt; Keys["keys/"]
-    Keys --&gt; Sec["secret.key"]
+    Keys --&gt; Sec["secret.key (0o600, optional Argon2id+AES-GCM)"]
     Keys --&gt; Pub["public.key"]
-    
+    Keys --&gt; RepoKey["repo.key (private AES-256-GCM key)"]
+    Keys --&gt; Current["current (active key_id)"]
+    Keys --&gt; Records["records/ &amp;amp; rotations/ &amp;amp; archive/"]
+
     Root --&gt; Refs["refs/heads/ (branch pointers)"]
-    Root --&gt; Auth["authorized_keys (P2P auth whitelist)"]
-    Root --&gt; Peers["peers.json (known P2P peers)"]
-    Root --&gt; Tags["tags.json (named commit pointers)"]
+    Root --&gt; Auth["authorized_keys (P2P auth allowlist)"]
+    Root --&gt; Peers["peers.json (trusted P2P peer multiaddrs)"]
+    Root --&gt; Tags["tags.json (named commit tags)"]
 </pre>
 
 <h2 id="key-design-decisions"><a class="header" href="#key-design-decisions">Key Design Decisions</a></h2>
@@ -412,96 +415,139 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 <tr><th style="text-align: left">Decision</th><th style="text-align: left">Choice</th><th style="text-align: left">Rationale</th></tr>
 </thead>
 <tbody>
-<tr><td style="text-align: left"><strong>Chunking</strong></td><td style="text-align: left">Rabin (default) or Fixed</td><td style="text-align: left">Rabin CDC improves dedup across versions; fixed for predictable sizes</td></tr>
-<tr><td style="text-align: left"><strong>Compression</strong></td><td style="text-align: left">Zstd or Zlib</td><td style="text-align: left">Runtime selection; zstd is faster with better ratios</td></tr>
-<tr><td style="text-align: left"><strong>Hashing</strong></td><td style="text-align: left">Blake3</td><td style="text-align: left">Fastest cryptographic hash, SIMD-accelerated</td></tr>
-<tr><td style="text-align: left"><strong>Signatures</strong></td><td style="text-align: left">ed25519</td><td style="text-align: left">Proven, fast, small signatures (64 bytes)</td></tr>
-<tr><td style="text-align: left"><strong>Storage</strong></td><td style="text-align: left">Sled, SQLite, or Flat file</td><td style="text-align: left">Sled/SQLite for indexed queries; flat for portability</td></tr>
-<tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">libp2p TCP+Noise+Yamux</td><td style="text-align: left">Mature, NAT traversal via relay/DCUtR/AutoNAT</td></tr>
-<tr><td style="text-align: left"><strong>Wire format</strong></td><td style="text-align: left">JSON / CBOR</td><td style="text-align: left">Serde over request-response + Gossipsub</td></tr>
-<tr><td style="text-align: left"><strong>Concurrency</strong></td><td style="text-align: left">Per-repo read-write queue</td><td style="text-align: left">Reads parallel, writes exclusive; no global lock</td></tr>
-<tr><td style="text-align: left"><strong>Config</strong></td><td style="text-align: left">JSON + env var overrides</td><td style="text-align: left">12-factor friendly; <code>SHARD_*</code> env vars take precedence</td></tr>
-<tr><td style="text-align: left"><strong>Tracing</strong></td><td style="text-align: left">Thread-local trace IDs</td><td style="text-align: left">Correlate logs across operations</td></tr>
-<tr><td style="text-align: left"><strong>GC</strong></td><td style="text-align: left">DAG reachability scan</td><td style="text-align: left">Marks all reachable from HEAD/branches/tags/index, prunes rest</td></tr>
-<tr><td style="text-align: left"><strong>Metrics</strong></td><td style="text-align: left">Static atomic counters</td><td style="text-align: left">Runtime operation counters with JSON snapshot</td></tr>
+<tr><td style="text-align: left"><strong>Chunking</strong></td><td style="text-align: left">Fixed 4 MiB (default) or Rabin CDC (<code>--chunker rabin</code>)</td><td style="text-align: left">Fixed for predictable I/O and peak throughput; Rabin CDC for byte-shift-resilient checkpoint dedup</td></tr>
+<tr><td style="text-align: left"><strong>Compression &amp; Encryption</strong></td><td style="text-align: left"><code>SHRD</code> v1 self-describing 8-byte envelope (Zstd/Zlib/None + AES-256-GCM AAD)</td><td style="text-align: left">Safe dedup across compression changes; AAD binds ciphertext to <code>chunk_id</code></td></tr>
+<tr><td style="text-align: left"><strong>Hashing</strong></td><td style="text-align: left">Blake3</td><td style="text-align: left">SIMD-accelerated 256-bit cryptographic hash for content addressing and Merkle roots</td></tr>
+<tr><td style="text-align: left"><strong>Signatures</strong></td><td style="text-align: left">Ed25519</td><td style="text-align: left">Fast, compact 64-byte signatures with signed key rotation and trust-anchor verification</td></tr>
+<tr><td style="text-align: left"><strong>Storage</strong></td><td style="text-align: left"><code>FlatStore</code> (default), <code>Sled</code>, or <code>SQLite</code></td><td style="text-align: left"><code>FlatStore</code> for simple zero-dependency portability; <code>Sled</code>/<code>SQLite</code> for indexed single-DB storage</td></tr>
+<tr><td style="text-align: left"><strong>P2P</strong></td><td style="text-align: left">libp2p TCP + QUIC + Noise + Yamux</td><td style="text-align: left">Mature encrypted transports with Circuit Relay v2, DCUtR, and AutoNAT</td></tr>
+<tr><td style="text-align: left"><strong>Wire Format</strong></td><td style="text-align: left">CBOR (request-response) + JSON (Gossipsub)</td><td style="text-align: left">Compact binary framing for object transfer; inspectable pubsub announcements</td></tr>
+<tr><td style="text-align: left"><strong>Concurrency</strong></td><td style="text-align: left">In-process <code>RwLock</code> + <code>.shard.lock</code> OS advisory lock</td><td style="text-align: left">Readers run in parallel, writers are exclusive across threads and processes</td></tr>
+<tr><td style="text-align: left"><strong>Config</strong></td><td style="text-align: left">JSON + <code>SHARD_*</code> env var overrides</td><td style="text-align: left">12-factor friendly with schema validation before repository mutation</td></tr>
+<tr><td style="text-align: left"><strong>Tracing &amp; Metrics</strong></td><td style="text-align: left">Thread-local trace IDs + 32 static atomic counters</td><td style="text-align: left">Correlate diagnostic logs on <code>stderr</code> and export health snapshots via <code>--json</code></td></tr>
+<tr><td style="text-align: left"><strong>GC</strong></td><td style="text-align: left">DAG reachability + inbound pin scan</td><td style="text-align: left">Marks reachable objects from HEAD, branches, tags, index, and active P2P pushes before pruning</td></tr>
 </tbody>
 </table>
 </div>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="protocol-specification"><a class="header" href="#protocol-specification">Protocol Specification</a></h1>
-<p>This document details the P2P wire protocol and data synchronization primitives used in Shard.</p>
-<h2 id="discovery"><a class="header" href="#discovery">Discovery</a></h2>
-<p>Nodes in the Shard network must discover each other before exchanging data. We rely on standard <code>libp2p</code> protocols:</p>
+<p>This document details Shard’s chunk envelope codec, P2P wire protocol, authentication handshake, rate limiting, and SSRF defenses.</p>
+<hr>
+<h2 id="discovery--transports"><a class="header" href="#discovery--transports">Discovery &amp; Transports</a></h2>
+<p>Shard nodes run on <code>libp2p</code> with the following stack:</p>
 <ul>
-<li><strong>Primary:</strong> libp2p DHT + Kademlia.</li>
-<li><strong>LAN fallback:</strong> mDNS.</li>
-<li><strong>Manual bootstrap:</strong> <code>shard peer add &lt;multiaddr&gt;</code>.</li>
-</ul>
-<h2 id="data-model-deterministic-and-canonical"><a class="header" href="#data-model-deterministic-and-canonical">Data Model (Deterministic and Canonical)</a></h2>
-<p>All metadata in Shard is canonicalized (sorted keys) and signed using <code>ed25519</code>.</p>
+<li><strong>Transports</strong>: TCP (<code>nodelay</code>) + Noise + Yamux, and QUIC (TLS 1.3), with DNS resolution.</li>
+<li><strong>NAT Traversal</strong>: Circuit Relay v2, DCUtR (Direct Connection Upgrade through Relay), and AutoNAT.</li>
+<li><strong>Discovery</strong>:
 <ul>
-<li><strong>Blob (chunk):</strong> Raw bytes saved in <code>objects/&lt;2prefix&gt;/&lt;hash&gt;</code>. Hash is computed using Blake3(chunk).</li>
-<li><strong>Manifest:</strong> Artifact descriptor containing filename, content type, compression flag, chunk list (ordered), merkle root, size, created_by, and created_at.</li>
-<li><strong>Commit node:</strong> JSON with <code>commit_id</code> (hash of canonical commit JSON), <code>parents:[]</code>, <code>manifests:[]</code>, <code>author</code>, <code>message</code>, <code>timestamp</code>, <code>signature</code>.</li>
+<li><strong>DHT</strong>: Kademlia (<code>kad</code>).</li>
+<li><strong>LAN</strong>: mDNS (gracefully disabled in multicast-restricted containers).</li>
+<li><strong>Manual bootstrap</strong>: <code>shard peer add &lt;multiaddr&gt;</code> (stored in <code>.shard/peers.json</code>).</li>
 </ul>
-<h2 id="announcements"><a class="header" href="#announcements">Announcements</a></h2>
-<p>When a repository is updated, nodes announce the new commit over the P2P network.</p>
+</li>
+</ul>
+<hr>
+<h2 id="data-model--shrd-v1-chunk-envelope"><a class="header" href="#data-model--shrd-v1-chunk-envelope">Data Model &amp; <code>SHRD</code> v1 Chunk Envelope</a></h2>
+<p>All metadata objects (commits, manifests, key rotation records) are canonicalized and signed with Ed25519. Every object ID is strictly validated as a 64-character lowercase hexadecimal Blake3 digest.</p>
+<h3 id="shrd-v1-chunk-envelope-8-byte-header"><a class="header" href="#shrd-v1-chunk-envelope-8-byte-header"><code>SHRD</code> v1 Chunk Envelope (8-byte Header)</a></h3>
+<p>Chunks are addressed by <code>blake3(plaintext)</code> and stored/transferred inside a self-describing 8-byte envelope:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: left">Offset</th><th style="text-align: left">Size</th><th style="text-align: left">Field</th><th style="text-align: left">Description</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: left"><code>0..4</code></td><td style="text-align: left">4 bytes</td><td style="text-align: left"><code>magic</code></td><td style="text-align: left">ASCII <code>SHRD</code> (<code>[0x53, 0x48, 0x52, 0x44]</code>)</td></tr>
+<tr><td style="text-align: left"><code>4</code></td><td style="text-align: left">1 byte</td><td style="text-align: left"><code>version</code></td><td style="text-align: left">Envelope version (<code>1</code>)</td></tr>
+<tr><td style="text-align: left"><code>5</code></td><td style="text-align: left">1 byte</td><td style="text-align: left"><code>flags</code></td><td style="text-align: left">Bits <code>0..2</code>: compression (<code>0 = none</code>, <code>1 = zstd</code>, <code>2 = zlib</code>) · Bit <code>2</code> (<code>0x04</code>): encrypted with AES-256-GCM</td></tr>
+<tr><td style="text-align: left"><code>6..8</code></td><td style="text-align: left">2 bytes</td><td style="text-align: left"><code>reserved</code></td><td style="text-align: left">Zero bytes (<code>0x00, 0x00</code>)</td></tr>
+<tr><td style="text-align: left"><code>8..</code></td><td style="text-align: left">variable</td><td style="text-align: left"><code>payload</code></td><td style="text-align: left">Compressed bytes, or AES-256-GCM (`12-byte nonce</td></tr>
+</tbody>
+</table>
+</div>
 <ul>
-<li><strong>Topic:</strong> <code>shard:ann</code> (global) and <code>/shard/repo/&lt;repo_id&gt;</code> (repo-specific)</li>
-<li><strong>Payload:</strong> JSON-serialized <code>Announcement</code>:</li>
+<li><strong>Swap resistance</strong>: Binding <code>chunk_id</code> as AES-256-GCM AAD prevents an attacker from substituting one valid encrypted chunk for another.</li>
+<li><strong>Legacy compatibility</strong>: Headerless pre-v2.4 chunks remain decodable via manifest compression metadata.</li>
+<li><strong>Wire size limit</strong>: Maximum wire payload size is capped at <code>65 MiB</code> (<code>MAX_WIRE_CHUNK_SIZE</code>).</li>
 </ul>
+<hr>
+<h2 id="2-step-ed25519-challenge-response-authentication"><a class="header" href="#2-step-ed25519-challenge-response-authentication">2-Step Ed25519 Challenge-Response Authentication</a></h2>
+<p>Shard runs a CBOR request-response protocol on <code>/shard/1</code> (<code>ShardRequest</code> / <code>ShardResponse</code>).</p>
+<h3 id="authorization-policy"><a class="header" href="#authorization-policy">Authorization Policy</a></h3>
+<ul>
+<li><strong>Reads (<code>GetManifest</code>, <code>GetChunk</code>)</strong>: Open when <code>.shard/authorized_keys</code> is absent; strictly gated on Ed25519 authentication when <code>authorized_keys</code> is configured.</li>
+<li><strong>Writes (<code>PutChunk</code>)</strong>: Always require authentication against <code>.shard/authorized_keys</code> (repositories with no <code>authorized_keys</code> reject all P2P writes).</li>
+</ul>
+<h3 id="handshake-flow"><a class="header" href="#handshake-flow">Handshake Flow</a></h3>
+<pre class="mermaid">sequenceDiagram
+    participant C as Client Peer (client_peer)
+    participant S as Server Peer (server_peer)
+
+    C-&gt;&gt;S: 1. ShardRequest::Authenticate { public_key (32 bytes) }
+    Note over S: Checks authorization policy &amp;&lt;br/&gt;generates 32-byte CSPRNG nonce (30s TTL)
+    S--&gt;&gt;C: 2. ShardResponse::AuthChallenge { nonce (32 bytes) }
+
+    Note over C: Builds canonical domain-separated payload:&lt;br/&gt;"shard-p2p-auth-v1:" || u32be(len(client_peer)) || client_peer&lt;br/&gt;|| u32be(len(server_peer)) || server_peer || nonce&lt;br/&gt;Signs with Ed25519 signing_key
+
+    C-&gt;&gt;S: 3. ShardRequest::AuthAnswer { signature (64 bytes) }
+    Note over S: Checks challenge TTL (&lt;= 30s),&lt;br/&gt;verifies Ed25519 signature over canonical payload,&lt;br/&gt;re-checks authorized_keys
+    alt Valid &amp; Authorized
+        S--&gt;&gt;C: 4a. ShardResponse::AuthGranted
+    else Invalid / Expired / Unauthorized
+        S--&gt;&gt;C: 4b. ShardResponse::AuthDenied
+    end
+</pre>
+
+<ul>
+<li><strong>Replay &amp; MITM protection</strong>: The signed payload binds the protocol domain (<code>shard-p2p-auth-v1:</code>), client <code>PeerId</code>, server <code>PeerId</code>, and single-use 32-byte server nonce.</li>
+<li><strong>Lifecycle</strong>: Pending challenges expire after 30 seconds (<code>AUTH_CHALLENGE_TTL</code>). Authenticated session state is cleared immediately when all connections to a peer close (<code>on_connection_closed</code>), and authorization is re-checked against <code>authorized_keys</code> on every request so revoking a key takes effect immediately.</li>
+</ul>
+<hr>
+<h2 id="gossipsub-announcements--ssrf-defense"><a class="header" href="#gossipsub-announcements--ssrf-defense">Gossipsub Announcements &amp; SSRF Defense</a></h2>
+<p>Nodes subscribe to:</p>
+<ul>
+<li><code>shard:ann</code> (global announcement topic)</li>
+<li><code>/shard/repo/&lt;repo_id&gt;</code> (repository-specific topic)</li>
+</ul>
+<p>Payload (JSON-serialized <code>Announcement</code>):</p>
 <pre><code class="language-json">{
-  "commit_id": "&lt;blake3 hash&gt;",
+  "commit_id": "&lt;64-char blake3 hex&gt;",
   "file_count": 42,
   "total_size": 1073741824,
   "repo_name": "my-model",
-  "peer_multiaddr": "/ip4/192.168.1.2/tcp/9876"
+  "peer_multiaddr": "/ip4/192.168.1.2/tcp/9876/p2p/&lt;peer_id&gt;"
 }
 </code></pre>
-<p>Nodes subscribe to both topics. Announcements are published on initial share, on a 5-second heartbeat, and when new connections are established.</p>
-<h2 id="rate-limiting"><a class="header" href="#rate-limiting">Rate Limiting</a></h2>
-<ul>
-<li><strong>Gossipsub:</strong> Custom <code>message_id_fn</code> (blake3 content-hash dedup), <code>max_messages_per_rpc(100)</code></li>
-<li><strong>Announcements:</strong> Per-peer per-commit dedup, max 5 unique (peer,commit_id) pairs per 60s window</li>
-<li><strong>Requests:</strong> Max 50 per-peer requests per window; request-response timeout of 60s</li>
-<li><strong>Reset:</strong> All rate counters reset every 5s interval tick</li>
-<li><strong>Deduplication:</strong> Duplicate messages silently dropped via content-hash message IDs</li>
-</ul>
-<h2 id="fetch-flow"><a class="header" href="#fetch-flow">Fetch Flow</a></h2>
-<p>The core mechanism for retrieving artifacts from peers operates via a parallelized fetch flow.</p>
-<pre class="mermaid">sequenceDiagram
-    participant Peer A (Client)
-    participant Peer B (Announcer)
-    
-    Peer B--)Peer A: 1. PubSub Announcement (commit_id)
-    Peer A-&gt;&gt;Peer B: 2. Request Manifest (commit_id)
-    Peer B--&gt;&gt;Peer A: 3. Return Signed Manifest
-    
-    Note over Peer A: Compares chunk list&lt;br/&gt;to local index
-    
-    par Chunk Requests
-        Peer A-&gt;&gt;Peer B: 4a. Request Chunk (hash1)
-        Peer B--&gt;&gt;Peer A: 5a. Return Chunk payload + header
-    and
-        Peer A-&gt;&gt;Peer B: 4b. Request Chunk (hash2)
-        Peer B--&gt;&gt;Peer A: 5b. Return Chunk payload + header
-    end
-    
-    Note over Peer A: 6. Assemble artifact &amp; verify Merkle root
-</pre>
-
+<h3 id="ssrf-protection-in-shard-sync"><a class="header" href="#ssrf-protection-in-shard-sync">SSRF Protection in <code>shard sync</code></a></h3>
+<p>To prevent malicious Gossipsub messages from tricking a node into dialing arbitrary internal IP addresses:</p>
 <ol>
-<li><strong>Announcement:</strong> Peer sees announcement → requests manifest via DHT or direct stream to announcer.</li>
-<li><strong>Manifest:</strong> Manifest returned (signed).</li>
-<li><strong>Diff:</strong> Peer compares chunk list to local index → requests missing chunks via parallel piece requests (libp2p streams).</li>
-<li><strong>Chunks:</strong> Chunks transferred with piece headers <code>{hash, offset, size}</code> and signed payload.</li>
-<li><strong>Assemble:</strong> On complete, client assembles artifact and verifies Merkle root and final digest.</li>
+<li><code>shard sync</code> only considers announcements published on the repository’s own <code>/shard/repo/&lt;repo_id&gt;</code> topic with a valid 64-hex <code>commit_id</code>.</li>
+<li><code>shard sync</code> <strong>never</strong> dials the untrusted <code>peer_multiaddr</code> string from an incoming announcement payload.</li>
+<li>Auto-pulls only dial peers already present in the node’s trusted <code>address_book</code> (populated exclusively from <code>.shard/peers.json</code>, LAN mDNS discovery, or established outbound dialed connections), bounded by a concurrency semaphore (<code>MAX_CONCURRENT_AUTO_PULLS = 4</code>).</li>
 </ol>
-<h2 id="resilience--security"><a class="header" href="#resilience--security">Resilience &amp; Security</a></h2>
+<hr>
+<h2 id="sliding-window-per-peer-rate-limiting"><a class="header" href="#sliding-window-per-peer-rate-limiting">Sliding-Window Per-Peer Rate Limiting</a></h2>
+<p>Both <code>shard share</code> and <code>shard sync</code> enforce a sliding-window <code>PeerRateLimiter</code>:</p>
 <ul>
-<li><strong>Resilience:</strong> Parallel downloads, chunk retries, resumable transfer (persists partial chunks to <code>.partial/</code>).</li>
-<li><strong>Security:</strong> Metadata signed; payloads integrity verified; optional encryption with per-repo symmetric keys. Key rotation is handled via a signed revocation commit in the DAG.</li>
+<li><strong>Request-Response Limiter</strong>: Controlled by <code>rate_limit_max_requests</code> (default <code>50</code>) and <code>rate_limit_window_secs</code> (default <code>60</code>). Each peer tracks request timestamps in a <code>VecDeque&lt;Instant&gt;</code>, evicting expired entries on check and pruning stale peer buckets every interval tick.</li>
+<li><strong>Announcement Limiter</strong>: Caps incoming Gossipsub announcements in <code>sync</code> to <code>10</code> per peer per rate-limit window to prevent pubsub amplification floods.</li>
+<li><strong>Request Timeout</strong>: CBOR request-response streams enforce a 60-second stream timeout and 30-second client request deadline.</li>
 </ul>
+<hr>
+<h2 id="fetch--push-flows"><a class="header" href="#fetch--push-flows">Fetch &amp; Push Flows</a></h2>
+<h3 id="pull-flow-shard-pull-multiaddrp2ppeer_id-commit_id"><a class="header" href="#pull-flow-shard-pull-multiaddrp2ppeer_id-commit_id">Pull Flow (<code>shard pull &lt;multiaddr&gt;/p2p/&lt;peer_id&gt; &lt;commit_id&gt;</code>)</a></h3>
+<ol>
+<li>Client connects to peer (performing 2-step Ed25519 auth if the peer requires it).</li>
+<li>Client fetches commit object via <code>GetManifest(commit_id)</code>, verifies <code>blake3(data) == commit_id</code>, checks Ed25519 signature + <code>authorized_keys</code> trust rules, and traverses parent commits and file manifests.</li>
+<li>Missing chunks are fetched in parallel via <code>GetChunk(hash)</code> and verified through <code>SHRD</code> v1 decoding + Blake3 plaintext hash check.</li>
+<li>Partial progress is persisted under <code>.shard/partial/</code> for resumable transfers.</li>
+</ol>
+<h3 id="push-flow-shard-push-multiaddrp2ppeer_id"><a class="header" href="#push-flow-shard-push-multiaddrp2ppeer_id">Push Flow (<code>shard push &lt;multiaddr&gt;/p2p/&lt;peer_id&gt;</code>)</a></h3>
+<ol>
+<li>Sender collects all objects reachable from <code>HEAD</code> (commits, manifests, chunks, and key rotation records).</li>
+<li>Sender completes 2-step Ed25519 challenge-response authentication with the receiver.</li>
+<li>Sender streams each object via <code>PutChunk(ChunkPiece)</code>. The receiver verifies object integrity (<code>verify_wire_object</code>), persists it to its store, and records an inbound GC pin so background pruning cannot delete pushed objects prior to checkout. Push never mutates the receiver’s <code>HEAD</code> or branch refs.</li>
+</ol>
 
                     </main>
 
@@ -539,7 +585,7 @@ shard import /tmp/datasets -m "imported dataset" --author "Alice"
 
         <script src="clipboard-1626706a.min.js"></script>
         <script src="highlight-abc7f01d.js"></script>
-        <script src="book-c22b7243.js"></script>
+        <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
 
