@@ -84,6 +84,10 @@ cargo install --path cmd/shard-cli
 
 ## Performance (Measured)
 
+<p align="center">
+  <img src="docs/assets/shard-poster.png" alt="Shard Rabin CDC vs fixed chunking poster showing 98.5% deduplication and 3.74 MiB stored on a 1 MiB prepend over 256 MiB weights" width="100%" />
+</p>
+
 All numbers below are **measured** on Linux x86_64 (AMD Ryzen 5 5600H, 12 logical CPUs) with `shard-cli 2.4.1` using [`benchmarks/bench_real.py`](benchmarks/bench_real.py) across 256 MiB artifacts — covering both **high-entropy binary weights** (incompressible `1.00×`, representative of trained FP16/BF16 tensors) and **structured JSONL datasets** (compressible with Zstd):
 
 | Scenario (256 MiB artifact) | Chunker | v1 Store Size (Compression) | v2 Incremental Delta Stored | Dedup Savings | `shard verify` | `shard checkout` |
