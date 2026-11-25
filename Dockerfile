@@ -20,7 +20,7 @@ COPY tests/ tests/
 
 RUN cargo build --release --locked --bin shard
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates && \
     addgroup -S shard && \
     adduser -S -u 10001 -G shard -h /data shard && \
