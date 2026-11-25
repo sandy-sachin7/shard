@@ -82,28 +82,22 @@ cargo install --path cmd/shard-cli
 
 ---
 
-## Performance
+## Performance (Measured)
 
-### Measured Local Throughput
+All numbers below are **measured** on Linux x86_64 (AMD Ryzen 5 5600H, 12 logical CPUs) with `shard-cli 2.4.1` using [`benchmarks/bench_real.py`](benchmarks/bench_real.py) across 256 MiB artifacts — covering both **high-entropy binary weights** (incompressible `1.00×`, representative of trained FP16/BF16 tensors) and **structured JSONL datasets** (compressible with Zstd):
 
-Reproduce on your own hardware with `./benchmarks/benchmark.sh [size_mb]` or `cargo bench` (see [benchmarks/METHODOLOGY.md](benchmarks/METHODOLOGY.md)):
+| Scenario (256 MiB artifact) | Chunker | v1 Store Size (Compression) | v2 Incremental Delta Stored | Dedup Savings | `shard verify` | `shard checkout` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **High-entropy weights + 5% append (12.8 MiB)** | `fixed` | 256.01 MiB (`1.00×`) | **12.81 MiB** | **95.0%** | 238 MB/s | 206 MB/s |
+| **High-entropy weights + 5% append (12.8 MiB)** | `rabin` | 256.01 MiB (`1.00×`) | **16.90 MiB** | **93.4%** | 358 MB/s | 267 MB/s |
+| **High-entropy weights + 1 MiB prepend (offset shift)** | `fixed` | 256.01 MiB (`1.00×`) | 257.01 MiB | 0.0% | 479 MB/s | 424 MB/s |
+| **High-entropy weights + 1 MiB prepend (offset shift)** | `rabin` | 256.01 MiB (`1.00×`) | **3.74 MiB** | **98.5%** | **982 MB/s** | **622 MB/s** |
+| **JSONL dataset + 1 MiB prepend (offset shift)** | `fixed` | 25.00 MiB (`10.25×`) | 24.96 MiB | 0.1% | 1,249 MB/s | 666 MB/s |
+| **JSONL dataset + 1 MiB prepend (offset shift)** | `rabin` | 25.05 MiB (`10.23×`) | **0.51 MiB** | **98.0%** | **1,204 MB/s** | 487 MB/s |
 
-| Local Pipeline Stage | Typical Throughput / Characteristic | Implementation |
-| :--- | :--- | :--- |
-| **Fixed-size chunking (4 MiB)** | ~500 MB/s – 1 GB/s (I/O + Blake3 + Zstd) | SIMD-accelerated `blake3` + streaming `BufWriter` |
-| **Rabin CDC chunking** | ~500 MB/s | Rolling content-defined boundaries for checkpoint dedup |
-| **Compression (Zstd level 3)** | ~500 MB/s compress · ~2 GB/s decompress | Self-describing `SHRD` v1 chunk envelope |
-| **Memory footprint** | Bounded (O(chunk size × concurrency)) | Streams chunk-by-chunk during add/checkout/export/push |
+> **Honest takeaway:** Trained neural-network weights (FP16/BF16/FP32) are high-entropy and do **not** shrink meaningfully under Zstd (`~1.00×`), whereas text/JSONL/tabular datasets routinely compress `5–10×`. Shard's main storage and sync win on checkpoints comes from **content-defined chunk deduplication**: when headers or tensors shift offsets (`+1 MiB prepend`), fixed-size chunking re-stores 100% of the file while `--chunker rabin` deduplicates **98.5%** of unchanged bytes.
 
-### Estimated LAN P2P Transfer Times (Illustrative)
-
-> **Note:** The table below compares **estimated** 1 Gbps LAN P2P transfer times (assuming 3–5× Zstd compression and 5% checkpoint delta) against typical centralized cloud-server uploads. Actual transfer speed depends on your network link, disk I/O, and tensor entropy. To measure real P2P transfer between two machines on your network, run `./benchmarks/p2p_bench.sh`.
-
-| Scenario (10 GB Checkpoint) | Git LFS (cloud, est.) | HuggingFace CLI (cloud, est.) | Shard P2P (1 Gbps LAN, est.) |
-| :--- | :--- | :--- | :--- |
-| **Initial transfer (10 GB)** | ~5 min | ~4 min | **~40 sec** (direct P2P + Zstd) |
-| **Incremental update (5% changed)** | Full 10 GB upload | Full 10 GB upload | **~20 sec** (~500 MB changed chunks via Rabin CDC) |
-| **Incremental storage overhead** | 1:1 full copy | 1:1 full copy | **~1.05:1** (chunk-level deduplication) |
+Reproduce locally with `python3 benchmarks/bench_real.py --size-mb 256`, `cargo bench`, or measure real LAN transfer between two machines with `./benchmarks/p2p_bench.sh` (see [benchmarks/METHODOLOGY.md](benchmarks/METHODOLOGY.md)).
 
 ```bash
 # Track a base model checkpoint

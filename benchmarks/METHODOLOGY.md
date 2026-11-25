@@ -1,105 +1,56 @@
 # Benchmark Methodology
 
-## Local Benchmarks (`benchmark.sh`)
+All performance numbers reported in Shard's `README.md` are **directly measured** using reproducible scripts in this directory — no estimated or extrapolated network tables.
 
-### What is measured
+## Local End-to-End Benchmarks (`bench_real.py`)
 
-| Operation | What it does |
-|-----------|--------------|
-| `shard add` | Read file → chunk (4MiB fixed) → compress (zstd) → hash (blake3) → store in `.shard/objects/` |
-| `shard commit` | Create signed commit manifest, update HEAD |
-
-### What is NOT measured
-
-- **Network transfer**: `shard add` and `shard commit` are purely local
-- **P2P operations**: `share`, `pull`, `push` require two nodes
-- **Git LFS push**: Includes upload to remote server (network-bound)
-
-### Why local benchmarks matter
-
-Chunking + compression + hashing is the core of Shard's performance advantage:
-- **Fixed 4MiB chunks** → predictable I/O patterns, cache-friendly
-- **Zstd compression** → 3-5x ratio reduces disk I/O
-- **Blake3 hashing** → SIMD-accelerated, ~1 GB/s
-
-These are the operations that dominate real workloads. A 10GB model checkpoint spend most of its time in chunking/compression, not network transfer.
-
-### Extrapolation to 10GB
+Run with:
 
 ```bash
-# 1GB benchmark result
-./benchmark.sh 1024
-# e.g., TOTAL = 1.2 seconds → throughput = 833 MB/s
-
-# Linear extrapolation to 10GB (approximate)
-echo "1.2 * 10 = 12 seconds"
+cargo build --release
+python3 benchmarks/bench_real.py --size-mb 256
 ```
 
-**Note**: Linear extrapolation is approximate. At larger sizes, RAM cache effects diminish and real performance may be slightly lower.
+### Workloads
 
----
+1. **High-entropy binary weights (`weights.bin`)**: Independent `os.urandom` bytes (`1.00×` Zstd compressibility), representative of trained FP16/BF16/FP32 neural network weights.
+   - `weights_append_5pct`: appends 5% new bytes to the end of the file.
+   - `weights_prepend_1mb`: prepends 1 MiB at byte 0 (shifting every subsequent offset — worst case for fixed chunking, ideal test for Rabin CDC).
+2. **Structured JSONL dataset (`dataset.jsonl`)**: Unique training records with realistic text + token arrays.
+   - `jsonl_prepend_1mb`: prepends 1 MiB of new records at the start of the dataset.
 
-## P2P Benchmarks (`p2p_bench.sh`)
+### Measured Metrics
 
-To measure actual network transfer speeds:
+| Operation | What it measures |
+| :--- | :--- |
+| `shard add` + `shard commit` (v1) | Initial chunking (`fixed` 4 MiB or `rabin` CDC) + Zstd compression + Blake3 hashing + Ed25519 signing + `.shard/objects` size |
+| `shard add` + `shard commit` (v2) | Incremental chunking + exact delta bytes added to `.shard/objects` (deduplication savings) |
+| `shard verify` | Full Blake3 content hash, Merkle root, and Ed25519 signature verification |
+| `shard checkout` | Full artifact reconstruction from `.shard/objects` |
+
+### Why Compressibility Depends on Artifact Class
+
+- **Trained model weights (FP16/BF16/FP32)**: High entropy; Zstd compression ratio is typically `~1.00–1.15×`. Storage savings come from **chunk-level deduplication** across unchanged tensors/blocks, not compression.
+- **Datasets (JSONL, CSV, text, uncompressed tarballs)**: Low entropy; Zstd typically achieves `3–10×` compression on top of Rabin CDC deduplication.
+
+## P2P Transfer Benchmarks (`p2p_bench.sh`)
+
+Network transfer speed depends heavily on link bandwidth, NAT/relay topology, and disk I/O. Measure real P2P transfers between two machines on your network with:
 
 ```bash
 # Node A (receiver)
 ./benchmarks/p2p_bench.sh receive
 
-# Node B (sender) — after Node A shows its listen address
+# Node B (sender) — after Node A prints its multiaddr
 ./benchmarks/p2p_bench.sh send <node_a_multiaddr> 1024
 ```
 
-This measures `shard pull` — the actual P2P transfer with chunking, compression, and network I/O.
+## Criterion Micro-Benchmarks
 
----
+```bash
+cargo bench -p shard-core
+```
 
-## Git LFS Comparison
+## Reporting Results
 
-The README comparison table shows:
-
-| Operation | Git LFS | Shard |
-|-----------|---------|-------|
-| Initial push (10GB) | ~5 min | ~40 sec |
-
-### Source of Git LFS number
-
-Git LFS push time depends on:
-- Network bandwidth to LFS server (typically 50-100 Mbps for cloud VMs)
-- File size (10 GB = 80 Gbits)
-- Server-side processing
-
-**Calculation**: 80 Gbits / 75 Mbps ≈ 1067 seconds ≈ 18 minutes (conservative)
-**Reported**: ~5 min (optimistic, on fast connection)
-
-### Source of Shard number
-
-P2P transfer of 10GB with:
-- Rabin CDC chunking (dedup ratio depends on data similarity)
-- Zstd compression (3-5x ratio)
-- Direct peer-to-peer (no server bottleneck)
-
-**Estimated**: ~40 seconds on 1 Gbps peer connection
-
-### Why these are hard to compare
-
-- Git LFS requires a Git LFS server (centralized)
-- Shard P2P requires a connected peer (decentralized)
-- Network conditions vary wildly
-
----
-
-## Reproducibility Checklist
-
-To verify benchmark results:
-
-1. Run `./benchmark.sh 1024` locally — confirm throughput
-2. For P2P: run `p2p_bench.sh` on two machines on same LAN
-3. For Git LFS: set up a Git LFS server and measure actual push time
-
-Results are architecture, OS, and hardware dependent. Report:
-- CPU model
-- RAM size
-- Disk type (SSD vs HDD)
-- Network setup
+When sharing benchmark numbers in issues or PRs, include CPU model, RAM size, OS/kernel, disk type (NVMe/SSD/HDD), and `shard --version`.

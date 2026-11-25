@@ -120,8 +120,8 @@ else
     echo "    - shard pull:   P2P transfer speed"
     echo "    - shard push:   P2P push speed"
     echo ""
-    echo "  The README claims ~40 sec for 10GB push (P2P)."
-    echo "  Run benchmarks/p2p_bench.sh on two machines to verify."
+    echo "  Run benchmarks/bench_real.py for dedup & compression benchmarks,"
+    echo "  or benchmarks/p2p_bench.sh on two machines for real P2P transfer timing."
 fi
 
 echo ""

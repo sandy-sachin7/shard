@@ -5,14 +5,11 @@ Reproducible performance benchmarks for Shard operations.
 ## Quick Start
 
 ```bash
-# Run default 1GB benchmark
-./benchmark.sh
+# Run measured multi-workload benchmark (weights + JSONL, fixed vs Rabin CDC, verify & checkout)
+python3 benchmarks/bench_real.py --size-mb 256
 
-# Run 512MB benchmark
-./benchmark.sh 512
-
-# Run with JSON output (for automation)
-./benchmark.sh 1024 json
+# Run raw 1GB local add+commit throughput check
+./benchmarks/benchmark.sh 1024
 ```
 
 ## What This Measures
