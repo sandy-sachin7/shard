@@ -17,3 +17,7 @@ tempfile = { workspace = true }
 [[test]]
 name = "integration"
 path = "tests.rs"
+
+[[test]]
+name = "resilience"
+path = "resilience.rs"

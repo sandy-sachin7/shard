@@ -21,7 +21,7 @@
   <br />
   <a href="#install"><b>Install</b></a> •
   <a href="#quick-start"><b>Quick Start</b></a> •
-  <a href="#security--enterprise-guarantees"><b>Security</b></a> •
+  <a href="#security--durability"><b>Security</b></a> •
   <a href="#architecture"><b>Architecture</b></a> •
   <a href="#commands"><b>Commands</b></a>
 </div>
@@ -34,7 +34,7 @@
 
   <h3>Day 2: Incremental Checkpoint (Appending 1MB to a 500MB file)</h3>
   <img src="docs/assets/incremental_demo.gif" alt="Shard Demo Incremental" width="80%">
-  <p><i>While Git LFS re-uploads the entire file, Shard's Rabin CDC detects and stores only the modified chunks.</i></p>
+  <p><i>While Git LFS re-uploads the entire file, Shard's FastCDC chunker detects and stores only the modified chunks.</i></p>
 </div>
 
 ---
@@ -85,33 +85,45 @@ cargo install --path cmd/shard-cli
 ## Performance (Measured)
 
 <p align="center">
-  <img src="docs/assets/shard-poster.png" alt="Shard Rabin CDC vs fixed chunking poster showing 98.5% deduplication and 3.74 MiB stored on a 1 MiB prepend over 256 MiB weights" width="100%" />
+  <img src="docs/assets/shard-poster.png" alt="Shard FastCDC vs fixed chunking poster showing 98.5% deduplication and 3.74 MiB stored on a 1 MiB prepend over 256 MiB weights" width="100%" />
 </p>
 
-All numbers below are **measured** on Linux x86_64 (AMD Ryzen 5 5600H, 12 logical CPUs) with `shard-cli 2.4.1` using [`benchmarks/bench_real.py`](benchmarks/bench_real.py) across 256 MiB artifacts — covering both **high-entropy binary weights** (incompressible `1.00×`, representative of trained FP16/BF16 tensors) and **structured JSONL datasets** (compressible with Zstd):
+All numbers below are **measured** on Linux x86_64 (AMD Ryzen 5 5600H, 12 logical CPUs) using [`benchmarks/bench_real.py`](benchmarks/bench_real.py) across 256 MiB artifacts — covering both **high-entropy binary payloads** (incompressible `1.00×`) and **structured JSONL datasets** (compressible with Zstd):
 
 | Scenario (256 MiB artifact) | Chunker | v1 Store Size (Compression) | v2 Incremental Delta Stored | Dedup Savings | `shard verify` | `shard checkout` |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **High-entropy weights + 5% append (12.8 MiB)** | `fixed` | 256.01 MiB (`1.00×`) | **12.81 MiB** | **95.0%** | 238 MB/s | 206 MB/s |
-| **High-entropy weights + 5% append (12.8 MiB)** | `rabin` | 256.01 MiB (`1.00×`) | **16.90 MiB** | **93.4%** | 358 MB/s | 267 MB/s |
-| **High-entropy weights + 1 MiB prepend (offset shift)** | `fixed` | 256.01 MiB (`1.00×`) | 257.01 MiB | 0.0% | 479 MB/s | 424 MB/s |
-| **High-entropy weights + 1 MiB prepend (offset shift)** | `rabin` | 256.01 MiB (`1.00×`) | **3.74 MiB** | **98.5%** | **982 MB/s** | **622 MB/s** |
+| **High-entropy payload + 5% append (12.8 MiB)** | `fixed` | 256.01 MiB (`1.00×`) | **12.81 MiB** | **95.0%** | 238 MB/s | 206 MB/s |
+| **High-entropy payload + 5% append (12.8 MiB)** | `fastcdc` | 256.01 MiB (`1.00×`) | **16.90 MiB** | **93.4%** | 358 MB/s | 267 MB/s |
+| **High-entropy payload + 1 MiB prepend (offset shift)** | `fixed` | 256.01 MiB (`1.00×`) | 257.01 MiB | 0.0% | 479 MB/s | 424 MB/s |
+| **High-entropy payload + 1 MiB prepend (offset shift)** | `fastcdc` | 256.01 MiB (`1.00×`) | **3.74 MiB** | **98.5%** | **982 MB/s** | **622 MB/s** |
 | **JSONL dataset + 1 MiB prepend (offset shift)** | `fixed` | 25.00 MiB (`10.25×`) | 24.96 MiB | 0.1% | 1,249 MB/s | 666 MB/s |
-| **JSONL dataset + 1 MiB prepend (offset shift)** | `rabin` | 25.05 MiB (`10.23×`) | **0.51 MiB** | **98.0%** | **1,204 MB/s** | 487 MB/s |
+| **JSONL dataset + 1 MiB prepend (offset shift)** | `fastcdc` | 25.05 MiB (`10.23×`) | **0.51 MiB** | **98.0%** | **1,204 MB/s** | 487 MB/s |
 
-> **Honest takeaway:** Trained neural-network weights (FP16/BF16/FP32) are high-entropy and do **not** shrink meaningfully under Zstd (`~1.00×`), whereas text/JSONL/tabular datasets routinely compress `5–10×`. Shard's main storage and sync win on checkpoints comes from **content-defined chunk deduplication**: when headers or tensors shift offsets (`+1 MiB prepend`), fixed-size chunking re-stores 100% of the file while `--chunker rabin` deduplicates **98.5%** of unchanged bytes.
+### Empirical ML Checkpoint Deduplication (64 MiB FP32 Safetensors-Style Weights)
 
-Reproduce locally with `python3 benchmarks/bench_real.py --size-mb 256`, `cargo bench`, or measure real LAN transfer between two machines with `./benchmarks/p2p_bench.sh` (see [benchmarks/METHODOLOGY.md](benchmarks/METHODOLOGY.md)).
+Measured with [`benchmarks/bench_checkpoints.py`](benchmarks/bench_checkpoints.py) (raw output in [`benchmarks/checkpoint_dedup_results.json`](benchmarks/checkpoint_dedup_results.json)):
+
+| Checkpoint Update Pattern (64 MiB FP32) | Chunker | v1 Store (Zstd) | v2 Incremental Delta | Chunk Dedup (vs v1 store) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Full fine-tune (100% FP32 weights updated by `1e-4` step)** | `fixed` / `fastcdc` | 59.31 MiB | 59.31 MiB | **0.0%** |
+| **Frozen 90% backbone + 10% updated head / adapter** | `fixed` | 59.31 MiB | 7.42 MiB | **87.5%** |
+| **Frozen 90% backbone + 10% updated head / adapter** | `fastcdc` | 59.31 MiB | **6.52 MiB** | **89.0%** |
+| **1 MiB adapter prepend + frozen backbone (offset shift)** | `fixed` | 59.31 MiB | 60.24 MiB | **0.0%** |
+| **1 MiB adapter prepend + frozen backbone (offset shift)** | `fastcdc` | 59.31 MiB | **26.99 MiB** | **54.5%** |
+
+> **Honest takeaway:** Full fine-tuning perturbs every float weight each epoch, so byte-level chunk deduplication yields **0% savings** there — in that workflow, Shard's value is signed Ed25519 provenance, client-side encryption, and direct P2P sync. Content-defined deduplication (`--chunker fastcdc`, legacy alias `--chunker rabin`) delivers strong storage and sync wins when layers stay frozen (LoRA/adapters, frozen backbones), headers shift tensor offsets, or structured JSONL/tabular datasets evolve incrementally.
+
+Reproduce locally with `python3 benchmarks/bench_real.py --size-mb 256`, `uv run --with numpy python3 benchmarks/bench_checkpoints.py`, `cargo bench`, or `./benchmarks/p2p_bench.sh` (see [benchmarks/METHODOLOGY.md](benchmarks/METHODOLOGY.md)).
 
 ```bash
 # Track a base model checkpoint
-shard init --chunker rabin
-shard add model.pt
+shard init --chunker fastcdc
+shard add model.safetensors
 shard commit -m "base model" --author "Alice <alice@ml.dev>"
 
-# After training epoch 50 (only changed chunks are stored & synced)
-shard add model.pt
-shard commit -m "epoch 50" --author "Alice <alice@ml.dev>"
+# After adding or updating adapters (unchanged chunks are deduplicated)
+shard add model.safetensors
+shard commit -m "adapter update" --author "Alice <alice@ml.dev>"
 ```
 
 ---
@@ -187,9 +199,9 @@ shard hf push your-org/my-model-repo
 
 ---
 
-## Security & Enterprise Guarantees
+## Security & Durability
 
-Shard v2.4.1 is engineered for verifiable, defense-in-depth ML artifact workflows:
+Shard v2.5.0 is engineered for verifiable, defense-in-depth ML artifact workflows:
 
 - **Cryptographic Provenance & Trust Anchors**: Every commit and manifest is canonicalized and signed with Ed25519. `shard verify` enforces trust-anchor membership (local keychain + `authorized_keys`), key rotation validity windows, Blake3 content hashes, and manifest Merkle roots (rejecting unsigned commits unless `--allow-unsigned` is explicitly passed).
 - **Authenticated Encryption at Rest (`SHRD` v1)**: Private repositories (`shard init --private`) encrypt each chunk inside an 8-byte self-describing `SHRD` v1 envelope using AES-256-GCM with `chunk_id` bound as Associated Authenticated Data (AAD), preventing cross-chunk swapping. Secret keys are encrypted with Argon2id + AES-256-GCM, persisted atomically with `0o600` permissions, and zeroized in memory (`zeroize`).
@@ -206,7 +218,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model, cryptographic primitiv
 
 | Command | What it does | Key flags |
 | :--- | :--- | :--- |
-| `init` | Initialize a repository | `--private`, `--db flat\|sled\|sqlite`, `--compression zstd\|zlib\|none`, `--chunker fixed\|rabin`, `--chunk-size <bytes>`, `--passphrase`, `--json` |
+| `init` | Initialize a repository | `--private`, `--db flat\|sled\|sqlite`, `--compression zstd\|zlib\|none`, `--chunker fixed\|fastcdc`, `--chunk-size <bytes>`, `--passphrase`, `--json` |
 | `add <path>` | Stage files or directories for commit | `--json` (recursive for directories; honors `.shardignore`) |
 | `commit` | Create an Ed25519-signed commit | `-m <msg>`, `--author <name>`, `--json` |
 | `log` | Show commit history | `--json` |
@@ -252,7 +264,7 @@ Before a peer can push, add its public key on the receiving repo with `shard key
 
 ---
 
-## Enterprise Features
+## Operations & Configuration
 
 ### Configuration System
 
@@ -262,7 +274,7 @@ Shard supports layered configuration with `SHARD_*` environment variable overrid
 # Persist in .shard/config.json
 shard config set storage_backend sqlite
 shard config set compression zstd
-shard config set chunker_mode rabin
+shard config set chunker_mode fastcdc
 
 # Environment overrides (take precedence over config.json)
 export SHARD_STORAGE_BACKEND=sqlite
@@ -270,7 +282,7 @@ export SHARD_GC_ENABLED=true
 export SHARD_RATE_LIMIT_MAX_REQUESTS=100
 ```
 
-Supported keys: `storage_backend` (`flat`/`sled`/`sqlite`), `compression` (`none`/`zstd`/`zlib`), `chunker_mode` (`fixed`/`rabin`), `chunk_size`, `rate_limit_max_requests`, `rate_limit_window_secs`, `gc_enabled`, `gc_interval_secs`, `hidden_files_enabled`.
+Supported keys: `storage_backend` (`flat`/`sled`/`sqlite`), `compression` (`none`/`zstd`/`zlib`), `chunker_mode` (`fixed`/`fastcdc`; legacy alias `rabin`), `chunk_size`, `rate_limit_max_requests`, `rate_limit_window_secs`, `gc_enabled`, `gc_interval_secs`, `hidden_files_enabled`.
 
 ### Concurrency Control
 
@@ -359,7 +371,7 @@ graph TD
 
     subgraph Core["shard-core"]
         Ops["OpQueue + .shard.lock<br/>(RW concurrency control)"]
-        Pipeline["Chunker (Fixed / Rabin)<br/>+ SHRD v1 Codec (Zstd / Zlib / AES-GCM)"]
+        Pipeline["Chunker (Fixed / FastCDC)<br/>+ SHRD v1 Codec (Zstd / Zlib / AES-GCM)"]
         DAG["Commit DAG · Manifests · Index<br/>Branch · Merge · WAL · GC"]
         Store["Store Abstraction<br/>(FlatStore default · Sled · SQLite)"]
         API["Axum HTTP API (/api/v1/*)<br/>+ HuggingFace Export"]
@@ -416,7 +428,7 @@ graph TD
 
 | Decision | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Chunking** | Fixed 4 MiB (default) or Rabin CDC (`--chunker rabin`) | Fixed for predictable I/O and peak throughput; Rabin CDC for byte-shift-resilient checkpoint dedup |
+| **Chunking** | Fixed 4 MiB (default) or FastCDC (`--chunker fastcdc`, alias `rabin`) | Fixed for predictable I/O; FastCDC (64-bit Gear hash + dual normalized masks) for shift-resilient dedup |
 | **Compression** | Zstd (default), Zlib, or None inside `SHRD` v1 envelope | Runtime selectable; self-describing per-chunk header allows safe dedup across compression changes |
 | **Hashing** | Blake3 | SIMD-accelerated cryptographic hashing for content addressing and Merkle roots |
 | **Signatures** | Ed25519 | Fast, compact 64-byte signatures with key rotation chains and trust anchors |
@@ -424,7 +436,7 @@ graph TD
 | **P2P Transport** | libp2p TCP + QUIC + Noise + Yamux | Encrypted multiplexed streams with mDNS, Kademlia, Gossipsub, Circuit Relay v2, DCUtR, and AutoNAT |
 | **Wire Format** | CBOR (request-response) + JSON (Gossipsub) | Compact binary transfer for chunks/manifests, human-inspectable pubsub announcements |
 | **Concurrency** | In-process `RwLock` + `.shard.lock` OS lock (`fs2`) | Concurrent readers, exclusive writers across threads and processes |
-| **Crash Safety** | CRC32 WAL + atomic temp-file + `fsync` + rename | Prevents torn commits, corrupt objects, and half-written checkouts |
+| **Crash Safety** | CRC32 WAL + staged transactional checkout + atomic temp-file `fsync` + rename | Prevents torn commits, corrupt objects, and partial multi-file checkouts on verification/persist errors |
 
 ---
 
@@ -433,7 +445,7 @@ graph TD
 | Feature | Git LFS | DVC | HuggingFace Hub | Shard |
 | :--- | :--- | :--- | :--- | :--- |
 | **Cloud dependency** | Required | Optional | Required | None (local-first) |
-| **Chunking strategy** | Full file | Full file | Full file | Fixed or Rabin CDC |
+| **Chunking strategy** | Full file | Full file | FastCDC (Xet) | Fixed or FastCDC |
 | **Commit signing** | GPG (optional) | No | No | Ed25519 (built-in, enforced) |
 | **Encryption at rest** | No | No | Server-side | Client-side AES-256-GCM (AAD) |
 | **Native P2P sync** | No | No | No | Yes (libp2p TCP/QUIC/Relay) |
@@ -445,12 +457,12 @@ graph TD
 ## Roadmap
 
 ### Completed
-- [x] **v1.x – v2.0**: Local VCS core (`init`, `add`, `commit`, `verify`, `log`, `checkout`, `status`, `diff`, `branch`, `merge`, `tag`, `prune`), Rabin CDC, Zstd/Zlib, Flat/Sled/SQLite stores, libp2p P2P (`share`, `sync`, `pull`, `push`, `relay`), Python bindings (`shard-py`), HTTP API (`serve`).
-- [x] **v2.4.0 Production Hardening**: Self-describing `SHRD` v1 chunk envelopes with AAD-bound AES-256-GCM, 2-step domain-separated Ed25519 P2P challenge-response auth, SSRF-safe Gossipsub auto-pull, CRC32 WAL + `.shard.lock` cross-process concurrency, SQLite WAL truncate checkpointing for `hf push`, strict `.shard/` tar confinement in `restore`, constant-time bearer auth on `/api/v1/*`, zero non-test panics, and full cross-platform CI.
+- [x] **v1.x – v2.0**: Local VCS core (`init`, `add`, `commit`, `verify`, `log`, `checkout`, `status`, `diff`, `branch`, `merge`, `tag`, `prune`), FastCDC, Zstd/Zlib, Flat/Sled/SQLite stores, libp2p P2P (`share`, `sync`, `pull`, `push`, `relay`), Python bindings (`shard-py`), HTTP API (`serve`).
+- [x] **v2.4.0 – v2.5.0 Hardening**: Self-describing `SHRD` v1 chunk envelopes with AAD-bound AES-256-GCM, 2-step domain-separated Ed25519 P2P challenge-response auth, SSRF-safe Gossipsub auto-pull, CRC32 WAL + `.shard.lock` cross-process concurrency, transactional staged multi-file checkout with rollback, FastCDC naming & empirical ML checkpoint benchmarks, strict `.shard/` tar confinement in `restore`, constant-time bearer auth on `/api/v1/*`, zero non-test panics, and full cross-platform CI.
 
 ### Upcoming
-- [ ] **v2.5 (Cloud-Hybrid & Packaging)**: Optional S3/GCS/Azure remote object-store adapters, Homebrew / Nix / Scoop packages, resumable multi-peer striped pulls, and delta packfile compaction.
-- [ ] **v3.0 (Enterprise Federation)**: Multi-region Circuit Relay v2 federation, OIDC / hardware-backed (HSM/YubiKey) commit signing, fine-grained repository RBAC, and WebRTC browser inspection client.
+- [ ] **v2.6 (Cloud-Hybrid & Packaging)**: Optional S3/GCS/Azure remote object-store adapters, Homebrew / Nix / Scoop packages, resumable multi-peer striped pulls, and delta packfile compaction.
+- [ ] **v3.0 (Federation & Hardware Keys)**: Multi-region Circuit Relay v2 federation, OIDC / hardware-backed (HSM/YubiKey) commit signing, fine-grained repository RBAC, and WebRTC browser inspection client.
 
 ---
 

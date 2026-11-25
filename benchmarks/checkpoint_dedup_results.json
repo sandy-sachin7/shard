@@ -1,0 +1,59 @@
+{
+  "size_mb": 64,
+  "results": [
+    {
+      "scenario": "Full fine-tune (100% FP32 weights updated)",
+      "chunker": "fixed",
+      "v1_mb": 64.0,
+      "v2_mb": 64.0,
+      "v1_store_mb": 59.31,
+      "v2_delta_mb": 59.31,
+      "chunk_dedup_pct": 0.0
+    },
+    {
+      "scenario": "Full fine-tune (100% FP32 weights updated)",
+      "chunker": "fastcdc",
+      "v1_mb": 64.0,
+      "v2_mb": 64.0,
+      "v1_store_mb": 59.31,
+      "v2_delta_mb": 59.31,
+      "chunk_dedup_pct": 0.0
+    },
+    {
+      "scenario": "Frozen 90% backbone + 10% updated head",
+      "chunker": "fixed",
+      "v1_mb": 64.0,
+      "v2_mb": 64.0,
+      "v1_store_mb": 59.31,
+      "v2_delta_mb": 7.42,
+      "chunk_dedup_pct": 87.5
+    },
+    {
+      "scenario": "Frozen 90% backbone + 10% updated head",
+      "chunker": "fastcdc",
+      "v1_mb": 64.0,
+      "v2_mb": 64.0,
+      "v1_store_mb": 59.31,
+      "v2_delta_mb": 6.52,
+      "chunk_dedup_pct": 89.0
+    },
+    {
+      "scenario": "1 MiB adapter prepend + frozen backbone (offset shift)",
+      "chunker": "fixed",
+      "v1_mb": 64.0,
+      "v2_mb": 65.0,
+      "v1_store_mb": 59.31,
+      "v2_delta_mb": 60.24,
+      "chunk_dedup_pct": 0.0
+    },
+    {
+      "scenario": "1 MiB adapter prepend + frozen backbone (offset shift)",
+      "chunker": "fastcdc",
+      "v1_mb": 64.0,
+      "v2_mb": 65.0,
+      "v1_store_mb": 59.31,
+      "v2_delta_mb": 26.99,
+      "chunk_dedup_pct": 54.5
+    }
+  ]
+}

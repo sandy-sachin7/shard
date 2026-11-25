@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "shard-py"
-version = "2.4.1"
+version = "2.5.0"
 description = "Python binding for Shard — the distributed VCS built for ML workflows"
 readme = "README.md"
 license = { text = "MIT" }

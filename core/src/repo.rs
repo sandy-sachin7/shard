@@ -79,9 +79,13 @@ pub fn init_with_passphrase(
             MetadataFormat::Json.config_value().to_string(),
         );
         config.insert("compression".to_string(), compression_algo.to_string());
-        config.insert("chunker_mode".to_string(), chunker_mode.to_string());
-        match chunker_mode {
-            "rabin" => {
+        let normalized_chunker = match chunker_mode {
+            "rabin" => "fastcdc",
+            other => other,
+        };
+        config.insert("chunker_mode".to_string(), normalized_chunker.to_string());
+        match normalized_chunker {
+            "fastcdc" => {
                 let cs = chunk_size.unwrap_or(4_194_304);
                 let min = (cs / 4).max(1);
                 let max = (cs * 2).min(chunker::MAX_CHUNK_SIZE as u64);
@@ -129,9 +133,9 @@ pub fn init_with_passphrase(
 
         crate::save_config(&shard_dir, &config)?;
 
-        let chunker_desc = if chunker_mode == "rabin" {
+        let chunker_desc = if normalized_chunker == "fastcdc" {
             format!(
-                "rabin (avg {} bytes)",
+                "fastcdc (avg {} bytes)",
                 config
                     .get("chunk_avg")
                     .map(|s| s.as_str())
@@ -238,8 +242,8 @@ pub(crate) fn add_file(
         chunker::ChunkerMode::Fixed { chunk_size } => {
             chunker::Chunker::new_fixed(Box::new(file), *chunk_size)
         }
-        chunker::ChunkerMode::Rabin { min, avg, max } => {
-            chunker::Chunker::new_rabin(Box::new(file), *min, *avg, *max)
+        chunker::ChunkerMode::FastCdc { min, avg, max } => {
+            chunker::Chunker::new_fastcdc(Box::new(file), *min, *avg, *max)
         }
     };
     let mut chunk_hashes = Vec::new();
@@ -1002,21 +1006,18 @@ pub fn log_cmd(path: &Path, json: bool) -> Result<()> {
 
 /// Stream a file manifest's chunks directly to `dest_path` using a `BufWriter`,
 /// verifying every chunk hash on the fly (bounded memory regardless of file size).
-pub(crate) fn stream_manifest_to_file(
+fn stage_manifest_to_temp(
     store: &Store,
     manifest: &FileManifest,
     dest_root: &Path,
     cipher: Option<&encryption::RepoCipher>,
-) -> Result<std::path::PathBuf> {
+) -> Result<(std::path::PathBuf, tempfile::NamedTempFile)> {
     let dest_path = safe_repo_join(dest_root, &manifest.name)?;
     if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let compression = manifest.compression.parse::<Compression>()?;
 
-    // Stream into a same-dir temp file first, then atomically persist over `dest_path`
-    // so interrupted checkouts/exports/pulls never leave half-written files and
-    // overwriting existing targets works atomically on both Unix and Windows.
     let parent = dest_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?;
@@ -1038,6 +1039,19 @@ pub(crate) fn stream_manifest_to_file(
         writer.flush()?;
     }
     tmp.as_file().sync_all()?;
+    Ok((dest_path, tmp))
+}
+
+pub(crate) fn stream_manifest_to_file(
+    store: &Store,
+    manifest: &FileManifest,
+    dest_root: &Path,
+    cipher: Option<&encryption::RepoCipher>,
+) -> Result<std::path::PathBuf> {
+    let (dest_path, tmp) = stage_manifest_to_temp(store, manifest, dest_root, cipher)?;
+    let parent = dest_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?;
     tmp.persist(&dest_path).map_err(|e| e.error)?;
     crate::fs_util::fsync_dir(parent);
     Ok(dest_path)
@@ -1308,7 +1322,9 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
             manifests.push(manifest);
         }
 
-        let mut files = Vec::with_capacity(manifests.len());
+        // Stage and verify every manifest into same-dir temp files BEFORE overwriting
+        // any working-tree file so missing/corrupt chunks leave the tree untouched.
+        let mut staged = Vec::with_capacity(manifests.len());
         for manifest in &manifests {
             if !json {
                 println!(
@@ -1316,11 +1332,55 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
                     manifest.name, manifest.compression
                 );
             }
-            stream_manifest_to_file(&store, manifest, path, cipher.as_ref())?;
-            if !json {
-                println!("  -> {}", manifest.name);
+            let (dest_path, tmp) = stage_manifest_to_temp(&store, manifest, path, cipher.as_ref())?;
+            staged.push((manifest.name.clone(), dest_path, tmp));
+        }
+
+        // Snapshot existing targets for rollback, then swap staged files into place.
+        let mut swapped: Vec<(std::path::PathBuf, Option<tempfile::NamedTempFile>)> =
+            Vec::with_capacity(staged.len());
+        let mut touched_dirs: HashSet<std::path::PathBuf> = HashSet::new();
+        let mut files = Vec::with_capacity(staged.len());
+
+        for (name, dest_path, tmp) in staged {
+            let parent = dest_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?
+                .to_path_buf();
+            let backup = if dest_path.exists() {
+                let bak = tempfile::Builder::new()
+                    .prefix(".shardbak.")
+                    .tempfile_in(&parent)?;
+                fs::copy(&dest_path, bak.path())?;
+                Some(bak)
+            } else {
+                None
+            };
+
+            if let Err(err) = tmp.persist(&dest_path).map_err(|e| e.error) {
+                for (prev_dest, prev_bak) in swapped.into_iter().rev() {
+                    match prev_bak {
+                        Some(bak) => {
+                            let _ = bak.persist(&prev_dest);
+                        }
+                        None => {
+                            let _ = fs::remove_file(&prev_dest);
+                        }
+                    }
+                }
+                return Err(err.into());
             }
-            files.push(manifest.name.clone());
+
+            touched_dirs.insert(parent);
+            swapped.push((dest_path, backup));
+            if !json {
+                println!("  -> {}", name);
+            }
+            files.push(name);
+        }
+
+        for dir in touched_dirs {
+            crate::fs_util::fsync_dir(&dir);
         }
 
         // Only update HEAD AFTER every file has been verified and written successfully!

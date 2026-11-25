@@ -4,9 +4,9 @@ Reproducible local benchmark for Shard on realistic ML artifacts.
 
 Measures real, non-extrapolated numbers across two distinct artifact classes:
   1. High-entropy binary weights (256 MiB pseudo-random bytes, representative of FP16/BF16/FP32 tensors)
-     + incremental update (1 MiB prepended + 5% tail modified) comparing fixed vs Rabin CDC chunking.
+     + incremental update (1 MiB prepended + 5% tail modified) comparing fixed vs FastCDC chunking.
   2. Structured ML dataset (256 MiB JSONL training records)
-     + incremental mid-dataset insertion (1 MiB inserted near start) comparing fixed vs Rabin CDC chunking.
+     + incremental mid-dataset insertion (1 MiB inserted near start) comparing fixed vs FastCDC chunking.
 
 Also measures `shard verify` and `shard checkout` throughput.
 
@@ -207,11 +207,11 @@ def main() -> None:
 
         scenarios = [
             ("weights_append_5pct", weights, mutate_append_5pct, "fixed"),
-            ("weights_append_5pct", weights, mutate_append_5pct, "rabin"),
+            ("weights_append_5pct", weights, mutate_append_5pct, "fastcdc"),
             ("weights_prepend_1mb", weights, mutate_prepend_1mb, "fixed"),
-            ("weights_prepend_1mb", weights, mutate_prepend_1mb, "rabin"),
+            ("weights_prepend_1mb", weights, mutate_prepend_1mb, "fastcdc"),
             ("jsonl_prepend_1mb", dataset, mutate_jsonl_insert_1mb_front, "fixed"),
-            ("jsonl_prepend_1mb", dataset, mutate_jsonl_insert_1mb_front, "rabin"),
+            ("jsonl_prepend_1mb", dataset, mutate_jsonl_insert_1mb_front, "fastcdc"),
         ]
 
         for label, src, mut, chunker in scenarios:

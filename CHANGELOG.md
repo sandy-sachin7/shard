@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.5.0 (2026-11-25) — Transactional Checkout, FastCDC Naming & Empirical Checkpoint Benchmarks
+
+### Added
+- **Transactional Multi-File Checkout**: `shard checkout` now stages and verifies every manifest into same-directory temp files before overwriting any working-tree file, snapshots existing targets for rollback on persist errors, fsyncs touched parent directories, and updates `HEAD` last. A corrupt or missing chunk on file N of M leaves files 1..N-1 and `HEAD` untouched.
+- **FastCDC Naming (`--chunker fastcdc`)**: Renamed the Gear-hash content-defined chunker from `RabinChunker` / `--chunker rabin` to `FastCdcChunker` / `--chunker fastcdc`, keeping `RabinChunker`, `Chunker::new_rabin`, `validate_rabin_params`, and `--chunker rabin` as backwards-compatible aliases.
+- **Empirical ML Checkpoint Deduplication Benchmark (`benchmarks/bench_checkpoints.py`)**: Measured real IEEE-754 float32 safetensors-style checkpoints across full fine-tuning (0.0% chunk dedup), frozen 90% backbone + 10% updated head (89.0% dedup), and 1 MiB adapter prepend over a frozen backbone (54.5% dedup vs 0.0% fixed), checked into `benchmarks/checkpoint_dedup_results.json`.
+- **Resilience & Property Test Suite (`tests/resilience.rs`)**: Added FastCDC roundtrip/shift-invariance property tests, `SHRD` v1 envelope bit-flip/truncation/AAD-swap rejection tests, torn/corrupt CRC32 WAL recovery tests, and multi-file transactional checkout rollback tests.
+
+### Changed
+- **Documentation Accuracy**: Replaced "Rabin CDC" with "FastCDC", removed "Enterprise" headings, updated the comparison table to note HuggingFace Hub uses FastCDC (Xet), and documented where deduplication helps (frozen backbones, adapters, offset-shifted checkpoints, datasets) vs where it does not (full fine-tune epochs).
+
 ## v2.4.1 (2026-11-25) — Dependency Security Patch
 
 - Upgraded `rusqlite` to 0.42 and `r2d2_sqlite` to 0.37, moving `libsqlite3-sys` to 0.40 and clearing `RUSTSEC-2026-0459`.

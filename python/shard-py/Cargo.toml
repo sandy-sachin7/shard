@@ -1,6 +1,6 @@
 [package]
 name = "shard-py"
-version = "2.4.1"
+version = "2.5.0"
 edition = "2021"
 description = "Native Python bindings for shard distributed VCS via PyO3"
 license = "MIT"

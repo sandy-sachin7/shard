@@ -94,7 +94,7 @@ pub fn validate_config(config: &BTreeMap<String, String>) -> Vec<String> {
     }
     if let Some(chunker) = config.get("chunker_mode") {
         match chunker.as_str() {
-            "fixed" | "rabin" => {}
+            "fixed" | "fastcdc" | "rabin" => {}
             _ => errors.push(format!("Unknown chunker_mode: {}", chunker)),
         }
     }
@@ -108,7 +108,10 @@ pub fn validate_config(config: &BTreeMap<String, String>) -> Vec<String> {
             Err(_) => errors.push(format!("Invalid chunk_size: {}", cs)),
         }
     }
-    if config.get("chunker_mode").map(|s| s.as_str()) == Some("rabin") {
+    if matches!(
+        config.get("chunker_mode").map(|s| s.as_str()),
+        Some("fastcdc") | Some("rabin")
+    ) {
         let min = config
             .get("chunk_min")
             .and_then(|s| s.parse::<usize>().ok())
@@ -121,7 +124,7 @@ pub fn validate_config(config: &BTreeMap<String, String>) -> Vec<String> {
             .get("chunk_max")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(8_388_608);
-        if let Err(e) = chunker::validate_rabin_params(min, avg, max) {
+        if let Err(e) = chunker::validate_fastcdc_params(min, avg, max) {
             errors.push(e);
         }
     }

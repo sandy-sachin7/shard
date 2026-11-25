@@ -31,7 +31,11 @@ enum Commands {
         db: String,
         #[arg(long, default_value = "zstd")]
         compression: String,
-        #[arg(long, default_value = "fixed")]
+        #[arg(
+            long,
+            default_value = "fixed",
+            help = "Chunking strategy: fixed or fastcdc (legacy alias: rabin)"
+        )]
         chunker: String,
         #[arg(long)]
         chunk_size: Option<u64>,

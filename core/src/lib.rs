@@ -1,7 +1,7 @@
 //! Core engine for **Shard** — a local-first, content-addressed, peer-to-peer
 //! version control system designed for large machine learning artifacts.
 //!
-//! `shard-core` implements chunking (fixed-size and Rabin CDC), self-describing
+//! `shard-core` implements chunking (fixed-size and FastCDC content-defined), self-describing
 //! `SHRD` v1 compression/encryption envelopes (Zstd/Zlib + AES-256-GCM with AAD),
 //! Ed25519-signed commit DAGs, branching/merging, CRC32-checksummed WAL recovery,
 //! per-repo dual read/write locking (`.shard.lock`), garbage collection, backup/restore,

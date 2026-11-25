@@ -97,7 +97,7 @@ fn gear_mask(bits: u32) -> u64 {
 /// Content-defined chunker implementing FastCDC (Gear rolling hash with normalized
 /// dual masks `mask_s` for `[min, avg)` and `mask_l` for `[avg, max]`) backed by a
 /// cursor buffer to avoid per-chunk `Vec::drain` memmoves.
-pub struct RabinChunker {
+pub struct FastCdcChunker {
     reader: Box<dyn Read + Send>,
     offset: u64,
     min_size: usize,
@@ -111,7 +111,10 @@ pub struct RabinChunker {
     eof: bool,
 }
 
-impl RabinChunker {
+/// Legacy alias for [`FastCdcChunker`].
+pub type RabinChunker = FastCdcChunker;
+
+impl FastCdcChunker {
     fn new(reader: Box<dyn Read + Send>, min: usize, avg: usize, max: usize) -> Self {
         let min_size = min.clamp(1, MAX_CHUNK_SIZE);
         let avg_size = avg.clamp(min_size, MAX_CHUNK_SIZE);
@@ -229,22 +232,23 @@ impl RabinChunker {
 
 // ── Unified chunker API ────────────────────────────────────────────────────
 
-/// Chunker mode selected at init time — either fixed-size or content-defined (FastCDC / Rabin).
+/// Chunker mode selected at init time — either fixed-size or content-defined (FastCDC).
 /// Deserialized from `.shard/config.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkerMode {
     /// Emit chunks of exactly `chunk_size` bytes.
     Fixed { chunk_size: u64 },
     /// Emit variable-size chunks via FastCDC Gear rolling hash, with min/avg/max bounds.
-    Rabin { min: u64, avg: u64, max: u64 },
+    FastCdc { min: u64, avg: u64, max: u64 },
 }
 
 impl ChunkerMode {
     /// Parse a `ChunkerMode` from the repository config JSON.
+    /// Accepts both `"fastcdc"` and legacy `"rabin"` for content-defined chunking.
     /// Defaults to `Fixed { chunk_size: 4_194_304 }` if `chunker_mode` is absent.
     pub fn from_config(config: &BTreeMap<String, String>) -> Self {
         match config.get("chunker_mode").map(|s| s.as_str()) {
-            Some("rabin") => ChunkerMode::Rabin {
+            Some("fastcdc") | Some("rabin") => ChunkerMode::FastCdc {
                 min: config
                     .get("chunk_min")
                     .and_then(|v| v.parse().ok())
@@ -268,10 +272,10 @@ impl ChunkerMode {
     }
 }
 
-/// Unified chunker interface — dispatches to either [`FixedChunker`] or [`RabinChunker`].
+/// Unified chunker interface — dispatches to either [`FixedChunker`] or [`FastCdcChunker`].
 pub enum Chunker {
     Fixed(FixedChunker),
-    Rabin(RabinChunker),
+    FastCdc(FastCdcChunker),
 }
 
 impl Chunker {
@@ -281,8 +285,8 @@ impl Chunker {
     }
 
     /// Create a new FastCDC content-defined chunker reading from `reader`.
-    pub fn new_rabin(reader: Box<dyn Read + Send>, min: u64, avg: u64, max: u64) -> Self {
-        Chunker::Rabin(RabinChunker::new(
+    pub fn new_fastcdc(reader: Box<dyn Read + Send>, min: u64, avg: u64, max: u64) -> Self {
+        Chunker::FastCdc(FastCdcChunker::new(
             reader,
             min as usize,
             avg as usize,
@@ -290,10 +294,15 @@ impl Chunker {
         ))
     }
 
+    /// Legacy alias for [`Chunker::new_fastcdc`].
+    pub fn new_rabin(reader: Box<dyn Read + Send>, min: u64, avg: u64, max: u64) -> Self {
+        Self::new_fastcdc(reader, min, avg, max)
+    }
+
     pub fn next_chunk(&mut self) -> Result<Option<Chunk>> {
         match self {
             Chunker::Fixed(c) => c.next_chunk(),
-            Chunker::Rabin(c) => c.next_chunk(),
+            Chunker::FastCdc(c) => c.next_chunk(),
         }
     }
 }
@@ -314,8 +323,8 @@ pub fn validate_chunk_size(size: usize) -> Result<(), String> {
     }
 }
 
-/// Validate CDC `(min, avg, max)` bounds: `0 < min <= avg <= max <= MAX_CHUNK_SIZE`.
-pub fn validate_rabin_params(min: usize, avg: usize, max: usize) -> Result<(), String> {
+/// Validate FastCDC `(min, avg, max)` bounds: `0 < min <= avg <= max <= MAX_CHUNK_SIZE`.
+pub fn validate_fastcdc_params(min: usize, avg: usize, max: usize) -> Result<(), String> {
     if min == 0 {
         return Err("chunk_min must be greater than 0".to_string());
     }
@@ -338,6 +347,11 @@ pub fn validate_rabin_params(min: usize, avg: usize, max: usize) -> Result<(), S
         ));
     }
     Ok(())
+}
+
+/// Legacy alias for [`validate_fastcdc_params`].
+pub fn validate_rabin_params(min: usize, avg: usize, max: usize) -> Result<(), String> {
+    validate_fastcdc_params(min, avg, max)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -530,20 +544,22 @@ mod tests {
     }
 
     #[test]
-    fn test_chunker_mode_from_config_rabin() {
-        let mut config = BTreeMap::new();
-        config.insert("chunker_mode".to_string(), "rabin".to_string());
-        config.insert("chunk_min".to_string(), "262144".to_string());
-        config.insert("chunk_avg".to_string(), "524288".to_string());
-        config.insert("chunk_max".to_string(), "1048576".to_string());
-        assert_eq!(
-            ChunkerMode::from_config(&config),
-            ChunkerMode::Rabin {
-                min: 262_144,
-                avg: 524_288,
-                max: 1_048_576
-            }
-        );
+    fn test_chunker_mode_from_config_fastcdc_and_legacy_rabin() {
+        for mode in ["fastcdc", "rabin"] {
+            let mut config = BTreeMap::new();
+            config.insert("chunker_mode".to_string(), mode.to_string());
+            config.insert("chunk_min".to_string(), "262144".to_string());
+            config.insert("chunk_avg".to_string(), "524288".to_string());
+            config.insert("chunk_max".to_string(), "1048576".to_string());
+            assert_eq!(
+                ChunkerMode::from_config(&config),
+                ChunkerMode::FastCdc {
+                    min: 262_144,
+                    avg: 524_288,
+                    max: 1_048_576
+                }
+            );
+        }
     }
 
     #[test]
