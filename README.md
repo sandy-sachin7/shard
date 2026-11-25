@@ -201,12 +201,12 @@ shard hf push your-org/my-model-repo
 
 ## Security & Durability
 
-Shard v2.5.0 is engineered for verifiable, defense-in-depth ML artifact workflows:
+Shard v2.5.1 is engineered for verifiable, defense-in-depth ML artifact workflows:
 
 - **Cryptographic Provenance & Trust Anchors**: Every commit and manifest is canonicalized and signed with Ed25519. `shard verify` enforces trust-anchor membership (local keychain + `authorized_keys`), key rotation validity windows, Blake3 content hashes, and manifest Merkle roots (rejecting unsigned commits unless `--allow-unsigned` is explicitly passed).
 - **Authenticated Encryption at Rest (`SHRD` v1)**: Private repositories (`shard init --private`) encrypt each chunk inside an 8-byte self-describing `SHRD` v1 envelope using AES-256-GCM with `chunk_id` bound as Associated Authenticated Data (AAD), preventing cross-chunk swapping. Secret keys are encrypted with Argon2id + AES-256-GCM, persisted atomically with `0o600` permissions, and zeroized in memory (`zeroize`).
 - **Authenticated P2P Protocol & SSRF Defense**: P2P writes (and reads when `authorized_keys` is configured) require a 2-step domain-separated Ed25519 challenge-response handshake (`shard-p2p-auth-v1:`) bound to both peer IDs and a 32-byte server nonce with a 30-second TTL. `shard sync` only auto-pulls from peers present in its verified `address_book` (`peers.json`, mDNS, or established dialed connections) on the repository's own topic — never dialing arbitrary multiaddrs advertised over Gossipsub.
-- **Crash Safety & Cross-Process Concurrency**: Mutations record a CRC32-checksummed Write-Ahead Log (`wal.log`) and use atomic temp-file + `fsync` + rename writes. Every repository operation acquires both an in-process read/write lock and an OS-level advisory lock on `.shard.lock` (`fs2`).
+- **Crash Safety & Cross-Process Concurrency**: Mutations record a CRC32-checksummed Write-Ahead Log (`wal.log`), `shard checkout` persists a durable fsynced checkout journal (`.shard/checkout_journal.json`) with backup-before-swap rollback and `shard recover` replay, and every write uses atomic temp-file + `fsync` + rename. Every repository operation acquires both an in-process read/write lock and an OS-level advisory lock on `.shard.lock` (`fs2`).
 - **Safe Backup, Restore & HuggingFace Export**: `shard restore` strictly confines tar archive entries inside `.shard/`, rejecting path traversal, symlinks, hard links, and special files. `shard hf push` checkpoints SQLite WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) / flushes Sled under an exclusive write lock and enforces a mandatory secret-exclusion preflight so `secret.key`, `repo.key`, `archive/`, `wal.log`, and lock files are never uploaded.
 - **Hardened HTTP API**: `shard serve` enforces constant-time bearer token authentication (`SHARD_API_TOKEN` or ephemeral CSPRNG token) on all `/api/v1/*` routes, denies cross-origin requests by default (explicit allowlist via `SHARD_API_CORS_ORIGINS`), and confines file paths strictly inside the repository root.
 
@@ -458,7 +458,7 @@ graph TD
 
 ### Completed
 - [x] **v1.x – v2.0**: Local VCS core (`init`, `add`, `commit`, `verify`, `log`, `checkout`, `status`, `diff`, `branch`, `merge`, `tag`, `prune`), FastCDC, Zstd/Zlib, Flat/Sled/SQLite stores, libp2p P2P (`share`, `sync`, `pull`, `push`, `relay`), Python bindings (`shard-py`), HTTP API (`serve`).
-- [x] **v2.4.0 – v2.5.0 Hardening**: Self-describing `SHRD` v1 chunk envelopes with AAD-bound AES-256-GCM, 2-step domain-separated Ed25519 P2P challenge-response auth, SSRF-safe Gossipsub auto-pull, CRC32 WAL + `.shard.lock` cross-process concurrency, transactional staged multi-file checkout with rollback, FastCDC naming & empirical ML checkpoint benchmarks, strict `.shard/` tar confinement in `restore`, constant-time bearer auth on `/api/v1/*`, zero non-test panics, and full cross-platform CI.
+- [x] **v2.4.0 – v2.5.1 Hardening**: Self-describing `SHRD` v1 chunk envelopes with AAD-bound AES-256-GCM, 2-step domain-separated Ed25519 P2P challenge-response auth, SSRF-safe Gossipsub auto-pull, CRC32 WAL + `.shard.lock` cross-process concurrency, durable crash-atomic checkout journal (`.shard/checkout_journal.json`) with boundary fault-injection tests and `shard recover` replay, FastCDC naming & empirical ML checkpoint benchmarks, strict `.shard/` tar confinement in `restore`, constant-time bearer auth on `/api/v1/*`, zero non-test panics, and full cross-platform CI.
 
 ### Upcoming
 - [ ] **v2.6 (Cloud-Hybrid & Packaging)**: Optional S3/GCS/Azure remote object-store adapters, Homebrew / Nix / Scoop packages, resumable multi-peer striped pulls, and delta packfile compaction.

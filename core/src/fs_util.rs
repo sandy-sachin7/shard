@@ -168,6 +168,27 @@ pub fn set_secret_permissions(path: &Path) -> Result<()> {
     shard_crypto::set_secret_permissions(path)
 }
 
+/// Replace `dst` with `src` in the same directory/filesystem.
+/// Uses an atomic POSIX `rename(2)` on Unix. On Windows, falls back to removing
+/// an existing destination before renaming (callers hold a durable journaled backup).
+pub fn replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::rename(src, dst)
+    }
+    #[cfg(not(unix))]
+    {
+        match fs::rename(src, dst) {
+            Ok(()) => Ok(()),
+            Err(_) if dst.exists() => {
+                fs::remove_file(dst)?;
+                fs::rename(src, dst)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// Best-effort fsync of a directory on Unix so renames are durable across power loss.
 pub fn fsync_dir(dir: &Path) {
     #[cfg(unix)]

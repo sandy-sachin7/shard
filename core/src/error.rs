@@ -52,6 +52,12 @@ pub enum ShardError {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
+    #[error("checkout failed ({cause}) and rollback also encountered errors: {rollback_errors}")]
+    CheckoutRollbackFailed {
+        cause: String,
+        rollback_errors: String,
+    },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

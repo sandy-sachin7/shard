@@ -143,8 +143,9 @@ pub use backup::{backup, export, import, restore};
 pub use hf::{hf_pull, hf_push};
 pub use p2p_sync::{peer_add, pull, push, relay, share, sync, transfer_list, transfer_remove};
 pub use repo::{
-    add, branch_create, branch_delete, branch_list, checkout, commit, config_get, config_set, diff,
-    get_metrics, health, init, init_with_passphrase, key_list, key_rotate, key_verify, log_cmd,
-    log_entries, merge, prune, recover, status, status_snapshot, tag_add, tag_list, verify,
-    verify_with_options, LogEntry, StatusSnapshot,
+    add, branch_create, branch_delete, branch_list, checkout, checkout_with_fault, commit,
+    config_get, config_set, diff, get_metrics, health, init, init_with_passphrase, key_list,
+    key_rotate, key_verify, log_cmd, log_entries, merge, prune, recover, recover_checkout_journal,
+    status, status_snapshot, tag_add, tag_list, verify, verify_with_options, CheckoutFault,
+    LogEntry, StatusSnapshot,
 };

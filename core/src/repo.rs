@@ -17,7 +17,7 @@ use crate::store::Store;
 use crate::wal;
 use anyhow::Result;
 use ed25519_dalek::{Signer, Verifier};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use shard_crypto::KeyPair;
 use similar::TextDiff;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -336,6 +336,7 @@ pub fn recover(path: &Path, json: bool) -> Result<()> {
             return Err(ShardError::NotARepo.into());
         }
         wal::recover(&shard_dir)?;
+        recover_checkout_journal(path, &shard_dir)?;
         if json {
             println!(
                 "{}",
@@ -486,6 +487,7 @@ pub fn add(path: &Path, file_path: &Path, json: bool) -> Result<()> {
         }
 
         wal::recover(&shard_dir)?;
+        recover_checkout_journal(path, &shard_dir)?;
 
         let config = crate::load_config(&shard_dir)?;
         let compression: Compression = config
@@ -570,6 +572,7 @@ pub fn commit(path: &Path, message: &str, author: &str, json: bool) -> Result<St
             return Err(ShardError::NotARepo.into());
         }
         wal::recover(&shard_dir)?;
+        recover_checkout_journal(path, &shard_dir)?;
         let store = Store::open(&shard_dir)?;
         commit_with_store(path, &shard_dir, &store, message, author, json)
     })
@@ -1282,7 +1285,299 @@ pub fn diff(path: &Path, commit_a: &str, commit_b: Option<&str>, json: bool) -> 
     })
 }
 
+const CHECKOUT_JOURNAL_FILE: &str = "checkout_journal.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum CheckoutPhase {
+    Swapping,
+    UpdatingHead,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckoutJournalEntry {
+    dest_rel: String,
+    staged_rel: String,
+    backup_rel: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckoutJournal {
+    tx_id: String,
+    previous_head: Option<String>,
+    target_branch: Option<String>,
+    target_commit_id: String,
+    phase: CheckoutPhase,
+    entries: Vec<CheckoutJournalEntry>,
+}
+
+/// Deterministic fault-injection points for testing crash-atomic checkout boundaries.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutFault {
+    BackupAt(usize),
+    SwapAt(usize),
+    HeadUpdate,
+    CrashMidSwap(usize),
+    CrashBeforeHeadUpdate,
+    CorruptBackupBeforeSwapFail(usize),
+}
+
+fn journal_path(shard_dir: &Path) -> std::path::PathBuf {
+    shard_dir.join(CHECKOUT_JOURNAL_FILE)
+}
+
+fn write_checkout_journal(shard_dir: &Path, journal: &CheckoutJournal) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(journal)?;
+    atomic_write(&journal_path(shard_dir), &bytes)?;
+    Ok(())
+}
+
+fn remove_checkout_journal(shard_dir: &Path) -> Result<()> {
+    let jp = journal_path(shard_dir);
+    if jp.exists() {
+        fs::remove_file(&jp)?;
+        crate::fs_util::fsync_dir(shard_dir);
+    }
+    Ok(())
+}
+
+fn stage_manifest_to_durable_path(
+    store: &Store,
+    manifest: &FileManifest,
+    dest_root: &Path,
+    cipher: Option<&encryption::RepoCipher>,
+    tx_id: &str,
+    idx: usize,
+) -> Result<(std::path::PathBuf, std::path::PathBuf, String)> {
+    let dest_path = safe_repo_join(dest_root, &manifest.name)?;
+    let parent = dest_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let compression = manifest.compression.parse::<Compression>()?;
+
+    let base_name = dest_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let staged_name = format!(".{}.shardtmp.{}.{}", base_name, tx_id, idx);
+    let staged_path = parent.join(&staged_name);
+
+    let write_res: Result<()> = (|| {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&staged_path)?;
+        let mut writer = BufWriter::new(file);
+        for chunk_id in &manifest.chunks {
+            let stored = store.get_chunk(chunk_id)?;
+            let plaintext = chunk_codec::decode_chunk(chunk_id, &stored, compression, cipher)?;
+            writer.write_all(&plaintext)?;
+        }
+        writer.flush()?;
+        writer.into_inner()?.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&staged_path);
+        return Err(e);
+    }
+
+    let staged_rel = staged_path
+        .strip_prefix(dest_root)
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .map_err(|_| anyhow::anyhow!("staged path escapes repository root"))?;
+
+    Ok((dest_path, staged_path, staged_rel))
+}
+
+fn restore_file_idempotent(backup_path: &Path, dest_path: &Path) -> Result<()> {
+    if !backup_path.exists() {
+        anyhow::bail!(
+            "backup file '{}' missing during rollback of '{}'",
+            backup_path.display(),
+            dest_path.display()
+        );
+    }
+    let parent = dest_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let name = dest_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!(".{}.shardrb.", name))
+        .tempfile_in(parent)?;
+    fs::copy(backup_path, tmp.path())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(dest_path).map_err(|e| e.error)?;
+    crate::fs_util::fsync_dir(parent);
+    Ok(())
+}
+
+fn cleanup_journal_artifacts(repo_root: &Path, entries: &[CheckoutJournalEntry]) {
+    let mut dirs = HashSet::new();
+    for entry in entries {
+        if let Ok(p) = safe_repo_join(repo_root, &entry.staged_rel) {
+            if p.exists() {
+                let _ = fs::remove_file(&p);
+                if let Some(par) = p.parent() {
+                    dirs.insert(par.to_path_buf());
+                }
+            }
+        }
+        if let Some(ref bak_rel) = entry.backup_rel {
+            if let Ok(p) = safe_repo_join(repo_root, bak_rel) {
+                if p.exists() {
+                    let _ = fs::remove_file(&p);
+                    if let Some(par) = p.parent() {
+                        dirs.insert(par.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    for dir in dirs {
+        crate::fs_util::fsync_dir(&dir);
+    }
+}
+
+/// Roll back all working-tree files and `HEAD` recorded in `journal`.
+/// Uses idempotent copy-and-replace from durable backups so a crash mid-rollback
+/// can be safely replayed. Returns every rollback error rather than ignoring them.
+fn rollback_checkout_journal(
+    repo_root: &Path,
+    shard_dir: &Path,
+    journal: &CheckoutJournal,
+) -> std::result::Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    let mut touched_dirs = HashSet::new();
+
+    for entry in journal.entries.iter().rev() {
+        let dest_path = match safe_repo_join(repo_root, &entry.dest_rel) {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(format!("invalid dest '{}': {}", entry.dest_rel, e));
+                continue;
+            }
+        };
+        if let Some(par) = dest_path.parent() {
+            touched_dirs.insert(par.to_path_buf());
+        }
+
+        match &entry.backup_rel {
+            Some(bak_rel) => match safe_repo_join(repo_root, bak_rel) {
+                Ok(bak_path) => {
+                    if let Err(e) = restore_file_idempotent(&bak_path, &dest_path) {
+                        errors.push(format!("restore '{}': {}", entry.dest_rel, e));
+                    }
+                }
+                Err(e) => errors.push(format!("invalid backup '{}': {}", bak_rel, e)),
+            },
+            None => {
+                if dest_path.exists() {
+                    if let Err(e) = fs::remove_file(&dest_path) {
+                        errors.push(format!("remove '{}': {}", entry.dest_rel, e));
+                    }
+                }
+            }
+        }
+    }
+
+    let head_path = shard_dir.join("HEAD");
+    match &journal.previous_head {
+        Some(prev) => {
+            if let Err(e) = atomic_write(&head_path, prev.as_bytes()) {
+                errors.push(format!("restore HEAD: {}", e));
+            }
+        }
+        None => {
+            if head_path.exists() {
+                if let Err(e) = fs::remove_file(&head_path) {
+                    errors.push(format!("remove HEAD: {}", e));
+                }
+            }
+        }
+    }
+
+    for dir in touched_dirs {
+        crate::fs_util::fsync_dir(&dir);
+    }
+
+    if errors.is_empty() {
+        cleanup_journal_artifacts(repo_root, &journal.entries);
+        if let Err(e) = remove_checkout_journal(shard_dir) {
+            errors.push(format!("remove checkout journal: {}", e));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Recover an interrupted checkout from `.shard/checkout_journal.json`.
+/// - `CheckoutPhase::Swapping`: rolls back all files and restores the previous `HEAD`.
+/// - `CheckoutPhase::UpdatingHead`: all target files were already swapped and fsynced,
+///   so recovery rolls forward by completing the atomic `HEAD` update and cleaning up backups.
+pub fn recover_checkout_journal(repo_root: &Path, shard_dir: &Path) -> Result<bool> {
+    let jp = journal_path(shard_dir);
+    if !jp.exists() {
+        return Ok(false);
+    }
+    let raw = fs::read(&jp)?;
+    let journal: CheckoutJournal = serde_json::from_slice(&raw)?;
+
+    match journal.phase {
+        CheckoutPhase::Swapping => {
+            if let Err(rb_errs) = rollback_checkout_journal(repo_root, shard_dir, &journal) {
+                return Err(ShardError::CheckoutRollbackFailed {
+                    cause: "recovering interrupted checkout (Swapping)".to_string(),
+                    rollback_errors: rb_errs.join("; "),
+                }
+                .into());
+            }
+            warn!("Recovered interrupted checkout by rolling back working tree and HEAD");
+        }
+        CheckoutPhase::UpdatingHead => {
+            if let Some(ref b) = journal.target_branch {
+                branch::set_head_branch(shard_dir, b)?;
+            } else {
+                branch::set_head_commit(shard_dir, &journal.target_commit_id)?;
+            }
+            cleanup_journal_artifacts(repo_root, &journal.entries);
+            remove_checkout_journal(shard_dir)?;
+            warn!(
+                "Recovered interrupted checkout by completing HEAD update to {}",
+                journal.target_commit_id
+            );
+        }
+    }
+    Ok(true)
+}
+
 pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
+    checkout_with_fault(path, target, json, None)
+}
+
+#[doc(hidden)]
+pub fn checkout_with_fault(
+    path: &Path,
+    target: &str,
+    json: bool,
+    fault: Option<CheckoutFault>,
+) -> Result<()> {
     crate::metrics::METRICS
         .ops_checkout
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1291,6 +1586,9 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
         if !shard_dir.exists() {
             return Err(ShardError::NotARepo.into());
         }
+
+        // Complete or roll back any interrupted previous checkout before proceeding.
+        recover_checkout_journal(path, &shard_dir)?;
 
         let store = Store::open(&shard_dir)?;
         let cipher = auth::maybe_load_cipher(&shard_dir)?;
@@ -1306,7 +1604,7 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
             target.to_string()
         };
 
-        // Validate commit and every manifest path BEFORE touching HEAD or disk
+        // Phase 1: Validate commit, manifest hashes, and destination paths BEFORE writing.
         let commit = load_commit(&store, &commit_id)?;
         let mut manifests = Vec::with_capacity(commit.manifests.len());
         for manifest_id in &commit.manifests {
@@ -1317,78 +1615,228 @@ pub fn checkout(path: &Path, target: &str, json: bool) -> Result<()> {
                 anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
             }
             let manifest: FileManifest = metadata::deserialize(&data)?;
-            // Pre-validate every destination path to fail fast before writing anything
             let _ = safe_repo_join(path, &manifest.name)?;
             manifests.push(manifest);
         }
+        manifests.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // Stage and verify every manifest into same-dir temp files BEFORE overwriting
-        // any working-tree file so missing/corrupt chunks leave the tree untouched.
-        let mut staged = Vec::with_capacity(manifests.len());
-        for manifest in &manifests {
+        let tx_id = format!(
+            "{:x}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            std::process::id()
+        );
+
+        // Phase 2: Stage and verify every manifest to durable same-dir temp files.
+        let mut staged: Vec<(String, std::path::PathBuf, std::path::PathBuf, String)> =
+            Vec::with_capacity(manifests.len());
+        for (idx, manifest) in manifests.iter().enumerate() {
             if !json {
                 println!(
                     "Checking out file: {} (compression: {})",
                     manifest.name, manifest.compression
                 );
             }
-            let (dest_path, tmp) = stage_manifest_to_temp(&store, manifest, path, cipher.as_ref())?;
-            staged.push((manifest.name.clone(), dest_path, tmp));
+            match stage_manifest_to_durable_path(
+                &store,
+                manifest,
+                path,
+                cipher.as_ref(),
+                &tx_id,
+                idx,
+            ) {
+                Ok((dest_path, staged_path, staged_rel)) => {
+                    staged.push((manifest.name.clone(), dest_path, staged_path, staged_rel));
+                }
+                Err(e) => {
+                    for (_, _, sp, _) in staged {
+                        let _ = fs::remove_file(&sp);
+                    }
+                    return Err(e);
+                }
+            }
         }
 
-        // Snapshot existing targets for rollback, then swap staged files into place.
-        let mut swapped: Vec<(std::path::PathBuf, Option<tempfile::NamedTempFile>)> =
-            Vec::with_capacity(staged.len());
+        // Phase 3: Create durable backups for ALL existing targets BEFORE modifying ANY file.
+        let mut journal_entries: Vec<CheckoutJournalEntry> = Vec::with_capacity(staged.len());
         let mut touched_dirs: HashSet<std::path::PathBuf> = HashSet::new();
-        let mut files = Vec::with_capacity(staged.len());
+        let mut created_backups: Vec<std::path::PathBuf> = Vec::new();
 
-        for (name, dest_path, tmp) in staged {
+        for (idx, (name, dest_path, _, staged_rel)) in staged.iter().enumerate() {
             let parent = dest_path
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?
                 .to_path_buf();
-            let backup = if dest_path.exists() {
-                let bak = tempfile::Builder::new()
-                    .prefix(".shardbak.")
-                    .tempfile_in(&parent)?;
-                fs::copy(&dest_path, bak.path())?;
-                Some(bak)
+            touched_dirs.insert(parent.clone());
+
+            let backup_res: Result<Option<String>> = (|| {
+                if matches!(fault, Some(CheckoutFault::BackupAt(fi)) if fi == idx) {
+                    anyhow::bail!("injected backup failure at index {}", idx);
+                }
+                if dest_path.exists() {
+                    let base_name = dest_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file");
+                    let bak_name = format!(".{}.shardbak.{}.{}", base_name, tx_id, idx);
+                    let bak_path = parent.join(&bak_name);
+                    fs::copy(dest_path, &bak_path)?;
+                    fs::File::open(&bak_path)?.sync_all()?;
+                    created_backups.push(bak_path.clone());
+                    let bak_rel = bak_path
+                        .strip_prefix(path)
+                        .map(|p| {
+                            p.components()
+                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/")
+                        })
+                        .map_err(|_| anyhow::anyhow!("backup path escapes repository root"))?;
+                    Ok(Some(bak_rel))
+                } else {
+                    Ok(None)
+                }
+            })();
+
+            match backup_res {
+                Ok(backup_rel) => {
+                    journal_entries.push(CheckoutJournalEntry {
+                        dest_rel: name.clone(),
+                        staged_rel: staged_rel.clone(),
+                        backup_rel,
+                    });
+                }
+                Err(e) => {
+                    // Zero working-tree files have been overwritten yet; remove temp/backup files.
+                    for bp in created_backups {
+                        let _ = fs::remove_file(&bp);
+                    }
+                    for (_, _, sp, _) in &staged {
+                        let _ = fs::remove_file(sp);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        for dir in &touched_dirs {
+            crate::fs_util::fsync_dir(dir);
+        }
+
+        // Phase 4: Persist durable checkout journal BEFORE overwriting any target file.
+        let previous_head = fs::read_to_string(shard_dir.join("HEAD")).ok();
+        let mut journal = CheckoutJournal {
+            tx_id,
+            previous_head,
+            target_branch: if is_branch {
+                Some(target.to_string())
             } else {
                 None
-            };
+            },
+            target_commit_id: commit_id.clone(),
+            phase: CheckoutPhase::Swapping,
+            entries: journal_entries,
+        };
+        if let Err(e) = write_checkout_journal(&shard_dir, &journal) {
+            cleanup_journal_artifacts(path, &journal.entries);
+            return Err(e);
+        }
 
-            if let Err(err) = tmp.persist(&dest_path).map_err(|e| e.error) {
-                for (prev_dest, prev_bak) in swapped.into_iter().rev() {
-                    match prev_bak {
-                        Some(bak) => {
-                            let _ = bak.persist(&prev_dest);
-                        }
-                        None => {
-                            let _ = fs::remove_file(&prev_dest);
-                        }
+        // Phase 5: Swap all staged files into place. Any failure rolls back ALL files cleanly.
+        let mut files = Vec::with_capacity(staged.len());
+        for (idx, (name, dest_path, staged_path, _)) in staged.iter().enumerate() {
+            if matches!(fault, Some(CheckoutFault::CrashMidSwap(fi)) if fi == idx) {
+                anyhow::bail!("simulated crash mid-swap at index {}", idx);
+            }
+            if matches!(fault, Some(CheckoutFault::CorruptBackupBeforeSwapFail(fi)) if fi == idx) {
+                if let Some(ref bak_rel) = journal.entries[0].backup_rel {
+                    if let Ok(bp) = safe_repo_join(path, bak_rel) {
+                        let _ = fs::remove_file(bp);
                     }
                 }
-                return Err(err.into());
+                let cause = format!("injected swap failure at index {}", idx);
+                return match rollback_checkout_journal(path, &shard_dir, &journal) {
+                    Ok(()) => Err(anyhow::anyhow!("{}", cause)),
+                    Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
+                        cause,
+                        rollback_errors: rb_errs.join("; "),
+                    }
+                    .into()),
+                };
             }
 
-            touched_dirs.insert(parent);
-            swapped.push((dest_path, backup));
+            let swap_res: Result<()> = if matches!(fault, Some(CheckoutFault::SwapAt(fi)) if fi == idx)
+            {
+                Err(anyhow::anyhow!("injected swap failure at index {}", idx))
+            } else {
+                crate::fs_util::replace_file(staged_path, dest_path).map_err(Into::into)
+            };
+
+            if let Err(err) = swap_res {
+                let cause = err.to_string();
+                return match rollback_checkout_journal(path, &shard_dir, &journal) {
+                    Ok(()) => Err(err),
+                    Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
+                        cause,
+                        rollback_errors: rb_errs.join("; "),
+                    }
+                    .into()),
+                };
+            }
+
             if !json {
                 println!("  -> {}", name);
             }
-            files.push(name);
+            files.push(name.clone());
         }
 
-        for dir in touched_dirs {
-            crate::fs_util::fsync_dir(&dir);
+        for dir in &touched_dirs {
+            crate::fs_util::fsync_dir(dir);
         }
 
-        // Only update HEAD AFTER every file has been verified and written successfully!
-        if is_branch {
-            branch::set_head_branch(&shard_dir, target)?;
+        // Phase 6: Transition journal to UpdatingHead and commit HEAD atomically.
+        journal.phase = CheckoutPhase::UpdatingHead;
+        if let Err(err) = write_checkout_journal(&shard_dir, &journal) {
+            let cause = err.to_string();
+            return match rollback_checkout_journal(path, &shard_dir, &journal) {
+                Ok(()) => Err(err),
+                Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
+                    cause,
+                    rollback_errors: rb_errs.join("; "),
+                }
+                .into()),
+            };
+        }
+
+        if matches!(fault, Some(CheckoutFault::CrashBeforeHeadUpdate)) {
+            anyhow::bail!("simulated crash before HEAD update");
+        }
+
+        let head_res: Result<()> = if matches!(fault, Some(CheckoutFault::HeadUpdate)) {
+            Err(anyhow::anyhow!("injected HEAD update failure"))
+        } else if is_branch {
+            branch::set_head_branch(&shard_dir, target)
         } else {
-            branch::set_head_commit(&shard_dir, &commit_id)?;
+            branch::set_head_commit(&shard_dir, &commit_id)
+        };
+
+        if let Err(err) = head_res {
+            let cause = err.to_string();
+            return match rollback_checkout_journal(path, &shard_dir, &journal) {
+                Ok(()) => Err(err),
+                Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
+                    cause,
+                    rollback_errors: rb_errs.join("; "),
+                }
+                .into()),
+            };
         }
+
+        // Phase 7: Checkout succeeded durably; remove backups and journal.
+        cleanup_journal_artifacts(path, &journal.entries);
+        remove_checkout_journal(&shard_dir)?;
 
         if json {
             println!(

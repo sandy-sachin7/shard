@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.5.1 (2026-11-25) — Durable Crash-Atomic Checkout Journal
+
+### Fixed
+- **Crash-Atomic Multi-File Checkout Journal (`.shard/checkout_journal.json`)**: Separated `shard checkout` into strict phases: stage and hash-verify every manifest, back up every existing target file with `sync_all()` before mutating any working-tree file, persist an atomic fsynced checkout journal (`Swapping` -> `UpdatingHead`), swap files, commit `HEAD`, and remove backups and journal last.
+- **Explicit Rollback Error Propagation**: Failed swaps and failed `HEAD` updates roll back all previously replaced files via idempotent copy-and-replace from durable backups, restore `HEAD`, surface any rollback errors via `ShardError::CheckoutRollbackFailed`, and keep `.shard/checkout_journal.json` on disk when rollback encounters an error so `shard recover` can retry.
+- **Automatic & Explicit Crash Recovery**: `shard recover` (and subsequent write operations `add`, `commit`, `checkout`) replays `.shard/checkout_journal.json`, rolling back interrupted `Swapping` checkouts or rolling forward `UpdatingHead` checkouts cleanly.
+- **Boundary Fault-Injection Tests (`tests/resilience.rs`)**: Added deterministic tests covering backup failure on file 2, mid-swap failure after file 1 was overwritten, `HEAD`-update failure, simulated mid-swap crash recovery, simulated `UpdatingHead` crash recovery, and rollback error propagation.
+
 ## v2.5.0 (2026-11-25) — Transactional Checkout, FastCDC Naming & Empirical Checkpoint Benchmarks
 
 ### Added
