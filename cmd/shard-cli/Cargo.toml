@@ -17,8 +17,8 @@ name = "shard"
 path = "src/main.rs"
 
 [dependencies]
-shard-core = { path = "../../core", version = "2.5.1" }
-shard-crypto = { path = "../../crypto", version = "2.5.1" }
+shard-core = { path = "../../core", version = "2.5.2" }
+shard-crypto = { path = "../../crypto", version = "2.5.2" }
 tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4.5"

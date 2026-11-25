@@ -1683,7 +1683,10 @@ pub fn checkout_with_fault(
                     let bak_name = format!(".{}.shardbak.{}.{}", base_name, tx_id, idx);
                     let bak_path = parent.join(&bak_name);
                     fs::copy(dest_path, &bak_path)?;
-                    fs::File::open(&bak_path)?.sync_all()?;
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&bak_path)?
+                        .sync_all()?;
                     created_backups.push(bak_path.clone());
                     let bak_rel = bak_path
                         .strip_prefix(path)

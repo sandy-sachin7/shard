@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.2 (2026-11-25) — Windows Checkout Backup Fsync Fix
+
+### Fixed
+- **Windows Backup Durability Handle (`core/src/repo.rs`)**: Open checkout backup files with write access (`OpenOptions::new().write(true)`) before calling `sync_all()`, fixing `Access is denied (os error 5)` from Windows `FlushFileBuffers` during multi-file checkout.
+
 ## v2.5.1 (2026-11-25) — Durable Crash-Atomic Checkout Journal
 
 ### Fixed
