@@ -7,7 +7,7 @@ use crate::compression::Compression;
 use crate::config;
 use crate::encryption;
 use crate::error::ShardError;
-use crate::fs_util::{atomic_write, safe_repo_join, validate_object_id};
+use crate::fs_util::{atomic_write, safe_repo_join, validate_object_id, PinnedRepoDir};
 use crate::gc;
 use crate::index::Index;
 use crate::keychain;
@@ -1287,6 +1287,8 @@ pub fn diff(path: &Path, commit_a: &str, commit_b: Option<&str>, json: bool) -> 
 
 const CHECKOUT_JOURNAL_FILE: &str = "checkout_journal.json";
 
+const CHECKOUT_JOURNAL_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum CheckoutPhase {
     Swapping,
@@ -1298,6 +1300,10 @@ struct CheckoutJournalEntry {
     dest_rel: String,
     staged_rel: String,
     backup_rel: Option<String>,
+    #[serde(default)]
+    backup_blake3: Option<String>,
+    #[serde(default)]
+    expected_blake3: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1310,6 +1316,13 @@ struct CheckoutJournal {
     entries: Vec<CheckoutJournalEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CheckoutJournalEnvelope {
+    version: u32,
+    crc32: u32,
+    payload: String,
+}
+
 /// Deterministic fault-injection points for testing crash-atomic checkout boundaries.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1320,6 +1333,8 @@ pub enum CheckoutFault {
     CrashMidSwap(usize),
     CrashBeforeHeadUpdate,
     CorruptBackupBeforeSwapFail(usize),
+    HardCrashMidSwap(usize),
+    HardCrashBeforeHeadUpdate,
 }
 
 fn journal_path(shard_dir: &Path) -> std::path::PathBuf {
@@ -1327,9 +1342,54 @@ fn journal_path(shard_dir: &Path) -> std::path::PathBuf {
 }
 
 fn write_checkout_journal(shard_dir: &Path, journal: &CheckoutJournal) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(journal)?;
+    let payload = serde_json::to_string(journal)?;
+    let envelope = CheckoutJournalEnvelope {
+        version: CHECKOUT_JOURNAL_SCHEMA_VERSION,
+        crc32: crc32fast::hash(payload.as_bytes()),
+        payload,
+    };
+    let bytes = serde_json::to_vec_pretty(&envelope)?;
     atomic_write(&journal_path(shard_dir), &bytes)?;
     Ok(())
+}
+
+fn read_checkout_journal(shard_dir: &Path) -> Result<Option<CheckoutJournal>> {
+    let jp = journal_path(shard_dir);
+    if !jp.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read(&jp)?;
+    let envelope: CheckoutJournalEnvelope = serde_json::from_slice(&raw).map_err(|e| {
+        anyhow::anyhow!(
+            "corrupted checkout journal '{}': failed to parse CRC32 envelope ({})",
+            jp.display(),
+            e
+        )
+    })?;
+    if envelope.version != CHECKOUT_JOURNAL_SCHEMA_VERSION {
+        anyhow::bail!(
+            "unsupported checkout journal schema version {} (expected {})",
+            envelope.version,
+            CHECKOUT_JOURNAL_SCHEMA_VERSION
+        );
+    }
+    let actual_crc = crc32fast::hash(envelope.payload.as_bytes());
+    if actual_crc != envelope.crc32 {
+        anyhow::bail!(
+            "corrupted checkout journal '{}': CRC32 mismatch (expected {:08x}, got {:08x})",
+            jp.display(),
+            envelope.crc32,
+            actual_crc
+        );
+    }
+    let journal: CheckoutJournal = serde_json::from_str(&envelope.payload).map_err(|e| {
+        anyhow::anyhow!(
+            "corrupted checkout journal '{}': invalid payload JSON ({})",
+            jp.display(),
+            e
+        )
+    })?;
+    Ok(Some(journal))
 }
 
 fn remove_checkout_journal(shard_dir: &Path) -> Result<()> {
@@ -1341,153 +1401,146 @@ fn remove_checkout_journal(shard_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn sibling_rel_path(dest_rel: &str, sibling_name: &str) -> Result<String> {
+    let parts = crate::fs_util::validate_relative_components(dest_rel)?;
+    let mut out: Vec<String> = parts[..parts.len() - 1]
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    out.push(sibling_name.to_string());
+    Ok(out.join("/"))
+}
+
+fn leaf_name(dest_rel: &str) -> String {
+    Path::new(dest_rel)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string()
+}
+
 fn stage_manifest_to_durable_path(
     store: &Store,
     manifest: &FileManifest,
-    dest_root: &Path,
+    pinned: &PinnedRepoDir,
     cipher: Option<&encryption::RepoCipher>,
     tx_id: &str,
     idx: usize,
-) -> Result<(std::path::PathBuf, std::path::PathBuf, String)> {
-    let dest_path = safe_repo_join(dest_root, &manifest.name)?;
-    let parent = dest_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?;
-    fs::create_dir_all(parent)?;
+) -> Result<(String, String)> {
+    let _ = crate::fs_util::validate_relative_components(&manifest.name)?;
     let compression = manifest.compression.parse::<Compression>()?;
 
-    let base_name = dest_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
-    let staged_name = format!(".{}.shardtmp.{}.{}", base_name, tx_id, idx);
-    let staged_path = parent.join(&staged_name);
+    let staged_name = format!(".{}.shardtmp.{}.{}", leaf_name(&manifest.name), tx_id, idx);
+    let staged_rel = sibling_rel_path(&manifest.name, &staged_name)?;
 
-    let write_res: Result<()> = (|| {
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&staged_path)?;
+    let write_res: Result<String> = (|| {
+        let file = pinned.create_new(&staged_rel)?;
         let mut writer = BufWriter::new(file);
+        let mut hasher = blake3::Hasher::new();
         for chunk_id in &manifest.chunks {
             let stored = store.get_chunk(chunk_id)?;
             let plaintext = chunk_codec::decode_chunk(chunk_id, &stored, compression, cipher)?;
+            hasher.update(&plaintext);
             writer.write_all(&plaintext)?;
         }
         writer.flush()?;
         writer.into_inner()?.sync_all()?;
-        Ok(())
+        pinned.fsync_parent(&staged_rel)?;
+        Ok(hasher.finalize().to_hex().to_string())
     })();
 
-    if let Err(e) = write_res {
-        let _ = fs::remove_file(&staged_path);
-        return Err(e);
+    match write_res {
+        Ok(expected_blake3) => Ok((staged_rel, expected_blake3)),
+        Err(e) => {
+            let _ = pinned.unlink(&staged_rel);
+            Err(e)
+        }
     }
-
-    let staged_rel = staged_path
-        .strip_prefix(dest_root)
-        .map(|p| {
-            p.components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/")
-        })
-        .map_err(|_| anyhow::anyhow!("staged path escapes repository root"))?;
-
-    Ok((dest_path, staged_path, staged_rel))
 }
 
-fn restore_file_idempotent(backup_path: &Path, dest_path: &Path) -> Result<()> {
-    if !backup_path.exists() {
+fn restore_file_idempotent(
+    pinned: &PinnedRepoDir,
+    backup_rel: &str,
+    expected_backup_blake3: Option<&str>,
+    dest_rel: &str,
+    tx_id: &str,
+    idx: usize,
+) -> Result<()> {
+    if !pinned.exists_no_follow(backup_rel)? {
         anyhow::bail!(
             "backup file '{}' missing during rollback of '{}'",
-            backup_path.display(),
-            dest_path.display()
+            backup_rel,
+            dest_rel
         );
     }
-    let parent = dest_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let name = dest_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
-    let tmp = tempfile::Builder::new()
-        .prefix(&format!(".{}.shardrb.", name))
-        .tempfile_in(parent)?;
-    fs::copy(backup_path, tmp.path())?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(dest_path).map_err(|e| e.error)?;
-    crate::fs_util::fsync_dir(parent);
+    let rb_name = format!(".{}.shardrb.{}.{}", leaf_name(dest_rel), tx_id, idx);
+    let rb_rel = sibling_rel_path(dest_rel, &rb_name)?;
+    // Clean up any leftover rollback temp from an earlier interrupted rollback attempt.
+    let _ = pinned.unlink(&rb_rel);
+
+    let actual_hash = match pinned.copy_durable(backup_rel, &rb_rel) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = pinned.unlink(&rb_rel);
+            return Err(e);
+        }
+    };
+
+    if let Some(expected) = expected_backup_blake3 {
+        if actual_hash != expected {
+            let _ = pinned.unlink(&rb_rel);
+            anyhow::bail!(
+                "backup integrity mismatch for '{}' (expected blake3 {}, got {})",
+                backup_rel,
+                expected,
+                actual_hash
+            );
+        }
+    }
+
+    if let Err(e) = pinned.replace_file(&rb_rel, dest_rel) {
+        let _ = pinned.unlink(&rb_rel);
+        return Err(e);
+    }
     Ok(())
 }
 
-fn cleanup_journal_artifacts(repo_root: &Path, entries: &[CheckoutJournalEntry]) {
-    let mut dirs = HashSet::new();
+fn cleanup_journal_artifacts(pinned: &PinnedRepoDir, entries: &[CheckoutJournalEntry]) {
     for entry in entries {
-        if let Ok(p) = safe_repo_join(repo_root, &entry.staged_rel) {
-            if p.exists() {
-                let _ = fs::remove_file(&p);
-                if let Some(par) = p.parent() {
-                    dirs.insert(par.to_path_buf());
-                }
-            }
-        }
+        let _ = pinned.unlink(&entry.staged_rel);
         if let Some(ref bak_rel) = entry.backup_rel {
-            if let Ok(p) = safe_repo_join(repo_root, bak_rel) {
-                if p.exists() {
-                    let _ = fs::remove_file(&p);
-                    if let Some(par) = p.parent() {
-                        dirs.insert(par.to_path_buf());
-                    }
-                }
-            }
+            let _ = pinned.unlink(bak_rel);
         }
-    }
-    for dir in dirs {
-        crate::fs_util::fsync_dir(&dir);
     }
 }
 
 /// Roll back all working-tree files and `HEAD` recorded in `journal`.
-/// Uses idempotent copy-and-replace from durable backups so a crash mid-rollback
-/// can be safely replayed. Returns every rollback error rather than ignoring them.
+/// Uses descriptor-pinned idempotent copy-and-replace from integrity-verified backups
+/// so a crash mid-rollback can be safely replayed. Returns every rollback error.
 fn rollback_checkout_journal(
-    repo_root: &Path,
+    pinned: &PinnedRepoDir,
     shard_dir: &Path,
     journal: &CheckoutJournal,
 ) -> std::result::Result<(), Vec<String>> {
     let mut errors = Vec::new();
-    let mut touched_dirs = HashSet::new();
 
-    for entry in journal.entries.iter().rev() {
-        let dest_path = match safe_repo_join(repo_root, &entry.dest_rel) {
-            Ok(p) => p,
-            Err(e) => {
-                errors.push(format!("invalid dest '{}': {}", entry.dest_rel, e));
-                continue;
-            }
-        };
-        if let Some(par) = dest_path.parent() {
-            touched_dirs.insert(par.to_path_buf());
-        }
-
+    for (idx, entry) in journal.entries.iter().rev().enumerate() {
         match &entry.backup_rel {
-            Some(bak_rel) => match safe_repo_join(repo_root, bak_rel) {
-                Ok(bak_path) => {
-                    if let Err(e) = restore_file_idempotent(&bak_path, &dest_path) {
-                        errors.push(format!("restore '{}': {}", entry.dest_rel, e));
-                    }
+            Some(bak_rel) => {
+                if let Err(e) = restore_file_idempotent(
+                    pinned,
+                    bak_rel,
+                    entry.backup_blake3.as_deref(),
+                    &entry.dest_rel,
+                    &journal.tx_id,
+                    idx,
+                ) {
+                    errors.push(format!("restore '{}': {}", entry.dest_rel, e));
                 }
-                Err(e) => errors.push(format!("invalid backup '{}': {}", bak_rel, e)),
-            },
+            }
             None => {
-                if dest_path.exists() {
-                    if let Err(e) = fs::remove_file(&dest_path) {
-                        errors.push(format!("remove '{}': {}", entry.dest_rel, e));
-                    }
+                if let Err(e) = pinned.unlink(&entry.dest_rel) {
+                    errors.push(format!("remove '{}': {}", entry.dest_rel, e));
                 }
             }
         }
@@ -1509,12 +1562,8 @@ fn rollback_checkout_journal(
         }
     }
 
-    for dir in touched_dirs {
-        crate::fs_util::fsync_dir(&dir);
-    }
-
     if errors.is_empty() {
-        cleanup_journal_artifacts(repo_root, &journal.entries);
+        cleanup_journal_artifacts(pinned, &journal.entries);
         if let Err(e) = remove_checkout_journal(shard_dir) {
             errors.push(format!("remove checkout journal: {}", e));
         }
@@ -1528,20 +1577,19 @@ fn rollback_checkout_journal(
 }
 
 /// Recover an interrupted checkout from `.shard/checkout_journal.json`.
-/// - `CheckoutPhase::Swapping`: rolls back all files and restores the previous `HEAD`.
+/// - Verifies CRC32 integrity of the journal envelope before acting.
+/// - `CheckoutPhase::Swapping`: rolls back all files via descriptor-pinned ops and restores `HEAD`.
 /// - `CheckoutPhase::UpdatingHead`: all target files were already swapped and fsynced,
 ///   so recovery rolls forward by completing the atomic `HEAD` update and cleaning up backups.
 pub fn recover_checkout_journal(repo_root: &Path, shard_dir: &Path) -> Result<bool> {
-    let jp = journal_path(shard_dir);
-    if !jp.exists() {
+    let Some(journal) = read_checkout_journal(shard_dir)? else {
         return Ok(false);
-    }
-    let raw = fs::read(&jp)?;
-    let journal: CheckoutJournal = serde_json::from_slice(&raw)?;
+    };
+    let pinned = PinnedRepoDir::open(repo_root)?;
 
     match journal.phase {
         CheckoutPhase::Swapping => {
-            if let Err(rb_errs) = rollback_checkout_journal(repo_root, shard_dir, &journal) {
+            if let Err(rb_errs) = rollback_checkout_journal(&pinned, shard_dir, &journal) {
                 return Err(ShardError::CheckoutRollbackFailed {
                     cause: "recovering interrupted checkout (Swapping)".to_string(),
                     rollback_errors: rb_errs.join("; "),
@@ -1556,7 +1604,7 @@ pub fn recover_checkout_journal(repo_root: &Path, shard_dir: &Path) -> Result<bo
             } else {
                 branch::set_head_commit(shard_dir, &journal.target_commit_id)?;
             }
-            cleanup_journal_artifacts(repo_root, &journal.entries);
+            cleanup_journal_artifacts(&pinned, &journal.entries);
             remove_checkout_journal(shard_dir)?;
             warn!(
                 "Recovered interrupted checkout by completing HEAD update to {}",
@@ -1604,6 +1652,8 @@ pub fn checkout_with_fault(
             target.to_string()
         };
 
+        let pinned = PinnedRepoDir::open(path)?;
+
         // Phase 1: Validate commit, manifest hashes, and destination paths BEFORE writing.
         let commit = load_commit(&store, &commit_id)?;
         let mut manifests = Vec::with_capacity(commit.manifests.len());
@@ -1615,7 +1665,9 @@ pub fn checkout_with_fault(
                 anyhow::bail!("Manifest hash mismatch: {}", manifest_id);
             }
             let manifest: FileManifest = metadata::deserialize(&data)?;
-            let _ = safe_repo_join(path, &manifest.name)?;
+            let _ = crate::fs_util::validate_relative_components(&manifest.name)?;
+            // Reject symlinks on any existing destination or parent directory up front.
+            let _ = pinned.exists_no_follow(&manifest.name)?;
             manifests.push(manifest);
         }
         manifests.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1629,9 +1681,8 @@ pub fn checkout_with_fault(
             std::process::id()
         );
 
-        // Phase 2: Stage and verify every manifest to durable same-dir temp files.
-        let mut staged: Vec<(String, std::path::PathBuf, std::path::PathBuf, String)> =
-            Vec::with_capacity(manifests.len());
+        // Phase 2: Stage and verify every manifest to durable same-dir temp files via PinnedRepoDir.
+        let mut staged: Vec<(String, String, String)> = Vec::with_capacity(manifests.len());
         for (idx, manifest) in manifests.iter().enumerate() {
             if !json {
                 println!(
@@ -1642,93 +1693,71 @@ pub fn checkout_with_fault(
             match stage_manifest_to_durable_path(
                 &store,
                 manifest,
-                path,
+                &pinned,
                 cipher.as_ref(),
                 &tx_id,
                 idx,
             ) {
-                Ok((dest_path, staged_path, staged_rel)) => {
-                    staged.push((manifest.name.clone(), dest_path, staged_path, staged_rel));
+                Ok((staged_rel, expected_blake3)) => {
+                    staged.push((manifest.name.clone(), staged_rel, expected_blake3));
                 }
                 Err(e) => {
-                    for (_, _, sp, _) in staged {
-                        let _ = fs::remove_file(&sp);
+                    for (_, sr, _) in staged {
+                        let _ = pinned.unlink(&sr);
                     }
                     return Err(e);
                 }
             }
         }
 
-        // Phase 3: Create durable backups for ALL existing targets BEFORE modifying ANY file.
+        // Phase 3: Create descriptor-pinned durable backups (with Blake3 digests) for ALL
+        // existing targets BEFORE mutating any working-tree file.
         let mut journal_entries: Vec<CheckoutJournalEntry> = Vec::with_capacity(staged.len());
-        let mut touched_dirs: HashSet<std::path::PathBuf> = HashSet::new();
-        let mut created_backups: Vec<std::path::PathBuf> = Vec::new();
+        let mut created_backups: Vec<String> = Vec::new();
 
-        for (idx, (name, dest_path, _, staged_rel)) in staged.iter().enumerate() {
-            let parent = dest_path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("destination path has no parent"))?
-                .to_path_buf();
-            touched_dirs.insert(parent.clone());
-
-            let backup_res: Result<Option<String>> = (|| {
+        for (idx, (dest_rel, staged_rel, expected_blake3)) in staged.iter().enumerate() {
+            let backup_res: Result<Option<(String, String)>> = (|| {
                 if matches!(fault, Some(CheckoutFault::BackupAt(fi)) if fi == idx) {
                     anyhow::bail!("injected backup failure at index {}", idx);
                 }
-                if dest_path.exists() {
-                    let base_name = dest_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("file");
-                    let bak_name = format!(".{}.shardbak.{}.{}", base_name, tx_id, idx);
-                    let bak_path = parent.join(&bak_name);
-                    fs::copy(dest_path, &bak_path)?;
-                    fs::OpenOptions::new()
-                        .write(true)
-                        .open(&bak_path)?
-                        .sync_all()?;
-                    created_backups.push(bak_path.clone());
-                    let bak_rel = bak_path
-                        .strip_prefix(path)
-                        .map(|p| {
-                            p.components()
-                                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                                .collect::<Vec<_>>()
-                                .join("/")
-                        })
-                        .map_err(|_| anyhow::anyhow!("backup path escapes repository root"))?;
-                    Ok(Some(bak_rel))
+                if pinned.exists_no_follow(dest_rel)? {
+                    let bak_name = format!(".{}.shardbak.{}.{}", leaf_name(dest_rel), tx_id, idx);
+                    let bak_rel = sibling_rel_path(dest_rel, &bak_name)?;
+                    let bak_hash = pinned.copy_durable(dest_rel, &bak_rel)?;
+                    created_backups.push(bak_rel.clone());
+                    Ok(Some((bak_rel, bak_hash)))
                 } else {
                     Ok(None)
                 }
             })();
 
             match backup_res {
-                Ok(backup_rel) => {
+                Ok(backup_opt) => {
+                    let (backup_rel, backup_blake3) = match backup_opt {
+                        Some((r, h)) => (Some(r), Some(h)),
+                        None => (None, None),
+                    };
                     journal_entries.push(CheckoutJournalEntry {
-                        dest_rel: name.clone(),
+                        dest_rel: dest_rel.clone(),
                         staged_rel: staged_rel.clone(),
                         backup_rel,
+                        backup_blake3,
+                        expected_blake3: Some(expected_blake3.clone()),
                     });
                 }
                 Err(e) => {
-                    // Zero working-tree files have been overwritten yet; remove temp/backup files.
                     for bp in created_backups {
-                        let _ = fs::remove_file(&bp);
+                        let _ = pinned.unlink(&bp);
                     }
-                    for (_, _, sp, _) in &staged {
-                        let _ = fs::remove_file(sp);
+                    for (_, sr, _) in &staged {
+                        let _ = pinned.unlink(sr);
                     }
                     return Err(e);
                 }
             }
         }
 
-        for dir in &touched_dirs {
-            crate::fs_util::fsync_dir(dir);
-        }
-
-        // Phase 4: Persist durable checkout journal BEFORE overwriting any target file.
+        // Phase 4: Persist CRC32-checked durable checkout journal BEFORE overwriting any target file.
         let previous_head = fs::read_to_string(shard_dir.join("HEAD")).ok();
         let mut journal = CheckoutJournal {
             tx_id,
@@ -1743,24 +1772,25 @@ pub fn checkout_with_fault(
             entries: journal_entries,
         };
         if let Err(e) = write_checkout_journal(&shard_dir, &journal) {
-            cleanup_journal_artifacts(path, &journal.entries);
+            cleanup_journal_artifacts(&pinned, &journal.entries);
             return Err(e);
         }
 
-        // Phase 5: Swap all staged files into place. Any failure rolls back ALL files cleanly.
+        // Phase 5: Swap all staged files into place via descriptor-pinned renameat + fsync.
         let mut files = Vec::with_capacity(staged.len());
-        for (idx, (name, dest_path, staged_path, _)) in staged.iter().enumerate() {
+        for (idx, (dest_rel, staged_rel, _)) in staged.iter().enumerate() {
+            if matches!(fault, Some(CheckoutFault::HardCrashMidSwap(fi)) if fi == idx) {
+                std::process::exit(137);
+            }
             if matches!(fault, Some(CheckoutFault::CrashMidSwap(fi)) if fi == idx) {
                 anyhow::bail!("simulated crash mid-swap at index {}", idx);
             }
             if matches!(fault, Some(CheckoutFault::CorruptBackupBeforeSwapFail(fi)) if fi == idx) {
                 if let Some(ref bak_rel) = journal.entries[0].backup_rel {
-                    if let Ok(bp) = safe_repo_join(path, bak_rel) {
-                        let _ = fs::remove_file(bp);
-                    }
+                    let _ = pinned.unlink(bak_rel);
                 }
                 let cause = format!("injected swap failure at index {}", idx);
-                return match rollback_checkout_journal(path, &shard_dir, &journal) {
+                return match rollback_checkout_journal(&pinned, &shard_dir, &journal) {
                     Ok(()) => Err(anyhow::anyhow!("{}", cause)),
                     Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
                         cause,
@@ -1774,12 +1804,12 @@ pub fn checkout_with_fault(
             {
                 Err(anyhow::anyhow!("injected swap failure at index {}", idx))
             } else {
-                crate::fs_util::replace_file(staged_path, dest_path).map_err(Into::into)
+                pinned.replace_file(staged_rel, dest_rel)
             };
 
             if let Err(err) = swap_res {
                 let cause = err.to_string();
-                return match rollback_checkout_journal(path, &shard_dir, &journal) {
+                return match rollback_checkout_journal(&pinned, &shard_dir, &journal) {
                     Ok(()) => Err(err),
                     Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
                         cause,
@@ -1790,20 +1820,16 @@ pub fn checkout_with_fault(
             }
 
             if !json {
-                println!("  -> {}", name);
+                println!("  -> {}", dest_rel);
             }
-            files.push(name.clone());
-        }
-
-        for dir in &touched_dirs {
-            crate::fs_util::fsync_dir(dir);
+            files.push(dest_rel.clone());
         }
 
         // Phase 6: Transition journal to UpdatingHead and commit HEAD atomically.
         journal.phase = CheckoutPhase::UpdatingHead;
         if let Err(err) = write_checkout_journal(&shard_dir, &journal) {
             let cause = err.to_string();
-            return match rollback_checkout_journal(path, &shard_dir, &journal) {
+            return match rollback_checkout_journal(&pinned, &shard_dir, &journal) {
                 Ok(()) => Err(err),
                 Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
                     cause,
@@ -1813,6 +1839,9 @@ pub fn checkout_with_fault(
             };
         }
 
+        if matches!(fault, Some(CheckoutFault::HardCrashBeforeHeadUpdate)) {
+            std::process::exit(137);
+        }
         if matches!(fault, Some(CheckoutFault::CrashBeforeHeadUpdate)) {
             anyhow::bail!("simulated crash before HEAD update");
         }
@@ -1827,7 +1856,7 @@ pub fn checkout_with_fault(
 
         if let Err(err) = head_res {
             let cause = err.to_string();
-            return match rollback_checkout_journal(path, &shard_dir, &journal) {
+            return match rollback_checkout_journal(&pinned, &shard_dir, &journal) {
                 Ok(()) => Err(err),
                 Err(rb_errs) => Err(ShardError::CheckoutRollbackFailed {
                     cause,
@@ -1838,7 +1867,7 @@ pub fn checkout_with_fault(
         }
 
         // Phase 7: Checkout succeeded durably; remove backups and journal.
-        cleanup_journal_artifacts(path, &journal.entries);
+        cleanup_journal_artifacts(&pinned, &journal.entries);
         remove_checkout_journal(&shard_dir)?;
 
         if json {

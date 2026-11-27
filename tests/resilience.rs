@@ -492,3 +492,179 @@ fn test_checkout_surfaces_rollback_errors_and_preserves_journal() {
         "journal must remain on disk when rollback fails so manual recovery can retry"
     );
 }
+
+#[test]
+fn test_checkout_journal_crc32_corruption_fails_loudly() {
+    let f = setup_two_commit_repo();
+    let repo = f.tmp.path();
+
+    let _ = shard_core::checkout_with_fault(
+        repo,
+        &f.head_v2,
+        true,
+        Some(shard_core::CheckoutFault::CrashMidSwap(1)),
+    );
+    let jp = repo.join(".shard/checkout_journal.json");
+    assert!(jp.exists());
+
+    // Tamper with a single byte inside the serialized payload so CRC32 fails.
+    let mut text = fs::read_to_string(&jp).unwrap();
+    text = text.replacen("Swapping", "SwappinX", 1);
+    fs::write(&jp, text).unwrap();
+
+    let err = shard_core::recover(repo, true).expect_err("corrupted journal must fail loudly");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("CRC32 mismatch"),
+        "expected CRC32 mismatch error, got: {msg}"
+    );
+}
+
+#[test]
+fn test_checkout_backup_bitrot_detected_by_blake3_during_recovery() {
+    let f = setup_two_commit_repo();
+    let repo = f.tmp.path();
+
+    let _ = shard_core::checkout_with_fault(
+        repo,
+        &f.head_v2,
+        true,
+        Some(shard_core::CheckoutFault::CrashMidSwap(1)),
+    );
+    assert!(repo.join(".shard/checkout_journal.json").exists());
+
+    // Locate the durable backup for a.bin and flip 1 byte to simulate silent disk corruption.
+    let mut corrupted = false;
+    for entry in fs::read_dir(repo).unwrap() {
+        let p = entry.unwrap().path();
+        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with(".a.bin.shardbak.") {
+                let mut bytes = fs::read(&p).unwrap();
+                bytes[0] ^= 0xff;
+                fs::write(&p, bytes).unwrap();
+                corrupted = true;
+            }
+        }
+    }
+    assert!(corrupted, "expected .a.bin.shardbak.* to exist");
+
+    let err = shard_core::recover(repo, true)
+        .expect_err("bit-rot in backup must be caught by Blake3 check");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("backup integrity mismatch"),
+        "expected backup integrity mismatch error, got: {msg}"
+    );
+    assert!(repo.join(".shard/checkout_journal.json").exists());
+}
+
+#[test]
+#[ignore = "helper subprocess invoked by real hard-kill crash recovery tests"]
+fn child_hard_crash_checkout() {
+    let repo = std::path::PathBuf::from(std::env::var("SHARD_CHILD_REPO").unwrap());
+    let target = std::env::var("SHARD_CHILD_TARGET").unwrap();
+    let stage = std::env::var("SHARD_CHILD_CRASH").unwrap();
+    let fault = match stage.as_str() {
+        "mid_swap" => shard_core::CheckoutFault::HardCrashMidSwap(1),
+        "before_head" => shard_core::CheckoutFault::HardCrashBeforeHeadUpdate,
+        other => panic!("unexpected SHARD_CHILD_CRASH={other}"),
+    };
+    let _ = shard_core::checkout_with_fault(&repo, &target, true, Some(fault));
+}
+
+#[test]
+fn test_checkout_real_process_hard_kill_mid_swap_recovers_cleanly() {
+    let f = setup_two_commit_repo();
+    let repo = f.tmp.path();
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_hard_crash_checkout", "--ignored"])
+        .env("SHARD_CHILD_REPO", repo)
+        .env("SHARD_CHILD_TARGET", &f.head_v2)
+        .env("SHARD_CHILD_CRASH", "mid_swap")
+        .status()
+        .expect("failed to spawn child process");
+    assert_eq!(status.code(), Some(137), "child must hard-exit with 137");
+
+    // Process died mid-swap without running any Drop destructors.
+    assert_eq!(fs::read(repo.join("a.bin")).unwrap(), f.a_v2);
+    assert!(repo.join(".shard/checkout_journal.json").exists());
+
+    // A fresh process recovers cleanly back to v1.
+    shard_core::recover(repo, true).unwrap();
+    assert_eq!(fs::read(repo.join("a.bin")).unwrap(), f.a_v1);
+    assert_eq!(fs::read(repo.join("b.bin")).unwrap(), f.b_v1);
+    assert!(!repo.join("c.bin").exists());
+    assert!(!repo.join(".shard/checkout_journal.json").exists());
+    assert!(fs::read_to_string(repo.join(".shard/HEAD"))
+        .unwrap()
+        .contains(&f.head_v1));
+}
+
+#[test]
+fn test_checkout_real_process_hard_kill_before_head_rolls_forward() {
+    let f = setup_two_commit_repo();
+    let repo = f.tmp.path();
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_hard_crash_checkout", "--ignored"])
+        .env("SHARD_CHILD_REPO", repo)
+        .env("SHARD_CHILD_TARGET", &f.head_v2)
+        .env("SHARD_CHILD_CRASH", "before_head")
+        .status()
+        .expect("failed to spawn child process");
+    assert_eq!(status.code(), Some(137), "child must hard-exit with 137");
+
+    assert!(repo.join(".shard/checkout_journal.json").exists());
+    assert!(fs::read_to_string(repo.join(".shard/HEAD"))
+        .unwrap()
+        .contains(&f.head_v1));
+
+    // Fresh process rolls forward cleanly to v2.
+    shard_core::recover(repo, true).unwrap();
+    assert_eq!(fs::read(repo.join("a.bin")).unwrap(), f.a_v2);
+    assert_eq!(fs::read(repo.join("b.bin")).unwrap(), f.b_v2);
+    assert_eq!(fs::read(repo.join("c.bin")).unwrap(), f.c_v2);
+    assert!(!repo.join(".shard/checkout_journal.json").exists());
+    assert!(fs::read_to_string(repo.join(".shard/HEAD"))
+        .unwrap()
+        .contains(&f.head_v2));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_pinned_repo_dir_and_checkout_reject_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let f = setup_two_commit_repo();
+    let repo = f.tmp.path();
+    let outside = TempDir::new().unwrap();
+    let outside_secret = outside.path().join("secret.txt");
+    fs::write(&outside_secret, b"DO NOT OVERWRITE").unwrap();
+
+    // 1. Direct PinnedRepoDir symlink refusal (leaf symlink + directory symlink).
+    let pinned = shard_core::fs_util::PinnedRepoDir::open(repo).unwrap();
+    symlink(&outside_secret, repo.join("link_leaf.bin")).unwrap();
+    assert!(pinned.exists_no_follow("link_leaf.bin").is_err());
+    assert!(pinned.open_read("link_leaf.bin").is_err());
+
+    symlink(outside.path(), repo.join("link_dir")).unwrap();
+    assert!(pinned.exists_no_follow("link_dir/secret.txt").is_err());
+    assert!(pinned.open_read("link_dir/secret.txt").is_err());
+
+    // 2. Replace a.bin with a symlink pointing outside the repo; checkout must refuse it
+    //    via O_NOFOLLOW / AT_SYMLINK_NOFOLLOW and leave the external file untouched.
+    fs::remove_file(repo.join("a.bin")).unwrap();
+    symlink(&outside_secret, repo.join("a.bin")).unwrap();
+    let err = shard_core::checkout(repo, &f.head_v2, true)
+        .expect_err("checkout must reject symlink destination");
+    assert!(
+        err.to_string().contains("symlink"),
+        "expected symlink rejection, got: {err}"
+    );
+    assert_eq!(
+        fs::read(&outside_secret).unwrap(),
+        b"DO NOT OVERWRITE",
+        "external symlink target must never be modified"
+    );
+}

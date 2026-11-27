@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.6.0 (2026-11-28) — Descriptor-Pinned Filesystem Ops & Hard-Kill Crash Recovery
+
+### Added
+- **Descriptor-Pinned Repository Filesystem (`PinnedRepoDir` in `core/src/fs_util.rs`)**: Pins the repository root with `O_DIRECTORY | O_CLOEXEC` on Unix and walks every relative path component-by-component with `openat(..., O_NOFOLLOW)`, `mkdirat`, `renameat`, `unlinkat`, and `fstatat(..., AT_SYMLINK_NOFOLLOW)` to eliminate TOCTOU symlink races during checkout staging, backup, swap, rollback, and cleanup.
+- **CRC32-Verified Checkout Journal & Blake3 Backup Verification**: Wraps `.shard/checkout_journal.json` in a versioned CRC32 envelope (`CheckoutJournalEnvelope`) and records `backup_blake3` and `expected_blake3` on every journal entry so corrupted journals and bit-rotted backups fail loudly instead of silently restoring bad data.
+- **Real Hard-Kill Subprocess & Symlink-Refusal Resilience Tests (`tests/resilience.rs`)**: Added tests spawning real OS child processes that terminate with `exit(137)` (zero Rust `Drop` destructors) mid-swap and before `HEAD` update, plus CRC32 journal corruption, backup Blake3 bit-rot, and Unix `O_NOFOLLOW` symlink-refusal tests.
+
 ## v2.5.2 (2026-11-25) — Windows Checkout Backup Fsync Fix
 
 ### Fixed
